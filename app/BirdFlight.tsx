@@ -43,11 +43,18 @@ type FlightAudio = {
   setFlight: (speed: number, altitude: number) => void;
   dispose: () => void;
 };
+type AirflowVfx = {
+  update: (dt: number, speedAmount: number, verticalSpeed: number, boosting: boolean, reducedMotion: boolean) => void;
+  dispose: () => void;
+};
 
 const clamp = THREE.MathUtils.clamp;
 const MAP_CENTER = { lat: 23.7715, lon: 90.4165 };
 const FLIGHT_EXTENT = { x: 3_000, z: 3_450 };
 const COLLISION_CELL_SIZE = 180;
+const BRAKE_SPEED = 18;
+const CRUISE_SPEED = 44;
+const BOOST_SPEED = 78;
 const AREA_LANDMARKS: AreaLandmark[] = [
   { label: "Moghbazar", shortLabel: "MOG", lat: 23.75096, lon: 90.40489, altitude: 44, heading: Math.PI },
   { label: "Tejgaon I/A", shortLabel: "TEJ", lat: 23.76535, lon: 90.40062, altitude: 58, heading: Math.PI / 2 },
@@ -110,6 +117,64 @@ function seededRandom(seed = 713) {
   return () => {
     value = (value * 16807) % 2147483647;
     return (value - 1) / 2147483646;
+  };
+}
+
+function createAirflowVfx(crow: THREE.Group): AirflowVfx {
+  const random = seededRandom(2_606);
+  const streakCount = 52;
+  const positions = new Float32Array(streakCount * 6);
+  const streaks = Array.from({ length: streakCount }, () => ({
+    x: (random() - 0.5) * 36,
+    y: (random() - 0.5) * 22,
+    z: -70 + random() * 88,
+    length: 1.2 + random() * 4.4,
+    drift: 0.78 + random() * 0.52,
+  }));
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  const material = new THREE.LineBasicMaterial({
+    color: 0xd9ffff,
+    transparent: true,
+    opacity: 0,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    toneMapped: false,
+  });
+  const lines = new THREE.LineSegments(geometry, material);
+  lines.frustumCulled = false;
+  lines.renderOrder = 20;
+  crow.add(lines);
+
+  return {
+    update(dt, speedAmount, verticalSpeed, boosting, reducedMotion) {
+      const intensity = reducedMotion ? 0 : clamp((speedAmount - 0.28) / 0.72 + (boosting ? 0.28 : 0), 0, 1);
+      lines.visible = intensity > 0.015;
+      material.opacity = intensity * 0.48;
+      const climbStretch = 1 + Math.abs(verticalSpeed) / 28;
+      for (let index = 0; index < streaks.length; index++) {
+        const streak = streaks[index];
+        streak.z += dt * (22 + speedAmount * 112) * streak.drift;
+        if (streak.z > 19) {
+          streak.z = -72 - random() * 18;
+          streak.x = (random() - 0.5) * 36;
+          streak.y = (random() - 0.5) * 22;
+        }
+        const offset = index * 6;
+        positions[offset] = streak.x;
+        positions[offset + 1] = streak.y;
+        positions[offset + 2] = streak.z;
+        positions[offset + 3] = streak.x;
+        positions[offset + 4] = streak.y - clamp(verticalSpeed / 14, -1.4, 1.4);
+        positions[offset + 5] = streak.z + streak.length * (0.7 + speedAmount * 1.8) * climbStretch;
+      }
+      geometry.attributes.position.needsUpdate = true;
+    },
+    dispose() {
+      crow.remove(lines);
+      geometry.dispose();
+      material.dispose();
+    },
   };
 }
 
@@ -1247,7 +1312,10 @@ export function BirdFlight() {
   const mountRef = useRef<HTMLDivElement>(null);
   const speedRef = useRef<HTMLSpanElement>(null);
   const altitudeRef = useRef<HTMLSpanElement>(null);
+  const verticalSpeedRef = useRef<HTMLSpanElement>(null);
   const compassRef = useRef<HTMLSpanElement>(null);
+  const flightModeRef = useRef<HTMLSpanElement>(null);
+  const flightEffectRef = useRef<HTMLDivElement>(null);
   const mapBirdRef = useRef<HTMLDivElement>(null);
   const perchPromptRef = useRef<HTMLDivElement>(null);
   const perchLabelRef = useRef<HTMLSpanElement>(null);
@@ -1269,6 +1337,7 @@ export function BirdFlight() {
     if (!mount) return;
     const flightAudio = createFlightAudio();
     audioRef.current = flightAudio;
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0xa9c9ca);
@@ -1338,6 +1407,7 @@ export function BirdFlight() {
     const spawnWorld = coordinatesToWorld(23.7595, 90.4105);
     crow.position.set(spawnWorld.x, 92, spawnWorld.y);
     scene.add(crow);
+    const airflowVfx = createAirflowVfx(crow);
     let mixer: THREE.AnimationMixer | null = null;
     let flapAction: THREE.AnimationAction | null = null;
     let glideAction: THREE.AnimationAction | null = null;
@@ -1381,14 +1451,17 @@ export function BirdFlight() {
     let yawRate = 0;
     let pitch = 0;
     let roll = 0;
-    let speed = 44;
+    let speed = CRUISE_SPEED;
+    let verticalSpeed = 0;
     let flapKick = 0;
+    let cameraKick = 0;
     let lastFrame = performance.now();
     let elapsedTime = 0;
     let diagnosticFrame = 0;
     const desiredCamera = new THREE.Vector3();
     const desiredTarget = new THREE.Vector3();
     const forward = new THREE.Vector3();
+    const horizontalForward = new THREE.Vector3();
     const previousPosition = new THREE.Vector3();
     const targetQuat = new THREE.Quaternion();
     const euler = new THREE.Euler(0, 0, 0, "YXZ");
@@ -1413,6 +1486,9 @@ export function BirdFlight() {
       }
       if (event.code === "Space" && !event.repeat && flyingRef.current && !pausedRef.current) {
         flapKick = 1;
+        cameraKick = 1;
+        verticalSpeed = Math.min(22, verticalSpeed + 8.5);
+        speed = Math.max(BRAKE_SPEED, speed - 1.6);
         flightAudio.flap();
       }
       if (event.code === "KeyE" && !event.repeat && flyingRef.current && !pausedRef.current) {
@@ -1421,8 +1497,10 @@ export function BirdFlight() {
           setResting(false);
           crow.position.y += 5;
           speed = 34;
-          pitch = 0.16;
+          verticalSpeed = 9;
+          pitch = 0.2;
           flapKick = 1;
+          cameraKick = 1;
           flightAudio.flap();
         } else if (nearestPerch) {
           restingRef.current = true;
@@ -1433,6 +1511,7 @@ export function BirdFlight() {
           pitch = 0;
           roll = 0;
           speed = 0;
+          verticalSpeed = 0;
         }
       }
     };
@@ -1460,21 +1539,47 @@ export function BirdFlight() {
       const turn = active ? (keys.has("KeyA") || keys.has("ArrowLeft") ? 1 : 0) - (keys.has("KeyD") || keys.has("ArrowRight") ? 1 : 0) : 0;
       const climb = active ? (keys.has("KeyW") || keys.has("ArrowUp") ? 1 : 0) - (keys.has("KeyS") || keys.has("ArrowDown") ? 1 : 0) : 0;
       const boost = active && (keys.has("ShiftLeft") || keys.has("ShiftRight"));
+      const braking = active && (keys.has("ControlLeft") || keys.has("ControlRight") || keys.has("KeyQ"));
 
       const targetYawRate = turn * (0.58 + speed / 180);
       yawRate = THREE.MathUtils.lerp(yawRate, targetYawRate, 1 - Math.pow(0.82, dt * 60));
       yaw += yawRate * dt;
       flapKick = Math.max(0, flapKick - dt * 1.8);
-      const targetPitch = clamp(climb * 0.25 + flapKick * 0.12, -0.27, 0.3);
+      cameraKick = Math.max(0, cameraKick - dt * 3.3);
+
+      const speedAmountBeforeThrottle = clamp((speed - BRAKE_SPEED) / (BOOST_SPEED - BRAKE_SPEED), 0, 1);
+      const targetVerticalSpeed = !active
+        ? (restingRef.current ? 0 : verticalSpeed)
+        : climb > 0
+          ? 16 + speedAmountBeforeThrottle * 7
+          : climb < 0
+            ? -19
+            : -0.65;
+      const verticalResponse = climb === 0 ? 0.72 : 2.25;
+      verticalSpeed = THREE.MathUtils.lerp(verticalSpeed, targetVerticalSpeed, 1 - Math.exp(-verticalResponse * dt));
+
+      const trajectoryPitch = Math.atan2(verticalSpeed, Math.max(speed, 1));
+      const targetPitch = clamp(trajectoryPitch * 0.78 + climb * 0.11 + flapKick * 0.1, -0.42, 0.44);
       pitch = THREE.MathUtils.lerp(pitch, targetPitch, 1 - Math.pow(0.88, dt * 60));
       const targetRoll = turn * 0.48;
       roll = THREE.MathUtils.lerp(roll, targetRoll, 1 - Math.pow(0.8, dt * 60));
-      const targetSpeed = boost ? 70 : 44 + Math.max(0, -pitch) * 30 - Math.max(0, pitch) * 10;
-      speed = THREE.MathUtils.lerp(speed, targetSpeed, 1 - Math.pow(0.96, dt * 60));
+      const diveEnergy = clamp(-verticalSpeed * 0.68, 0, 13);
+      const climbCost = clamp(verticalSpeed * 0.22, 0, 5.5);
+      const targetSpeed = !active
+        ? (restingRef.current ? 0 : speed)
+        : braking
+          ? BRAKE_SPEED
+          : (boost ? BOOST_SPEED : CRUISE_SPEED) + diveEnergy - climbCost;
+      const throttleResponse = braking ? 4.6 : boost ? 2.2 : 1.55;
+      speed = THREE.MathUtils.lerp(speed, targetSpeed, 1 - Math.exp(-throttleResponse * dt));
 
-      forward.set(-Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch));
+      horizontalForward.set(-Math.sin(yaw), 0, -Math.cos(yaw));
+      forward.set(horizontalForward.x, clamp(verticalSpeed / Math.max(speed, 1), -0.45, 0.45), horizontalForward.z).normalize();
       previousPosition.copy(crow.position);
-      if (active) crow.position.addScaledVector(forward, speed * dt);
+      if (active) {
+        crow.position.addScaledVector(horizontalForward, speed * dt);
+        crow.position.y += verticalSpeed * dt;
+      }
       let collided = false;
       if (!restingRef.current) {
         for (const building of collisionCandidates(buildingColliderGrid, crow.position.x, crow.position.z)) {
@@ -1491,10 +1596,16 @@ export function BirdFlight() {
       if (collided) {
         crow.position.copy(previousPosition);
         pitch = Math.max(pitch, 0.15);
+        verticalSpeed = Math.max(5, verticalSpeed);
+        cameraKick = 0.7;
         speed = Math.max(28, speed * 0.82);
       }
       crow.position.y = clamp(crow.position.y, 10, 390);
-      if (crow.position.y <= 10.2) pitch = Math.max(pitch, 0.16);
+      if (crow.position.y <= 10.2) {
+        pitch = Math.max(pitch, 0.16);
+        verticalSpeed = Math.max(verticalSpeed, 7);
+      }
+      if (crow.position.y >= 389.8) verticalSpeed = Math.min(verticalSpeed, -3);
       if (Math.abs(crow.position.x) > FLIGHT_EXTENT.x || Math.abs(crow.position.z) > FLIGHT_EXTENT.z) {
         const homeYaw = Math.atan2(crow.position.x, crow.position.z);
         const angleDifference = Math.atan2(Math.sin(homeYaw - yaw), Math.cos(homeYaw - yaw));
@@ -1575,18 +1686,44 @@ export function BirdFlight() {
       }
 
       if (cameraModeRef.current === "CHASE") {
-        desiredCamera.copy(crow.position).addScaledVector(forward, -18).add(new THREE.Vector3(0, 7.5, 0));
-        desiredTarget.copy(crow.position).addScaledVector(forward, 14).add(new THREE.Vector3(0, 1.5, 0));
+        const speedAmount = clamp((speed - BRAKE_SPEED) / (BOOST_SPEED - BRAKE_SPEED), 0, 1);
+        const chaseDistance = 14.5 + speedAmount * 9;
+        desiredCamera.copy(crow.position).addScaledVector(forward, -chaseDistance).add(new THREE.Vector3(0, 6.4 - cameraKick * 1.5, 0));
+        desiredTarget.copy(crow.position).addScaledVector(forward, 13 + speedAmount * 10).add(new THREE.Vector3(0, 1.4 + verticalSpeed * 0.08, 0));
       } else {
         desiredCamera.copy(crow.position).addScaledVector(forward, 3.1).add(new THREE.Vector3(0, 1.2, 0));
         desiredTarget.copy(crow.position).addScaledVector(forward, 42).add(new THREE.Vector3(0, 1, 0));
       }
+      const speedAmount = clamp((speed - BRAKE_SPEED) / (BOOST_SPEED - BRAKE_SPEED), 0, 1);
+      if (!reducedMotion) {
+        const shakeAmount = boost ? 0.16 * speedAmount : Math.max(0, speedAmount - 0.78) * 0.12;
+        desiredCamera.x += Math.sin(elapsedTime * 43) * shakeAmount;
+        desiredCamera.y += Math.sin(elapsedTime * 57 + 1.2) * shakeAmount * 0.65;
+      }
       camera.position.lerp(desiredCamera, 1 - Math.pow(0.78, dt * 60));
       cameraTarget.lerp(desiredTarget, 1 - Math.pow(0.76, dt * 60));
       camera.lookAt(cameraTarget);
+      const targetFov = reducedMotion ? 58 : 52 + speedAmount * 13 + (boost ? 5 : 0) + clamp(Math.abs(verticalSpeed) / 20, 0, 1) * 2;
+      const nextFov = THREE.MathUtils.lerp(camera.fov, targetFov, 1 - Math.exp(-3.2 * dt));
+      if (Math.abs(nextFov - camera.fov) > 0.01) {
+        camera.fov = nextFov;
+        camera.updateProjectionMatrix();
+      }
+      airflowVfx.update(dt, speedAmount, verticalSpeed, boost, reducedMotion);
 
       if (speedRef.current) speedRef.current.textContent = Math.round(speed).toString();
       if (altitudeRef.current) altitudeRef.current.textContent = Math.round(crow.position.y).toString();
+      if (verticalSpeedRef.current) verticalSpeedRef.current.textContent = `${verticalSpeed >= 0 ? "+" : ""}${verticalSpeed.toFixed(1)}`;
+      if (flightModeRef.current) {
+        const mode = braking ? "BRAKING" : boost ? "SURGE" : verticalSpeed > 4 ? "CLIMB" : verticalSpeed < -4 ? "DIVE" : speed < 30 ? "SLOW GLIDE" : "CRUISE";
+        flightModeRef.current.textContent = mode;
+        flightModeRef.current.dataset.mode = mode.toLowerCase().replace(" ", "-");
+      }
+      if (flightEffectRef.current) {
+        const effectStrength = reducedMotion ? 0 : clamp((speedAmount - 0.38) * 1.35 + Math.abs(verticalSpeed) / 55, 0, 0.72);
+        flightEffectRef.current.style.opacity = effectStrength.toFixed(3);
+        flightEffectRef.current.style.transform = `translateY(${clamp(verticalSpeed * -0.32, -7, 7)}px) scale(${1 + effectStrength * 0.025})`;
+      }
       flightAudio.setFlight(speed, crow.position.y);
       if (compassRef.current) {
         const headings = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
@@ -1624,6 +1761,7 @@ export function BirdFlight() {
       disposed = true;
       delete (window as BirdFlightWindow).__birdFlightDiagnostics;
       flightAudio.dispose();
+      airflowVfx.dispose();
       audioRef.current = null;
       cancelAnimationFrame(animation);
       window.removeEventListener("keydown", onKeyDown);
@@ -1670,6 +1808,7 @@ export function BirdFlight() {
     <main className="flight-shell">
       <div ref={mountRef} className="world" aria-label="Interactive hybrid flight map of central Dhaka" />
       <div className="atmosphere" />
+      <div ref={flightEffectRef} className="flight-dynamics" aria-hidden="true" />
 
       <header className={`topbar${flying ? " in-flight" : ""}`}>
         {!flying && <div className="brand">
@@ -1691,8 +1830,11 @@ export function BirdFlight() {
             <i />
             <div><span ref={altitudeRef}>92</span><small>METRES</small></div>
             <i />
+            <div><span ref={verticalSpeedRef}>+0.0</span><small>VERT M/S</small></div>
+            <i />
             <div><span ref={compassRef}>N</span><small>HEADING</small></div>
           </section>
+          <div className="flight-mode"><i /><span ref={flightModeRef} data-mode="cruise">CRUISE</span></div>
 
           <div className="minimap" aria-label="Mini map of Hatirjheel and central Dhaka districts">
             <span className="north">N</span>
@@ -1718,7 +1860,7 @@ export function BirdFlight() {
 
           <div className="camera-chip"><span>CAMERA</span>{cameraMode}<kbd>C</kbd></div>
           <div className="perch-legend"><i /> AREA PERCH</div>
-          <div className="flight-hint"><kbd>W / S</kbd><span>CLIMB / DIVE</span><kbd>SHIFT</kbd><span>BOOST</span></div>
+          <div className="flight-hint"><kbd>W / S</kbd><span>CLIMB / DIVE</span><kbd>CTRL / Q</kbd><span>BRAKE</span><kbd>SHIFT</kbd><span>BOOST</span></div>
           <div ref={perchPromptRef} className="perch-prompt" data-visible="false"><kbd>E</kbd><span ref={perchLabelRef}>LAND</span></div>
           {resting && <div className="resting-chip"><i /> RESTING · WATCHING DHAKA</div>}
           <div className={`map-source ${mapStatus}`}>
@@ -1734,7 +1876,7 @@ export function BirdFlight() {
           <h1>The sky<br />belongs to you.</h1>
           <p>Take wing across central Dhaka—from Karwan Bazar and Banglamotor to Banani, Gulshan, Aftabnagar, and Banasree—with Hatirjheel at its heart.</p>
           <button onClick={beginFlight} className="primary-button"><span>BEGIN FLIGHT</span><b>→</b></button>
-          <div className="quick-controls"><span><kbd>WASD</kbd> STEER</span><span><kbd>SPACE</kbd> FLAP</span><span><kbd>C</kbd> CAMERA</span></div>
+          <div className="quick-controls"><span><kbd>WASD</kbd> STEER</span><span><kbd>CTRL / Q</kbd> BRAKE</span><span><kbd>SPACE</kbd> FLAP</span><span><kbd>C</kbd> CAMERA</span></div>
         </section>
       )}
 
@@ -1746,8 +1888,9 @@ export function BirdFlight() {
           <dl>
             <div><dt>W / S</dt><dd>Climb / dive</dd></div>
             <div><dt>A / D</dt><dd>Bank left / right</dd></div>
-            <div><dt>Space</dt><dd>Flap for lift</dd></div>
-            <div><dt>Shift</dt><dd>Controlled speed boost</dd></div>
+            <div><dt>Space</dt><dd>Flap for a burst of lift</dd></div>
+            <div><dt>Ctrl / Q</dt><dd>Air-brake into a slow glide</dd></div>
+            <div><dt>Shift</dt><dd>Accelerate into a high-speed surge</dd></div>
             <div><dt>C</dt><dd>Switch camera</dd></div>
             <div><dt>P / Esc</dt><dd>Pause / resume flight</dd></div>
             <div><dt>E</dt><dd>Land / take off at a perch</dd></div>

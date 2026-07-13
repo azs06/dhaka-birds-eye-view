@@ -8,6 +8,7 @@ button { font: inherit; }
 .flight-shell { position: relative; width: 100vw; height: 100vh; overflow: hidden; isolation: isolate; }
 .world, .world canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 .atmosphere { position: absolute; inset: 0; pointer-events: none; background: radial-gradient(circle at 18% 48%, rgba(12, 30, 22, .28), transparent 46%), linear-gradient(180deg, rgba(255,221,169,.14), transparent 30%, transparent 72%, rgba(20,42,34,.2)); mix-blend-mode: multiply; }
+.flight-dynamics { position: absolute; z-index: 2; inset: -4%; pointer-events: none; opacity: 0; background: radial-gradient(circle at 50% 47%, transparent 22%, rgba(215,255,244,.045) 52%, rgba(8,30,27,.34) 100%); box-shadow: inset 0 0 120px rgba(5,25,22,.34); mix-blend-mode: screen; will-change: opacity, transform; transition: opacity .1s linear; }
 .topbar { position: absolute; z-index: 4; top: 0; left: 0; width: 100%; height: 86px; padding: 18px 30px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; background: linear-gradient(180deg, rgba(8,25,21,.8), transparent); }
 .brand { display: flex; align-items: center; gap: 12px; }
 .brand-mark { display: grid; place-items: center; width: 44px; height: 44px; color: var(--ink); background: var(--acid); font: 800 12px/1 var(--font-mono); clip-path: polygon(50% 0, 100% 23%, 91% 86%, 50% 100%, 9% 86%, 0 23%); }
@@ -38,6 +39,13 @@ kbd { display: inline-grid; min-width: 23px; height: 22px; padding: 0 5px; place
 .telemetry span { font: 500 22px var(--font-mono); }
 .telemetry small { font: 500 7px var(--font-mono); letter-spacing: .1em; opacity: .56; }
 .telemetry > i { width: 1px; height: 25px; background: rgba(241,235,216,.16); }
+.flight-mode { position: absolute; z-index: 3; left: 30px; top: 111px; display: flex; align-items: center; gap: 8px; padding: 8px 11px; border: 1px solid rgba(241,235,216,.16); background: rgba(9,27,22,.64); backdrop-filter: blur(10px); font: 600 8px var(--font-mono); letter-spacing: .15em; }
+.flight-mode i { width: 6px; height: 6px; border-radius: 50%; background: var(--acid); box-shadow: 0 0 9px rgba(216,255,98,.58); }
+.flight-mode span { min-width: 58px; color: var(--cream); }
+.flight-mode span[data-mode="climb"] { color: #c8f5ff; }
+.flight-mode span[data-mode="dive"] { color: #ffd5a2; }
+.flight-mode span[data-mode="surge"] { color: var(--acid); text-shadow: 0 0 12px rgba(216,255,98,.45); }
+.flight-mode span[data-mode="braking"], .flight-mode span[data-mode="slow-glide"] { color: #ffe7a8; }
 .minimap { position: absolute; z-index: 3; right: 28px; bottom: 30px; width: 142px; height: 142px; overflow: hidden; border-radius: 50%; border: 1px solid rgba(241,235,216,.38); background: rgba(17,43,34,.72); backdrop-filter: blur(10px); box-shadow: inset 0 0 0 6px rgba(11,30,25,.3); }
 .minimap small { position: absolute; left: 50%; bottom: 11px; transform: translateX(-50%); font: 500 7px var(--font-mono); letter-spacing: .12em; }
 .north { position: absolute; z-index: 2; top: 7px; left: 50%; transform: translateX(-50%); color: var(--acid); font: 600 8px var(--font-mono); }
@@ -85,8 +93,11 @@ kbd { display: inline-grid; min-width: 23px; height: 22px; padding: 0 5px; place
   .topbar { grid-template-columns: 1fr auto; }
   .welcome-panel { left: 28px; width: calc(100vw - 56px); }
   .welcome-panel h1 { font-size: clamp(58px, 16vw, 90px); }
-  .telemetry { bottom: 25px; left: 20px; transform: none; }
+  .telemetry { bottom: 25px; left: 14px; max-width: calc(100vw - 142px); padding: 10px 11px; transform: none; }
+  .telemetry div { min-width: 62px; }
+  .telemetry span { font-size: 16px; }
+  .flight-mode { left: 20px; top: 88px; }
   .minimap { width: 110px; height: 110px; }
 }
 
-@media (prefers-reduced-motion: reduce) { .primary-button { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .primary-button, .flight-dynamics { transition: none; } }

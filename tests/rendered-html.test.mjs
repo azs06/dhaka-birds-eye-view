@@ -53,6 +53,11 @@ test("keeps the finished flight experience free of starter preview code", async 
   }
   assert.match(component, /addProceduralDistrictTiles/);
   assert.match(component, /proceduralDistrictTiles/);
+  assert.match(component, /createAirflowVfx/);
+  assert.match(component, /const BRAKE_SPEED = 18/);
+  assert.match(component, /verticalSpeed = Math\.min\(22, verticalSpeed \+ 8\.5\)/);
+  assert.match(component, /Ctrl \/ Q/);
+  assert.match(component, /VERT M\/S/);
   assert.match(mapRoute, /south: 23\.742/);
   assert.match(mapRoute, /north: 23\.801/);
   assert.match(mapRoute, /BUILDING_CELL_SIZE = 250/);
