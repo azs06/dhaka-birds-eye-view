@@ -5,11 +5,21 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
 import { Sky } from "three/examples/jsm/objects/Sky.js";
+import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 
 type CameraMode = "CHASE" | "BIRD'S EYE";
 type BuildingCollider = { x: number; z: number; halfWidth: number; halfDepth: number; top: number };
 type Perch = { position: THREE.Vector3; label: string; heading: number };
 type WaterRibbon = THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+type MapStatus = "loading" | "live" | "fallback";
+type MapPoint = [number, number];
+type OsmMapData = {
+  source: "OpenStreetMap";
+  fetchedAt: string;
+  buildings: Array<{ id: number; points: MapPoint[]; height: number; name: string | null }>;
+  roads: Array<{ id: number; points: MapPoint[]; kind: string; name: string | null }>;
+  water: Array<{ id: number; points: MapPoint[]; area: boolean }>;
+};
 type BirdFlightWindow = Window & {
   __birdFlightDiagnostics?: () => {
     calls: number;
@@ -177,6 +187,10 @@ function createFlightAudio(): FlightAudio {
 function addCity(scene: THREE.Scene) {
   const random = seededRandom();
   const colliders: BuildingCollider[] = [];
+  const proceduralBuildings = new THREE.Group();
+  proceduralBuildings.name = "Procedural building fallback";
+  scene.add(proceduralBuildings);
+  scene.userData.proceduralBuildings = proceduralBuildings;
   const sharedBox = new RoundedBoxGeometry(1, 1, 1, 2, 0.055);
   const unitBox = new THREE.BoxGeometry(1, 1, 1);
 
@@ -406,7 +420,7 @@ function addCity(scene: THREE.Scene) {
           building.add(tank);
         }
       }
-      scene.add(building);
+      proceduralBuildings.add(building);
       colliders.push({
         x: building.position.x,
         z: building.position.z,
@@ -461,7 +475,7 @@ function addCity(scene: THREE.Scene) {
   });
   windowMesh.instanceMatrix.needsUpdate = true;
   if (windowMesh.instanceColor) windowMesh.instanceColor.needsUpdate = true;
-  scene.add(windowMesh);
+  proceduralBuildings.add(windowMesh);
 
   const treeTrunk = new THREE.CylinderGeometry(1.1, 1.65, 7.5, 6);
   const treeTop = new THREE.IcosahedronGeometry(1, 1);
@@ -583,6 +597,128 @@ function addCity(scene: THREE.Scene) {
   return colliders;
 }
 
+function polygonShape(points: MapPoint[]) {
+  const shape = new THREE.Shape();
+  points.forEach(([x, z], index) => {
+    if (index === 0) shape.moveTo(x, -z);
+    else shape.lineTo(x, -z);
+  });
+  shape.closePath();
+  return shape;
+}
+
+function mergeIntoMesh(
+  group: THREE.Group,
+  geometries: THREE.BufferGeometry[],
+  material: THREE.Material,
+  name: string,
+  shadows = false,
+) {
+  if (geometries.length === 0) return;
+  const merged = mergeGeometries(geometries, false);
+  geometries.forEach((geometry) => geometry.dispose());
+  if (!merged) return;
+  const mesh = new THREE.Mesh(merged, material);
+  mesh.name = name;
+  mesh.castShadow = shadows;
+  mesh.receiveShadow = true;
+  group.add(mesh);
+}
+
+function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData) {
+  const root = new THREE.Group();
+  root.name = "Live OpenStreetMap world";
+  const colliders: BuildingCollider[] = [];
+
+  const waterAreas: THREE.BufferGeometry[] = [];
+  const waterLines: THREE.BufferGeometry[] = [];
+  for (const feature of data.water) {
+    if (feature.area && feature.points.length >= 3) {
+      const geometry = new THREE.ShapeGeometry(polygonShape(feature.points));
+      geometry.rotateX(-Math.PI / 2);
+      geometry.translate(0, 0.68, 0);
+      waterAreas.push(geometry);
+      continue;
+    }
+    for (let index = 1; index < feature.points.length; index++) {
+      const [x1, z1] = feature.points[index - 1];
+      const [x2, z2] = feature.points[index];
+      const length = Math.hypot(x2 - x1, z2 - z1);
+      if (length < 1) continue;
+      const geometry = new THREE.BoxGeometry(length, 0.24, 8);
+      geometry.rotateY(-Math.atan2(z2 - z1, x2 - x1));
+      geometry.translate((x1 + x2) / 2, 0.74, (z1 + z2) / 2);
+      waterLines.push(geometry);
+    }
+  }
+  const waterMaterial = new THREE.MeshPhysicalMaterial({ color: 0x377f88, roughness: 0.23, clearcoat: 0.68, clearcoatRoughness: 0.28 });
+  mergeIntoMesh(root, waterAreas, waterMaterial, "OSM water areas");
+  mergeIntoMesh(root, waterLines, waterMaterial, "OSM waterways");
+
+  const roadBuckets: THREE.BufferGeometry[][] = [[], [], []];
+  const majorRoads = new Set(["motorway", "trunk", "primary", "secondary"]);
+  const localRoads = new Set(["tertiary", "residential", "unclassified", "service"]);
+  for (const road of data.roads) {
+    const bucket = majorRoads.has(road.kind) ? 0 : localRoads.has(road.kind) ? 1 : 2;
+    const width = bucket === 0 ? 13 : bucket === 1 ? 7 : 3.8;
+    for (let index = 1; index < road.points.length; index++) {
+      const [x1, z1] = road.points[index - 1];
+      const [x2, z2] = road.points[index];
+      const length = Math.hypot(x2 - x1, z2 - z1);
+      if (length < 1) continue;
+      const geometry = new THREE.BoxGeometry(length + 0.6, 0.3, width);
+      geometry.rotateY(-Math.atan2(z2 - z1, x2 - x1));
+      geometry.translate((x1 + x2) / 2, 0.92, (z1 + z2) / 2);
+      roadBuckets[bucket].push(geometry);
+    }
+  }
+  const roadMaterials = [0x3c4444, 0x4a514e, 0x5b615b].map((color) => new THREE.MeshStandardMaterial({ color, roughness: 0.94 }));
+  roadBuckets.forEach((geometries, index) => mergeIntoMesh(root, geometries, roadMaterials[index], `OSM roads ${index}`));
+
+  const buildingBuckets: THREE.BufferGeometry[][] = [[], [], [], []];
+  for (const building of data.buildings) {
+    if (building.points.length < 3) continue;
+    const geometry = new THREE.ExtrudeGeometry(polygonShape(building.points), {
+      depth: building.height,
+      bevelEnabled: false,
+      curveSegments: 1,
+    });
+    geometry.rotateX(-Math.PI / 2);
+    buildingBuckets[building.id % buildingBuckets.length].push(geometry);
+    const xs = building.points.map(([x]) => x);
+    const zs = building.points.map(([, z]) => z);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minZ = Math.min(...zs);
+    const maxZ = Math.max(...zs);
+    colliders.push({
+      x: (minX + maxX) / 2,
+      z: (minZ + maxZ) / 2,
+      halfWidth: Math.max(2, (maxX - minX) / 2),
+      halfDepth: Math.max(2, (maxZ - minZ) / 2),
+      top: building.height,
+    });
+  }
+  const buildingMaterials = [0xcdbd9f, 0xb5beb5, 0xc58e72, 0x99aa9d].map(
+    (color) => new THREE.MeshStandardMaterial({ color, roughness: 0.8, metalness: 0.02 }),
+  );
+  buildingBuckets.forEach((geometries, index) => mergeIntoMesh(root, geometries, buildingMaterials[index], `OSM buildings ${index}`, true));
+
+  if (colliders.length === 0) {
+    root.traverse((object) => {
+      if (object instanceof THREE.Mesh) {
+        object.geometry.dispose();
+        object.material.dispose();
+      }
+    });
+    return null;
+  }
+  scene.add(root);
+  const fallback = scene.userData.proceduralBuildings as THREE.Group | undefined;
+  if (fallback) fallback.visible = false;
+  return colliders;
+}
+
 export function BirdFlight() {
   const mountRef = useRef<HTMLDivElement>(null);
   const speedRef = useRef<HTMLSpanElement>(null);
@@ -602,6 +738,7 @@ export function BirdFlight() {
   const [cameraMode, setCameraMode] = useState<CameraMode>("CHASE");
   const [controlsOpen, setControlsOpen] = useState(false);
   const [soundOn, setSoundOn] = useState(false);
+  const [mapStatus, setMapStatus] = useState<MapStatus>("loading");
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -652,6 +789,22 @@ export function BirdFlight() {
     scene.add(skyFill);
 
     const buildingColliders = addCity(scene);
+    const landmarkColliders = buildingColliders.filter((collider) => collider.top >= 200);
+    void fetch("/api/osm")
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`Map request failed with ${response.status}`);
+        return await response.json() as OsmMapData;
+      })
+      .then((data) => {
+        if (disposed) return;
+        const osmColliders = addOpenStreetMapWorld(scene, data);
+        if (!osmColliders) throw new Error("OpenStreetMap response contained no usable buildings");
+        buildingColliders.splice(0, buildingColliders.length, ...osmColliders, ...landmarkColliders);
+        setMapStatus("live");
+      })
+      .catch(() => {
+        if (!disposed) setMapStatus("fallback");
+      });
 
     const crow = new THREE.Group();
     crow.name = "PlayerCrow";
@@ -978,12 +1131,12 @@ export function BirdFlight() {
       <div ref={mountRef} className="world" aria-label="Interactive stylized flight over Hatirjheel, Dhaka" />
       <div className="atmosphere" />
 
-      <header className="topbar">
-        <div className="brand">
+      <header className={`topbar${flying ? " in-flight" : ""}`}>
+        {!flying && <div className="brand">
           <span className="brand-mark">BEV</span>
           <div><strong>BIRD&apos;S EYE VIEW</strong><small>DHAKA · EARLY FLIGHT</small></div>
-        </div>
-        <div className="location"><span className="pulse" /> HATIRJHEEL, DHAKA <b>23.7498° N</b></div>
+        </div>}
+        {!flying && <div className="location"><span className="pulse" /> HATIRJHEEL, DHAKA <b>23.7498° N</b></div>}
         <div className="top-actions">
           <button className={`icon-button sound-button${soundOn ? " active" : ""}`} onClick={toggleSound} aria-label={soundOn ? "Mute ambient sound" : "Enable ambient sound"}>♫</button>
           {flying && <button className={`icon-button pause-button${paused ? " active" : ""}`} onClick={togglePause} aria-label={paused ? "Resume flight" : "Pause flight"}>{paused ? "▶" : "Ⅱ"}</button>}
@@ -993,14 +1146,6 @@ export function BirdFlight() {
 
       {flying && (
         <>
-          <aside className="mission-card">
-            <span className="eyebrow">FIRST FLIGHT</span>
-            <h2>Follow the water</h2>
-            <p>Fly east across Hatirjheel and pass beneath a bridge.</p>
-            <div className="mission-progress"><i /></div>
-            <small>EXPLORE MODE · NO TIME LIMIT</small>
-          </aside>
-
           <section className="telemetry" aria-label="Flight telemetry">
             <div><span ref={speedRef}>48</span><small>KM/H</small></div>
             <i />
@@ -1022,6 +1167,10 @@ export function BirdFlight() {
           <div className="flight-hint"><kbd>W / S</kbd><span>CLIMB / DIVE</span><kbd>SHIFT</kbd><span>BOOST</span></div>
           <div ref={perchPromptRef} className="perch-prompt" data-visible="false"><kbd>E</kbd><span ref={perchLabelRef}>LAND</span></div>
           {resting && <div className="resting-chip"><i /> RESTING · WATCHING DHAKA</div>}
+          <div className={`map-source ${mapStatus}`}>
+            <i /> {mapStatus === "live" ? "LIVE MAP · " : mapStatus === "loading" ? "LOADING MAP · " : "MAP FALLBACK · "}
+            <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">© OpenStreetMap contributors</a>
+          </div>
         </>
       )}
 

@@ -41,7 +41,12 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(component, /new THREE\.WebGLRenderer/);
   assert.match(component, /dhaka-house-crow\.glb/);
   assert.match(component, /Hatirjheel Lake/);
+  assert.match(component, /fetch\("\/api\/osm"\)/);
+  assert.match(component, /addOpenStreetMapWorld/);
+  assert.match(component, /© OpenStreetMap contributors/);
+  assert.doesNotMatch(component, /className="mission-card"/);
   assert.match(css, /\.flight-shell/);
+  assert.match(css, /\.topbar\.in-flight/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
   await assert.rejects(access(new URL("../app/_sites-preview", import.meta.url)));
 });
