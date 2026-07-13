@@ -119,7 +119,7 @@ function wingGeometry(side) {
   shape.bezierCurveTo(side * 1.05, 1.82, side * 0.4, 1.25, 0, 0.85);
   shape.closePath();
   const geometry = new THREE.ExtrudeGeometry(shape, { depth: 0.16, bevelEnabled: true, bevelSize: 0.09, bevelThickness: 0.08, bevelSegments: 3, curveSegments: 18 });
-  geometry.rotateX(-Math.PI / 2);
+  geometry.rotateX(Math.PI / 2);
   geometry.translate(0, -0.08, 0);
   geometry.computeVertexNormals();
   return geometry;
@@ -194,6 +194,13 @@ function quaternionValues(axis, angles) {
   });
 }
 
+function quaternionEulerValues(rotations) {
+  return rotations.flatMap(([x, y, z]) => {
+    const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(x, y, z, "XYZ"));
+    return [q.x, q.y, q.z, q.w];
+  });
+}
+
 const flapTimes = [0, 0.18, 0.42, 0.68, 1];
 const flap = new THREE.AnimationClip("Flap", 1, [
   new THREE.QuaternionKeyframeTrack("WingJoint.L.quaternion", flapTimes, quaternionValues(new THREE.Vector3(0, 0, 1), [0.08, -0.82, 0.08, 0.56, 0.08])),
@@ -212,11 +219,16 @@ const glide = new THREE.AnimationClip("Glide", 2.4, [
 
 const restTimes = [0, 1.5, 3];
 const rest = new THREE.AnimationClip("Rest", 3, [
-  new THREE.QuaternionKeyframeTrack("WingJoint.L.quaternion", restTimes, quaternionValues(new THREE.Vector3(0, 0, 1), [-1.12, -1.18, -1.12])),
-  new THREE.QuaternionKeyframeTrack("WingJoint.R.quaternion", restTimes, quaternionValues(new THREE.Vector3(0, 0, 1), [1.12, 1.18, 1.12])),
+  new THREE.QuaternionKeyframeTrack("WingJoint.L.quaternion", restTimes, quaternionEulerValues([
+    [0.025, 1.42, -0.045], [0.035, 1.46, -0.06], [0.025, 1.42, -0.045],
+  ])),
+  new THREE.QuaternionKeyframeTrack("WingJoint.R.quaternion", restTimes, quaternionEulerValues([
+    [0.025, -1.42, 0.045], [0.035, -1.46, 0.06], [0.025, -1.42, 0.045],
+  ])),
   new THREE.QuaternionKeyframeTrack("HeadJoint.quaternion", restTimes, quaternionValues(new THREE.Vector3(0, 1, 0), [-0.16, 0.18, -0.16])),
   new THREE.VectorKeyframeTrack("BodyJoint.position", restTimes, [0,0,0, 0,0.025,0, 0,0,0]),
-  new THREE.QuaternionKeyframeTrack("TailJoint.quaternion", restTimes, quaternionValues(new THREE.Vector3(1, 0, 0), [0.09, 0.06, 0.09])),
+  new THREE.QuaternionKeyframeTrack("BodyJoint.quaternion", restTimes, quaternionValues(new THREE.Vector3(1, 0, 0), [0.19, 0.205, 0.19])),
+  new THREE.QuaternionKeyframeTrack("TailJoint.quaternion", restTimes, quaternionValues(new THREE.Vector3(1, 0, 0), [0.13, 0.11, 0.13])),
 ]);
 
 const exporter = new GLTFExporter();

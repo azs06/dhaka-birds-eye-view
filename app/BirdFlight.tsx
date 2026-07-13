@@ -744,7 +744,7 @@ export function BirdFlight() {
         } else if (nearestPerch) {
           restingRef.current = true;
           setResting(true);
-          crow.position.copy(nearestPerch.position).add(new THREE.Vector3(0, 1.6, 0));
+          crow.position.copy(nearestPerch.position).add(new THREE.Vector3(0, 1.28, 0));
           yaw = nearestPerch.heading;
           yawRate = 0;
           pitch = 0;
