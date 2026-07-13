@@ -44,13 +44,18 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(component, /Hatirjheel Lake/);
   assert.match(component, /fetch\("\/api\/osm"\)/);
   assert.match(component, /addOpenStreetMapWorld/);
-  assert.match(component, /GREATER HATIRJHEEL/);
+  assert.match(component, /HATIRJHEEL &amp; CENTRAL DHAKA/);
   for (const area of ["Moghbazar", "Tejgaon I\/A", "Niketan", "Gulshan 1", "Badda Link Road", "Rampura Bridge"]) {
     assert.match(component, new RegExp(area));
   }
-  assert.match(mapRoute, /south: 23\.746/);
-  assert.match(mapRoute, /north: 23\.782/);
-  assert.match(mapRoute, /MAX_BUILDINGS = 1_200/);
+  for (const area of ["Karwan Bazar", "Banglamotor", "Malibagh", "Mohakhali", "Banani", "Gulshan 2", "Merul Badda", "Aftabnagar", "Banasree"]) {
+    assert.match(component, new RegExp(area));
+  }
+  assert.match(component, /addProceduralDistrictTiles/);
+  assert.match(component, /proceduralDistrictTiles/);
+  assert.match(mapRoute, /south: 23\.742/);
+  assert.match(mapRoute, /north: 23\.801/);
+  assert.match(mapRoute, /MAX_BUILDINGS = 1_600/);
   assert.match(component, /© OpenStreetMap contributors/);
   assert.doesNotMatch(component, /className="mission-card"/);
   assert.match(css, /\.flight-shell/);

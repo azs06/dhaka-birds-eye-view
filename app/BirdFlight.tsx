@@ -11,6 +11,7 @@ type CameraMode = "CHASE" | "BIRD'S EYE";
 type BuildingCollider = { x: number; z: number; halfWidth: number; halfDepth: number; top: number };
 type Perch = { position: THREE.Vector3; label: string; heading: number };
 type AreaLandmark = { label: string; shortLabel: string; lat: number; lon: number; altitude: number; heading: number };
+type ProceduralDistrictTile = { group: THREE.Group; centerX: number; centerZ: number; colliders: BuildingCollider[] };
 type WaterRibbon = THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
 type MapStatus = "loading" | "live" | "fallback";
 type MapPoint = [number, number];
@@ -28,6 +29,8 @@ type BirdFlightWindow = Window & {
     geometries: number;
     textures: number;
     objects: number;
+    proceduralTiles: number;
+    visibleTiles: number;
   };
 };
 type FlightAudio = {
@@ -41,8 +44,8 @@ type FlightAudio = {
 };
 
 const clamp = THREE.MathUtils.clamp;
-const MAP_CENTER = { lat: 23.764, lon: 90.41 };
-const FLIGHT_EXTENT = { x: 1_800, z: 2_100 };
+const MAP_CENTER = { lat: 23.7715, lon: 90.4165 };
+const FLIGHT_EXTENT = { x: 3_000, z: 3_450 };
 const AREA_LANDMARKS: AreaLandmark[] = [
   { label: "Moghbazar", shortLabel: "MOG", lat: 23.75096, lon: 90.40489, altitude: 44, heading: Math.PI },
   { label: "Tejgaon I/A", shortLabel: "TEJ", lat: 23.76535, lon: 90.40062, altitude: 58, heading: Math.PI / 2 },
@@ -50,6 +53,15 @@ const AREA_LANDMARKS: AreaLandmark[] = [
   { label: "Gulshan 1", shortLabel: "GUL", lat: 23.77512, lon: 90.41607, altitude: 78, heading: -Math.PI / 2 },
   { label: "Badda Link Road", shortLabel: "BAD", lat: 23.77157, lon: 90.42045, altitude: 46, heading: -Math.PI / 2 },
   { label: "Rampura Bridge", shortLabel: "RAM", lat: 23.76863, lon: 90.42245, altitude: 36, heading: Math.PI },
+  { label: "Karwan Bazar", shortLabel: "KAR", lat: 23.75144, lon: 90.39706, altitude: 56, heading: Math.PI / 2 },
+  { label: "Banglamotor", shortLabel: "BNG", lat: 23.74588, lon: 90.39477, altitude: 52, heading: Math.PI / 2 },
+  { label: "Malibagh", shortLabel: "MAL", lat: 23.74991, lon: 90.41326, altitude: 48, heading: Math.PI },
+  { label: "Mohakhali", shortLabel: "MOH", lat: 23.77923, lon: 90.3989, altitude: 66, heading: Math.PI / 2 },
+  { label: "Banani", shortLabel: "BAN", lat: 23.79318, lon: 90.40804, altitude: 74, heading: 0 },
+  { label: "Gulshan 2", shortLabel: "GU2", lat: 23.79483, lon: 90.41424, altitude: 86, heading: 0 },
+  { label: "Merul Badda", shortLabel: "MER", lat: 23.77166, lon: 90.42539, altitude: 44, heading: -Math.PI / 2 },
+  { label: "Aftabnagar", shortLabel: "AFT", lat: 23.76562, lon: 90.42931, altitude: 42, heading: -Math.PI / 2 },
+  { label: "Banasree", shortLabel: "BNS", lat: 23.76294, lon: 90.43415, altitude: 46, heading: Math.PI },
 ];
 
 function coordinatesToWorld(lat: number, lon: number) {
@@ -66,6 +78,221 @@ function seededRandom(seed = 713) {
     value = (value * 16807) % 2147483647;
     return (value - 1) / 2147483646;
   };
+}
+
+function coordinateRandom(tileX: number, tileZ: number) {
+  const seed = Math.abs(Math.imul(tileX + 4099, 73_856_093) ^ Math.imul(tileZ - 8191, 19_349_663)) || 1;
+  return seededRandom(seed % 2_147_483_647);
+}
+
+function pointInPolygon(x: number, z: number, points: MapPoint[]) {
+  let inside = false;
+  for (let index = 0, previous = points.length - 1; index < points.length; previous = index++) {
+    const [x1, z1] = points[index];
+    const [x2, z2] = points[previous];
+    const intersects = ((z1 > z) !== (z2 > z)) && x < ((x2 - x1) * (z - z1)) / ((z2 - z1) || Number.EPSILON) + x1;
+    if (intersects) inside = !inside;
+  }
+  return inside;
+}
+
+function distanceToSegmentSquared(x: number, z: number, x1: number, z1: number, x2: number, z2: number) {
+  const dx = x2 - x1;
+  const dz = z2 - z1;
+  const lengthSquared = dx * dx + dz * dz;
+  const amount = lengthSquared === 0 ? 0 : clamp(((x - x1) * dx + (z - z1) * dz) / lengthSquared, 0, 1);
+  const closestX = x1 + dx * amount;
+  const closestZ = z1 + dz * amount;
+  return (x - closestX) ** 2 + (z - closestZ) ** 2;
+}
+
+function addProceduralDistrictTiles(
+  scene: THREE.Scene,
+  data: OsmMapData,
+  osmColliders: BuildingCollider[],
+  initialPosition: THREE.Vector3,
+) {
+  const tileSize = 460;
+  const visibilityRadius = 1_550;
+  const tiles: ProceduralDistrictTile[] = [];
+  const colliders: BuildingCollider[] = [];
+  const unitBox = new THREE.BoxGeometry(1, 1, 1);
+  const roofBox = new THREE.BoxGeometry(1, 1, 1);
+  const treeGeometry = new THREE.IcosahedronGeometry(1, 1);
+  const materials = [0xb7aa90, 0xa8b2aa, 0xbb8069].map(
+    (color) => new THREE.MeshStandardMaterial({ color, roughness: 0.86, metalness: 0.015 }),
+  );
+  const roofMaterial = new THREE.MeshStandardMaterial({ color: 0x66706a, roughness: 0.88 });
+  const treeMaterial = new THREE.MeshStandardMaterial({ color: 0x47694b, roughness: 0.96, flatShading: true });
+  const majorRoads = new Set(["motorway", "trunk", "primary", "secondary"]);
+  type AvoidanceSegment = { x1: number; z1: number; x2: number; z2: number; radius: number };
+  const spatialCellSize = 180;
+  const roadGrid = new Map<string, AvoidanceSegment[]>();
+  const waterGrid = new Map<string, AvoidanceSegment[]>();
+  const colliderGrid = new Map<string, BuildingCollider[]>();
+  const spatialKey = (cellX: number, cellZ: number) => `${cellX}:${cellZ}`;
+  const addToGrid = <T,>(grid: Map<string, T[]>, item: T, minX: number, maxX: number, minZ: number, maxZ: number) => {
+    for (let cellX = Math.floor(minX / spatialCellSize); cellX <= Math.floor(maxX / spatialCellSize); cellX++) {
+      for (let cellZ = Math.floor(minZ / spatialCellSize); cellZ <= Math.floor(maxZ / spatialCellSize); cellZ++) {
+        const key = spatialKey(cellX, cellZ);
+        const entries = grid.get(key);
+        if (entries) entries.push(item);
+        else grid.set(key, [item]);
+      }
+    }
+  };
+  for (const road of data.roads) {
+    const radius = majorRoads.has(road.kind) ? 15 : road.kind === "service" ? 6 : 9;
+    for (let index = 1; index < road.points.length; index++) {
+      const [x1, z1] = road.points[index - 1];
+      const [x2, z2] = road.points[index];
+      const segment = { x1, z1, x2, z2, radius };
+      addToGrid(roadGrid, segment, Math.min(x1, x2) - 42, Math.max(x1, x2) + 42, Math.min(z1, z2) - 42, Math.max(z1, z2) + 42);
+    }
+  }
+  const waterAreas = data.water.filter((feature) => feature.area && feature.points.length >= 3).map((feature) => feature.points);
+  for (const feature of data.water) {
+    for (let index = 1; index < feature.points.length; index++) {
+      const [x1, z1] = feature.points[index - 1];
+      const [x2, z2] = feature.points[index];
+      const segment = { x1, z1, x2, z2, radius: 10 };
+      addToGrid(waterGrid, segment, Math.min(x1, x2) - 46, Math.max(x1, x2) + 46, Math.min(z1, z2) - 46, Math.max(z1, z2) + 46);
+    }
+  }
+  for (const collider of osmColliders) {
+    addToGrid(
+      colliderGrid,
+      collider,
+      collider.x - collider.halfWidth - 38,
+      collider.x + collider.halfWidth + 38,
+      collider.z - collider.halfDepth - 38,
+      collider.z + collider.halfDepth + 38,
+    );
+  }
+  const districtCenters = AREA_LANDMARKS.map((landmark) => {
+    const world = coordinatesToWorld(landmark.lat, landmark.lon);
+    return { x: world.x, z: world.y, intensity: clamp(landmark.altitude / 82, 0.45, 1.1) };
+  });
+
+  const blockedByMap = (x: number, z: number, halfWidth: number, halfDepth: number) => {
+    if (waterAreas.some((points) => pointInPolygon(x, z, points))) return true;
+    const key = spatialKey(Math.floor(x / spatialCellSize), Math.floor(z / spatialCellSize));
+    const waterClearance = Math.max(halfWidth, halfDepth) + 10;
+    if ((waterGrid.get(key) ?? []).some((segment) => distanceToSegmentSquared(x, z, segment.x1, segment.z1, segment.x2, segment.z2) < waterClearance ** 2)) return true;
+    for (const segment of roadGrid.get(key) ?? []) {
+      const clearance = Math.max(halfWidth, halfDepth) + segment.radius;
+      if (distanceToSegmentSquared(x, z, segment.x1, segment.z1, segment.x2, segment.z2) < clearance ** 2) return true;
+    }
+    return (colliderGrid.get(key) ?? []).some((collider) => (
+      Math.abs(x - collider.x) < halfWidth + collider.halfWidth + 4 &&
+      Math.abs(z - collider.z) < halfDepth + collider.halfDepth + 4
+    ));
+  };
+
+  const matrix = new THREE.Matrix4();
+  const quaternion = new THREE.Quaternion();
+  const position = new THREE.Vector3();
+  const scale = new THREE.Vector3();
+  const minTileX = Math.floor(-FLIGHT_EXTENT.x / tileSize);
+  const maxTileX = Math.ceil(FLIGHT_EXTENT.x / tileSize);
+  const minTileZ = Math.floor(-FLIGHT_EXTENT.z / tileSize);
+  const maxTileZ = Math.ceil(FLIGHT_EXTENT.z / tileSize);
+
+  for (let tileX = minTileX; tileX <= maxTileX; tileX++) {
+    for (let tileZ = minTileZ; tileZ <= maxTileZ; tileZ++) {
+      const random = coordinateRandom(tileX, tileZ);
+      const centerX = tileX * tileSize;
+      const centerZ = tileZ * tileSize;
+      if (Math.abs(centerX) > FLIGHT_EXTENT.x + tileSize / 2 || Math.abs(centerZ) > FLIGHT_EXTENT.z + tileSize / 2) continue;
+      const transforms: THREE.Matrix4[][] = [[], [], []];
+      const roofTransforms: THREE.Matrix4[] = [];
+      const treeTransforms: THREE.Matrix4[] = [];
+      const tileColliders: BuildingCollider[] = [];
+      const targetBuildings = 10 + Math.floor(random() * 12);
+
+      for (let index = 0; index < targetBuildings; index++) {
+        const x = centerX + (random() - 0.5) * (tileSize - 44);
+        const z = centerZ + (random() - 0.5) * (tileSize - 44);
+        const width = 12 + random() * 21;
+        const depth = 12 + random() * 22;
+        const halfWidth = width / 2;
+        const halfDepth = depth / 2;
+        if (Math.abs(x) > FLIGHT_EXTENT.x - halfWidth || Math.abs(z) > FLIGHT_EXTENT.z - halfDepth) continue;
+        if (blockedByMap(x, z, halfWidth, halfDepth)) continue;
+        if (tileColliders.some((collider) => (
+          Math.abs(x - collider.x) < halfWidth + collider.halfWidth + 7 &&
+          Math.abs(z - collider.z) < halfDepth + collider.halfDepth + 7
+        ))) continue;
+        let districtInfluence = 0.18;
+        for (const district of districtCenters) {
+          const proximity = clamp(1 - Math.hypot(x - district.x, z - district.z) / 1_150, 0, 1);
+          districtInfluence = Math.max(districtInfluence, proximity * district.intensity);
+        }
+        const floors = 2 + Math.floor(random() * 4 + districtInfluence * 8);
+        const height = floors * (2.95 + random() * 0.38);
+        const bucket = height > 34 ? 2 : height > 20 ? 1 : 0;
+        quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), (random() - 0.5) * 0.12);
+        position.set(x, height / 2 + 0.92, z);
+        scale.set(width, height, depth);
+        transforms[bucket].push(matrix.compose(position, quaternion, scale).clone());
+        const collider = { x, z, halfWidth, halfDepth, top: height + 0.92 };
+        tileColliders.push(collider);
+        colliders.push(collider);
+        if (height > 25 && random() > 0.34) {
+          const roofHeight = 2.6 + random() * 3.2;
+          position.set(x + (random() - 0.5) * width * 0.22, height + roofHeight / 2 + 0.92, z + (random() - 0.5) * depth * 0.22);
+          scale.set(width * (0.18 + random() * 0.18), roofHeight, depth * (0.2 + random() * 0.18));
+          roofTransforms.push(matrix.compose(position, quaternion, scale).clone());
+        }
+      }
+
+      const targetTrees = 3 + Math.floor(random() * 5);
+      for (let index = 0; index < targetTrees; index++) {
+        const x = centerX + (random() - 0.5) * (tileSize - 34);
+        const z = centerZ + (random() - 0.5) * (tileSize - 34);
+        const radius = 3.2 + random() * 2.8;
+        if (blockedByMap(x, z, radius, radius)) continue;
+        if (tileColliders.some((collider) => Math.abs(x - collider.x) < collider.halfWidth + radius && Math.abs(z - collider.z) < collider.halfDepth + radius)) continue;
+        quaternion.setFromEuler(new THREE.Euler(random(), random(), random()));
+        position.set(x, 7 + random() * 3.5, z);
+        scale.set(radius, 5 + random() * 3.5, radius);
+        treeTransforms.push(matrix.compose(position, quaternion, scale).clone());
+      }
+
+      const group = new THREE.Group();
+      group.name = `Procedural district tile ${tileX},${tileZ}`;
+      transforms.forEach((bucketTransforms, bucket) => {
+        if (bucketTransforms.length === 0) return;
+        const mesh = new THREE.InstancedMesh(unitBox, materials[bucket], bucketTransforms.length);
+        bucketTransforms.forEach((transform, index) => mesh.setMatrixAt(index, transform));
+        mesh.instanceMatrix.needsUpdate = true;
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        group.add(mesh);
+      });
+      if (roofTransforms.length > 0) {
+        const roofs = new THREE.InstancedMesh(roofBox, roofMaterial, roofTransforms.length);
+        roofTransforms.forEach((transform, index) => roofs.setMatrixAt(index, transform));
+        roofs.instanceMatrix.needsUpdate = true;
+        roofs.castShadow = true;
+        group.add(roofs);
+      }
+      if (treeTransforms.length > 0) {
+        const trees = new THREE.InstancedMesh(treeGeometry, treeMaterial, treeTransforms.length);
+        treeTransforms.forEach((transform, index) => trees.setMatrixAt(index, transform));
+        trees.instanceMatrix.needsUpdate = true;
+        trees.castShadow = true;
+        group.add(trees);
+      }
+      if (group.children.length === 0) continue;
+      group.visible = Math.hypot(centerX - initialPosition.x, centerZ - initialPosition.z) < visibilityRadius;
+      scene.add(group);
+      tiles.push({ group, centerX, centerZ, colliders: tileColliders });
+    }
+  }
+  scene.userData.proceduralDistrictTiles = tiles;
+  scene.userData.proceduralTileVisibilityRadius = visibilityRadius;
+  return colliders;
 }
 
 function createFlightAudio(): FlightAudio {
@@ -239,7 +466,7 @@ function addCity(scene: THREE.Scene) {
   };
 
   const ground = new THREE.Mesh(
-    new THREE.PlaneGeometry(5200, 5200),
+    new THREE.PlaneGeometry(8000, 8000),
     new THREE.MeshStandardMaterial({ color: 0x87937a, map: makeGroundTexture(), roughness: 1 }),
   );
   ground.rotation.x = -Math.PI / 2;
@@ -803,8 +1030,8 @@ export function BirdFlight() {
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0xa9c9ca);
-    scene.fog = new THREE.FogExp2(0xa9c3bf, 0.00038);
-    const camera = new THREE.PerspectiveCamera(58, mount.clientWidth / mount.clientHeight, 0.5, 6000);
+    scene.fog = new THREE.FogExp2(0xa9c3bf, 0.0003);
+    const camera = new THREE.PerspectiveCamera(58, mount.clientWidth / mount.clientHeight, 0.5, 8000);
     const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
     renderer.setSize(mount.clientWidth, mount.clientHeight);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
@@ -816,7 +1043,7 @@ export function BirdFlight() {
     mount.appendChild(renderer.domElement);
 
     const sky = new Sky();
-    sky.scale.setScalar(7000);
+    sky.scale.setScalar(9000);
     const skyUniforms = sky.material.uniforms;
     skyUniforms.turbidity.value = 5.8;
     skyUniforms.rayleigh.value = 3.15;
@@ -831,11 +1058,11 @@ export function BirdFlight() {
     sun.position.set(-400, 650, 280);
     sun.castShadow = true;
     sun.shadow.mapSize.set(2048, 2048);
-    sun.shadow.camera.left = -2200;
-    sun.shadow.camera.right = 2200;
-    sun.shadow.camera.top = 2200;
-    sun.shadow.camera.bottom = -2200;
-    sun.shadow.camera.far = 3000;
+    sun.shadow.camera.left = -3400;
+    sun.shadow.camera.right = 3400;
+    sun.shadow.camera.top = 3800;
+    sun.shadow.camera.bottom = -3800;
+    sun.shadow.camera.far = 4200;
     sun.shadow.bias = -0.00012;
     sun.shadow.normalBias = 0.035;
     scene.add(sun);
@@ -853,7 +1080,8 @@ export function BirdFlight() {
         if (disposed) return;
         const osmColliders = addOpenStreetMapWorld(scene, data);
         if (!osmColliders) throw new Error("OpenStreetMap response contained no usable buildings");
-        buildingColliders.splice(0, buildingColliders.length, ...osmColliders);
+        const proceduralColliders = addProceduralDistrictTiles(scene, data, osmColliders, crow.position);
+        buildingColliders.splice(0, buildingColliders.length, ...osmColliders, ...proceduralColliders);
         setMapStatus("live");
       })
       .catch(() => {
@@ -862,7 +1090,8 @@ export function BirdFlight() {
 
     const crow = new THREE.Group();
     crow.name = "PlayerCrow";
-    crow.position.set(180, 92, 420);
+    const spawnWorld = coordinatesToWorld(23.7595, 90.4105);
+    crow.position.set(spawnWorld.x, 92, spawnWorld.y);
     scene.add(crow);
     let mixer: THREE.AnimationMixer | null = null;
     let flapAction: THREE.AnimationAction | null = null;
@@ -898,6 +1127,8 @@ export function BirdFlight() {
       geometries: renderer.info.memory.geometries,
       textures: renderer.info.memory.textures,
       objects: scene.children.reduce((count, child) => count + 1 + child.children.length, 0),
+      proceduralTiles: (scene.userData.proceduralDistrictTiles as ProceduralDistrictTile[] | undefined)?.length ?? 0,
+      visibleTiles: (scene.userData.proceduralDistrictTiles as ProceduralDistrictTile[] | undefined)?.filter((tile) => tile.group.visible).length ?? 0,
     });
 
     const keys = new Set<string>();
@@ -971,7 +1202,7 @@ export function BirdFlight() {
     };
     window.addEventListener("resize", onResize);
 
-    camera.position.set(190, 105, 446);
+    camera.position.copy(crow.position).add(new THREE.Vector3(10, 13, 26));
     cameraTarget.copy(crow.position);
     let animation = 0;
     const animate = () => {
@@ -1126,6 +1357,16 @@ export function BirdFlight() {
       renderer.render(scene, camera);
       diagnosticFrame++;
       if (diagnosticFrame % 30 === 0) {
+        const districtTiles = scene.userData.proceduralDistrictTiles as ProceduralDistrictTile[] | undefined;
+        const tileVisibilityRadius = scene.userData.proceduralTileVisibilityRadius as number | undefined;
+        if (districtTiles && tileVisibilityRadius) {
+          const visibilitySquared = tileVisibilityRadius ** 2;
+          for (const tile of districtTiles) {
+            const dx = tile.centerX - crow.position.x;
+            const dz = tile.centerZ - crow.position.z;
+            tile.group.visible = dx * dx + dz * dz < visibilitySquared;
+          }
+        }
         renderer.domElement.dataset.calls = renderer.info.render.calls.toString();
         renderer.domElement.dataset.triangles = renderer.info.render.triangles.toString();
         renderer.domElement.dataset.geometries = renderer.info.memory.geometries.toString();
@@ -1182,7 +1423,7 @@ export function BirdFlight() {
 
   return (
     <main className="flight-shell">
-      <div ref={mountRef} className="world" aria-label="Interactive flight over Greater Hatirjheel, Dhaka" />
+      <div ref={mountRef} className="world" aria-label="Interactive hybrid flight map of central Dhaka" />
       <div className="atmosphere" />
 
       <header className={`topbar${flying ? " in-flight" : ""}`}>
@@ -1190,7 +1431,7 @@ export function BirdFlight() {
           <span className="brand-mark">BEV</span>
           <div><strong>BIRD&apos;S EYE VIEW</strong><small>DHAKA · EARLY FLIGHT</small></div>
         </div>}
-        {!flying && <div className="location"><span className="pulse" /> GREATER HATIRJHEEL, DHAKA <b>23.7640° N</b></div>}
+        {!flying && <div className="location"><span className="pulse" /> HATIRJHEEL &amp; CENTRAL DHAKA <b>23.7715° N</b></div>}
         <div className="top-actions">
           <button className={`icon-button sound-button${soundOn ? " active" : ""}`} onClick={toggleSound} aria-label={soundOn ? "Mute ambient sound" : "Enable ambient sound"}>♫</button>
           {flying && <button className={`icon-button pause-button${paused ? " active" : ""}`} onClick={togglePause} aria-label={paused ? "Resume flight" : "Pause flight"}>{paused ? "▶" : "Ⅱ"}</button>}
@@ -1208,7 +1449,7 @@ export function BirdFlight() {
             <div><span ref={compassRef}>N</span><small>HEADING</small></div>
           </section>
 
-          <div className="minimap" aria-label="Mini map of Greater Hatirjheel and surrounding areas">
+          <div className="minimap" aria-label="Mini map of Hatirjheel and central Dhaka districts">
             <span className="north">N</span>
             <div className="map-water one" /><div className="map-water two" />
             <div className="map-road" />
@@ -1227,7 +1468,7 @@ export function BirdFlight() {
               );
             })}
             <div ref={mapBirdRef} className="map-bird">▲</div>
-            <small>GREATER HATIRJHEEL</small>
+            <small>CENTRAL DHAKA</small>
           </div>
 
           <div className="camera-chip"><span>CAMERA</span>{cameraMode}<kbd>C</kbd></div>
@@ -1236,7 +1477,7 @@ export function BirdFlight() {
           <div ref={perchPromptRef} className="perch-prompt" data-visible="false"><kbd>E</kbd><span ref={perchLabelRef}>LAND</span></div>
           {resting && <div className="resting-chip"><i /> RESTING · WATCHING DHAKA</div>}
           <div className={`map-source ${mapStatus}`}>
-            <i /> {mapStatus === "live" ? "LIVE MAP · " : mapStatus === "loading" ? "LOADING MAP · " : "MAP FALLBACK · "}
+            <i /> {mapStatus === "live" ? "OSM + PROCEDURAL · " : mapStatus === "loading" ? "LOADING MAP · " : "MAP FALLBACK · "}
             <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">© OpenStreetMap contributors</a>
           </div>
         </>
@@ -1246,7 +1487,7 @@ export function BirdFlight() {
         <section className="welcome-panel">
           <span className="eyebrow">A CITY FROM ANOTHER POINT OF VIEW</span>
           <h1>The sky<br />belongs to you.</h1>
-          <p>Take wing as a Dhaka crow. Follow Hatirjheel from Moghbazar to Rampura, then roam across Tejgaon, Niketan, Gulshan, and Badda.</p>
+          <p>Take wing across central Dhaka—from Karwan Bazar and Banglamotor to Banani, Gulshan, Aftabnagar, and Banasree—with Hatirjheel at its heart.</p>
           <button onClick={beginFlight} className="primary-button"><span>BEGIN FLIGHT</span><b>→</b></button>
           <div className="quick-controls"><span><kbd>WASD</kbd> STEER</span><span><kbd>SPACE</kbd> FLAP</span><span><kbd>C</kbd> CAMERA</span></div>
         </section>

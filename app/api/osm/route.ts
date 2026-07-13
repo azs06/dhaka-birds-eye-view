@@ -1,13 +1,13 @@
-const CENTER = { lat: 23.764, lon: 90.41 };
+const CENTER = { lat: 23.7715, lon: 90.4165 };
 const BOUNDS = {
-  south: 23.746,
-  west: 90.394,
-  north: 23.782,
-  east: 90.426,
+  south: 23.742,
+  west: 90.389,
+  north: 23.801,
+  east: 90.444,
 };
 const WORLD_SCALE = 1;
-const MAX_BUILDINGS = 1_200;
-const MAX_ROADS = 800;
+const MAX_BUILDINGS = 1_600;
+const MAX_ROADS = 1_100;
 
 type OsmPoint = { lat: number; lon: number };
 type OsmElement = {
@@ -21,6 +21,7 @@ type WorldPoint = [number, number];
 
 const overpassEndpoints = [
   "https://overpass.openstreetmap.fr/api/interpreter",
+  "https://overpass-api.de/api/interpreter",
 ];
 let cachedOsm: OsmResponse | null = null;
 let cachedUntil = 0;
@@ -74,7 +75,7 @@ function xmlAttributes(source: string) {
 async function fetchOsmMapApi() {
   const bbox = `${BOUNDS.west},${BOUNDS.south},${BOUNDS.east},${BOUNDS.north}`;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 10_000);
+  const timer = setTimeout(() => controller.abort(), 20_000);
   try {
     const response = await fetch(`https://api.openstreetmap.org/api/0.6/map?bbox=${bbox}`, {
       headers: {
@@ -120,11 +121,12 @@ async function fetchOsmMapApi() {
   }
 }
 
-async function requestOverpass(query: string) {
+async function requestOverpass(query: string, preferredEndpoint = 0) {
   let lastError: unknown;
-  for (const endpoint of overpassEndpoints) {
+  for (let attempt = 0; attempt < overpassEndpoints.length; attempt++) {
+    const endpoint = overpassEndpoints[(preferredEndpoint + attempt) % overpassEndpoints.length];
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 8_000);
+    const timer = setTimeout(() => controller.abort(), 18_000);
     try {
       const response = await fetch(endpoint, {
         method: "POST",
@@ -143,17 +145,27 @@ async function requestOverpass(query: string) {
       clearTimeout(timer);
     }
   }
-  try {
-    return await fetchOsmMapApi();
-  } catch (error) {
-    throw lastError instanceof Error ? lastError : error;
-  }
+  throw lastError instanceof Error ? lastError : new Error("OpenStreetMap data is unavailable");
 }
 
-async function fetchOverpass(query: string) {
+async function fetchOverpass(queries: string[]) {
   if (cachedOsm && Date.now() < cachedUntil) return cachedOsm;
   if (!inFlightRequest) {
-    inFlightRequest = requestOverpass(query)
+    inFlightRequest = Promise.allSettled(queries.map((query, index) => requestOverpass(query, index)))
+      .then(async (results) => {
+        const successful = results
+          .filter((result): result is PromiseFulfilledResult<OsmResponse> => result.status === "fulfilled")
+          .map((result) => result.value);
+        if (successful.length === 0) return fetchOsmMapApi();
+        const elements = new Map<string, OsmElement>();
+        for (const osm of successful) {
+          for (const element of osm.elements ?? []) elements.set(`${element.type}:${element.id}`, element);
+        }
+        return {
+          elements: Array.from(elements.values()),
+          osm3s: { timestamp_osm_base: successful[0].osm3s?.timestamp_osm_base ?? new Date().toISOString() },
+        } satisfies OsmResponse;
+      })
       .then((osm) => {
         cachedOsm = osm;
         cachedUntil = Date.now() + 60 * 60 * 1000;
@@ -172,18 +184,27 @@ async function fetchOverpass(query: string) {
 }
 
 export async function GET() {
-  const bbox = `${BOUNDS.south},${BOUNDS.west},${BOUNDS.north},${BOUNDS.east}`;
-  const query = `[out:json][timeout:22];(
-    way["building"]["building:levels"](if:number(t["building:levels"]) >= 6)(${bbox});
-    way["building"]["height"](${bbox});
-    way["building"]["name"](${bbox});
-    way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified|service)$"](${bbox});
-    way["natural"="water"](${bbox});
-    way["waterway"](${bbox});
-  );out geom qt;`;
+  const middleLatitude = (BOUNDS.south + BOUNDS.north) / 2;
+  const middleLongitude = (BOUNDS.west + BOUNDS.east) / 2;
+  const tileBounds = [
+    [BOUNDS.south, BOUNDS.west, middleLatitude, middleLongitude],
+    [BOUNDS.south, middleLongitude, middleLatitude, BOUNDS.east],
+    [middleLatitude, BOUNDS.west, BOUNDS.north, middleLongitude],
+    [middleLatitude, middleLongitude, BOUNDS.north, BOUNDS.east],
+  ];
+  const queries = tileBounds.map((bounds) => {
+    const bbox = bounds.join(",");
+    return `[out:json][timeout:20];(
+      way["building"]["building:levels"](if:number(t["building:levels"]) >= 6)(${bbox});
+      way["building"]["height"](${bbox});
+      way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified)$"](${bbox});
+      way["natural"="water"](${bbox});
+      way["waterway"](${bbox});
+    );out geom qt;`;
+  });
 
   try {
-    const osm = await fetchOverpass(query);
+    const osm = await fetchOverpass(queries);
     const elements = osm.elements ?? [];
     const buildings = elements
       .filter((element) => element.type === "way" && element.tags?.building)
