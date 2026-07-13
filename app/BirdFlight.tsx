@@ -10,11 +10,37 @@ import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js
 type CameraMode = "CHASE" | "BIRD'S EYE";
 type BuildingCollider = { x: number; z: number; halfWidth: number; halfDepth: number; top: number };
 type Perch = { position: THREE.Vector3; label: string; heading: number };
-type AreaLandmark = { label: string; shortLabel: string; lat: number; lon: number; altitude: number; heading: number };
+type AreaLandmark = {
+  label: string;
+  shortLabel: string;
+  lat: number;
+  lon: number;
+  altitude: number;
+  heading: number;
+  minimap?: boolean;
+};
 type DhakaLandmark = AreaLandmark & { kind: "church" | "mall" | "amphitheatre" | "twin-tower" | "brac" | "hotel" };
 type ProceduralDistrictTile = { group: THREE.Group; centerX: number; centerZ: number; colliders: BuildingCollider[] };
 type WaterRibbon = THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
 type MapStatus = "loading" | "live" | "fallback";
+type WeatherStatus = "loading" | "live" | "fallback";
+type WeatherMode = "clear" | "cloudy" | "fog" | "drizzle" | "rain" | "storm";
+type WeatherSnapshot = {
+  source: "Open-Meteo";
+  fetchedAt: string;
+  observedAt: string;
+  mode: WeatherMode;
+  label: string;
+  weatherCode: number;
+  isDay: boolean;
+  temperature: number;
+  apparentTemperature: number;
+  precipitation: number;
+  cloudCover: number;
+  windSpeed: number;
+  windDirection: number;
+  windGusts: number;
+};
 type MapPoint = [number, number];
 type OsmMapData = {
   source: "OpenStreetMap";
@@ -47,30 +73,61 @@ type AirflowVfx = {
   update: (dt: number, speedAmount: number, verticalSpeed: number, boosting: boolean, reducedMotion: boolean) => void;
   dispose: () => void;
 };
+type WeatherVfx = {
+  apply: (weather: WeatherSnapshot) => void;
+  update: (dt: number, anchor: THREE.Vector3, paused: boolean) => void;
+  dispose: () => void;
+};
 
 const clamp = THREE.MathUtils.clamp;
 const MAP_CENTER = { lat: 23.7715, lon: 90.4165 };
-const FLIGHT_EXTENT = { x: 3_000, z: 3_450 };
+const FLIGHT_EXTENT = { x: 5_300, z: 5_800 };
 const COLLISION_CELL_SIZE = 180;
 const BRAKE_SPEED = 18;
 const CRUISE_SPEED = 44;
 const BOOST_SPEED = 78;
+const DEFAULT_WEATHER: WeatherSnapshot = {
+  source: "Open-Meteo",
+  fetchedAt: "",
+  observedAt: "",
+  mode: "cloudy",
+  label: "Weather loading",
+  weatherCode: 2,
+  isDay: true,
+  temperature: 29,
+  apparentTemperature: 31,
+  precipitation: 0,
+  cloudCover: 45,
+  windSpeed: 7,
+  windDirection: 180,
+  windGusts: 11,
+};
 const AREA_LANDMARKS: AreaLandmark[] = [
   { label: "Moghbazar", shortLabel: "MOG", lat: 23.75096, lon: 90.40489, altitude: 44, heading: Math.PI },
   { label: "Tejgaon I/A", shortLabel: "TEJ", lat: 23.76535, lon: 90.40062, altitude: 58, heading: Math.PI / 2 },
-  { label: "Niketan", shortLabel: "NIK", lat: 23.77485, lon: 90.41017, altitude: 62, heading: 0 },
+  { label: "Niketan", shortLabel: "NIK", lat: 23.77485, lon: 90.41017, altitude: 62, heading: 0, minimap: true },
   { label: "Gulshan 1", shortLabel: "GUL", lat: 23.77512, lon: 90.41607, altitude: 78, heading: -Math.PI / 2 },
   { label: "Badda Link Road", shortLabel: "BAD", lat: 23.77157, lon: 90.42045, altitude: 46, heading: -Math.PI / 2 },
   { label: "Rampura Bridge", shortLabel: "RAM", lat: 23.76863, lon: 90.42245, altitude: 36, heading: Math.PI },
   { label: "Karwan Bazar", shortLabel: "KAR", lat: 23.75144, lon: 90.39706, altitude: 56, heading: Math.PI / 2 },
-  { label: "Banglamotor", shortLabel: "BNG", lat: 23.74588, lon: 90.39477, altitude: 52, heading: Math.PI / 2 },
+  { label: "Banglamotor", shortLabel: "BNG", lat: 23.74588, lon: 90.39477, altitude: 52, heading: Math.PI / 2, minimap: true },
   { label: "Malibagh", shortLabel: "MAL", lat: 23.74991, lon: 90.41326, altitude: 48, heading: Math.PI },
   { label: "Mohakhali", shortLabel: "MOH", lat: 23.77923, lon: 90.3989, altitude: 66, heading: Math.PI / 2 },
-  { label: "Banani", shortLabel: "BAN", lat: 23.79318, lon: 90.40804, altitude: 74, heading: 0 },
-  { label: "Gulshan 2", shortLabel: "GU2", lat: 23.79483, lon: 90.41424, altitude: 86, heading: 0 },
+  { label: "Banani", shortLabel: "BAN", lat: 23.79318, lon: 90.40804, altitude: 74, heading: 0, minimap: true },
+  { label: "Gulshan 2", shortLabel: "GU2", lat: 23.79483, lon: 90.41424, altitude: 86, heading: 0, minimap: true },
   { label: "Merul Badda", shortLabel: "MER", lat: 23.77166, lon: 90.42539, altitude: 44, heading: -Math.PI / 2 },
-  { label: "Aftabnagar", shortLabel: "AFT", lat: 23.76562, lon: 90.42931, altitude: 42, heading: -Math.PI / 2 },
-  { label: "Banasree", shortLabel: "BNS", lat: 23.76294, lon: 90.43415, altitude: 46, heading: Math.PI },
+  { label: "Aftabnagar", shortLabel: "AFT", lat: 23.76562, lon: 90.42931, altitude: 42, heading: -Math.PI / 2, minimap: true },
+  { label: "Banasree", shortLabel: "BNS", lat: 23.76294, lon: 90.43415, altitude: 46, heading: Math.PI, minimap: true },
+  { label: "Dhanmondi", shortLabel: "DMD", lat: 23.75354, lon: 90.37031, altitude: 52, heading: Math.PI / 2, minimap: true },
+  { label: "Farmgate", shortLabel: "FRM", lat: 23.75904, lon: 90.38711, altitude: 64, heading: Math.PI / 2 },
+  { label: "Shahbagh", shortLabel: "SHB", lat: 23.73734, lon: 90.39617, altitude: 45, heading: Math.PI / 2, minimap: true },
+  { label: "Ramna", shortLabel: "RMN", lat: 23.73297, lon: 90.40113, altitude: 38, heading: Math.PI },
+  { label: "Motijheel", shortLabel: "MTJ", lat: 23.72726, lon: 90.4212, altitude: 96, heading: -Math.PI / 2, minimap: true },
+  { label: "Khilgaon", shortLabel: "KHL", lat: 23.75065, lon: 90.42328, altitude: 50, heading: Math.PI },
+  { label: "Agargaon", shortLabel: "AGR", lat: 23.77843, lon: 90.38005, altitude: 66, heading: Math.PI / 2, minimap: true },
+  { label: "Baridhara", shortLabel: "BRD", lat: 23.80336, lon: 90.42026, altitude: 76, heading: 0, minimap: true },
+  { label: "Kuril", shortLabel: "KRL", lat: 23.81814, lon: 90.42213, altitude: 68, heading: 0 },
+  { label: "Bashundhara R/A", shortLabel: "BSR", lat: 23.81893, lon: 90.43682, altitude: 82, heading: -Math.PI / 2, minimap: true },
 ];
 const DHAKA_LANDMARKS: DhakaLandmark[] = [
   { label: "Holy Rosary Church", shortLabel: "HRC", lat: 23.759151, lon: 90.392216, altitude: 61, heading: Math.PI / 2, kind: "church" },
@@ -87,6 +144,15 @@ function coordinatesToWorld(lat: number, lon: number) {
     (lon - MAP_CENTER.lon) * metresPerLongitude,
     -(lat - MAP_CENTER.lat) * 110_540,
   );
+}
+
+function weatherIcon(mode: WeatherMode, isDay: boolean) {
+  if (mode === "storm") return "ϟ";
+  if (mode === "rain") return "☂";
+  if (mode === "drizzle") return "⌁";
+  if (mode === "fog") return "≋";
+  if (mode === "cloudy") return "☁";
+  return isDay ? "☀" : "☾";
 }
 
 function buildColliderGrid(colliders: BuildingCollider[]) {
@@ -174,6 +240,208 @@ function createAirflowVfx(crow: THREE.Group): AirflowVfx {
       crow.remove(lines);
       geometry.dispose();
       material.dispose();
+    },
+  };
+}
+
+function createWeatherVfx(
+  scene: THREE.Scene,
+  renderer: THREE.WebGLRenderer,
+  sky: Sky,
+  hemisphere: THREE.HemisphereLight,
+  sun: THREE.DirectionalLight,
+  skyFill: THREE.DirectionalLight,
+  reducedMotion: boolean,
+): WeatherVfx {
+  const random = seededRandom(9_071);
+  const maxDrops = reducedMotion ? 360 : 720;
+  const positions = new Float32Array(maxDrops * 6);
+  const drops = Array.from({ length: maxDrops }, () => ({
+    x: (random() - 0.5) * 250,
+    y: -35 + random() * 210,
+    z: (random() - 0.5) * 250,
+    speed: 82 + random() * 95,
+    length: 4.5 + random() * 8,
+  }));
+  const rainGeometry = new THREE.BufferGeometry();
+  rainGeometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  const rainMaterial = new THREE.LineBasicMaterial({
+    color: 0xb8dbe4,
+    transparent: true,
+    opacity: 0,
+    depthWrite: false,
+    toneMapped: false,
+  });
+  const rain = new THREE.LineSegments(rainGeometry, rainMaterial);
+  rain.frustumCulled = false;
+  rain.renderOrder = 25;
+  rain.visible = false;
+  scene.add(rain);
+
+  const starPositions = new Float32Array(420 * 3);
+  for (let index = 0; index < 420; index++) {
+    const radius = 4_200 + random() * 800;
+    const azimuth = random() * Math.PI * 2;
+    const elevation = 0.08 + random() * 1.18;
+    starPositions[index * 3] = Math.cos(azimuth) * Math.cos(elevation) * radius;
+    starPositions[index * 3 + 1] = Math.sin(elevation) * radius;
+    starPositions[index * 3 + 2] = Math.sin(azimuth) * Math.cos(elevation) * radius;
+  }
+  const starGeometry = new THREE.BufferGeometry();
+  starGeometry.setAttribute("position", new THREE.BufferAttribute(starPositions, 3));
+  const starMaterial = new THREE.PointsMaterial({
+    color: 0xd9ecff,
+    size: 5.5,
+    sizeAttenuation: true,
+    transparent: true,
+    opacity: 0.72,
+    depthWrite: false,
+    fog: false,
+    toneMapped: false,
+  });
+  const stars = new THREE.Points(starGeometry, starMaterial);
+  stars.visible = false;
+  stars.renderOrder = -1;
+  scene.add(stars);
+
+  const lightning = new THREE.DirectionalLight(0xd8eeff, 0);
+  lightning.position.set(-180, 520, -240);
+  scene.add(lightning);
+
+  let activeDrops = 0;
+  let mode: WeatherMode = "cloudy";
+  let windX = 0;
+  let windZ = 0;
+  let lightningClock = 4 + random() * 4;
+  let lightningPulse = 0;
+
+  const apply = (weather: WeatherSnapshot) => {
+    mode = weather.mode;
+    const cloudAmount = clamp(weather.cloudCover / 100, 0, 1);
+    const raining = mode === "drizzle" || mode === "rain" || mode === "storm";
+    const rainStrength = mode === "drizzle"
+      ? 0.28
+      : mode === "rain"
+        ? clamp(0.58 + weather.precipitation * 0.13, 0.58, 0.9)
+        : mode === "storm"
+          ? 1
+          : 0;
+    activeDrops = Math.round(maxDrops * rainStrength);
+    rainGeometry.setDrawRange(0, activeDrops * 2);
+    rain.visible = raining;
+    rainMaterial.opacity = 0.2 + rainStrength * 0.48;
+    rainMaterial.color.set(mode === "storm" ? 0xc9e6f2 : 0xaed3dc);
+
+    const windToward = THREE.MathUtils.degToRad(weather.windDirection + 180);
+    const windScale = clamp(weather.windSpeed / 18, 0.08, 1.5);
+    windX = Math.sin(windToward) * 12 * windScale;
+    windZ = Math.cos(windToward) * 12 * windScale;
+
+    const isNight = !weather.isDay;
+    const background = isNight
+      ? mode === "storm" ? 0x07131b : mode === "rain" ? 0x0b1b22 : 0x081824
+      : mode === "fog" ? 0x8a9995
+        : mode === "storm" ? 0x344b52
+          : mode === "rain" ? 0x5f7c80
+            : mode === "cloudy" ? 0x89a6a5
+              : 0xa9c9ca;
+    scene.background = new THREE.Color(background);
+    if (scene.fog instanceof THREE.FogExp2) {
+      scene.fog.color.set(background);
+      scene.fog.density = mode === "fog"
+        ? 0.00135
+        : mode === "storm"
+          ? 0.00082
+          : mode === "rain"
+            ? 0.00064
+            : 0.00024 + cloudAmount * 0.00018;
+    }
+
+    sky.visible = weather.isDay;
+    stars.visible = isNight && cloudAmount < 0.62 && !raining && mode !== "fog";
+    starMaterial.opacity = clamp(0.92 - cloudAmount, 0.25, 0.82);
+    const skyUniforms = sky.material.uniforms;
+    skyUniforms.turbidity.value = 3.8 + cloudAmount * 10 + (raining ? 4 : 0);
+    skyUniforms.rayleigh.value = 3.4 - cloudAmount * 2.35;
+    skyUniforms.mieCoefficient.value = 0.0035 + cloudAmount * 0.016;
+    skyUniforms.mieDirectionalG.value = 0.82;
+
+    renderer.toneMappingExposure = isNight
+      ? 0.7
+      : mode === "clear" ? 0.84
+        : mode === "cloudy" ? 0.68
+          : 0.56;
+    hemisphere.intensity = isNight ? 1.08 : 1.8 - cloudAmount * 0.82;
+    hemisphere.color.set(isNight ? 0x6f8eaa : mode === "rain" || mode === "storm" ? 0xb8d0d4 : 0xe8f3ee);
+    hemisphere.groundColor.set(isNight ? 0x26342d : 0x5d6c58);
+    sun.intensity = isNight ? 0.52 : mode === "clear" ? 3.35 : mode === "cloudy" ? 1.25 : 0.46;
+    sun.color.set(isNight ? 0x8ba8c7 : mode === "rain" || mode === "storm" ? 0xd6e5e5 : 0xffd6a0);
+    skyFill.intensity = isNight ? 0.68 : 0.48 + cloudAmount * 0.22;
+    skyFill.color.set(isNight ? 0x45617b : 0x9bc8d2);
+
+    const clouds = scene.userData.clouds as THREE.Group[] | undefined ?? [];
+    const visibleClouds = mode === "fog"
+      ? Math.ceil(clouds.length * 0.45)
+      : Math.round(clouds.length * clamp(cloudAmount * 1.12 + (raining ? 0.22 : 0), 0.08, 1));
+    clouds.forEach((cloud, index) => {
+      cloud.visible = index < visibleClouds;
+      cloud.scale.setScalar(0.9 + cloudAmount * 0.34);
+      cloud.userData.weatherSpeed = (0.45 + weather.windSpeed * 0.13) * (0.72 + (index % 4) * 0.12);
+      for (const child of cloud.children) {
+        if (child instanceof THREE.Mesh && child.material instanceof THREE.MeshStandardMaterial) {
+          child.material.color.set(isNight ? 0x526773 : raining ? 0x9aa9a8 : 0xe9e5d5);
+          child.material.opacity = 0.35 + cloudAmount * 0.42;
+        }
+      }
+    });
+  };
+
+  return {
+    apply,
+    update(dt, anchor, paused) {
+      rain.position.copy(anchor);
+      stars.position.set(anchor.x, 0, anchor.z);
+      if (!paused && rain.visible) {
+        for (let index = 0; index < activeDrops; index++) {
+          const drop = drops[index];
+          drop.y -= drop.speed * dt;
+          drop.x += windX * dt;
+          drop.z += windZ * dt;
+          if (drop.y < -45 || Math.abs(drop.x) > 145 || Math.abs(drop.z) > 145) {
+            drop.x = (random() - 0.5) * 250;
+            drop.y = 145 + random() * 45;
+            drop.z = (random() - 0.5) * 250;
+          }
+          const offset = index * 6;
+          positions[offset] = drop.x;
+          positions[offset + 1] = drop.y;
+          positions[offset + 2] = drop.z;
+          positions[offset + 3] = drop.x - windX * 0.16;
+          positions[offset + 4] = drop.y + drop.length;
+          positions[offset + 5] = drop.z - windZ * 0.16;
+        }
+        rainGeometry.attributes.position.needsUpdate = true;
+      }
+
+      if (!paused && mode === "storm") {
+        lightningClock -= dt;
+        if (lightningClock <= 0) {
+          lightningPulse = 1;
+          lightningClock = 3.2 + random() * 6.8;
+        }
+        lightningPulse = Math.max(0, lightningPulse - dt * 7.5);
+        lightning.intensity = lightningPulse > 0 ? 2.5 + lightningPulse * 8 : 0;
+      } else {
+        lightning.intensity = 0;
+      }
+    },
+    dispose() {
+      scene.remove(rain, stars, lightning);
+      rainGeometry.dispose();
+      rainMaterial.dispose();
+      starGeometry.dispose();
+      starMaterial.dispose();
+      lightning.dispose();
     },
   };
 }
@@ -734,14 +1002,14 @@ function addCity(scene: THREE.Scene) {
     }
     const texture = new THREE.CanvasTexture(canvas);
     texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
-    texture.repeat.set(52, 52);
+    texture.repeat.set(76, 76);
     texture.colorSpace = THREE.SRGBColorSpace;
     texture.anisotropy = 4;
     return texture;
   };
 
   const ground = new THREE.Mesh(
-    new THREE.PlaneGeometry(8000, 8000),
+    new THREE.PlaneGeometry(12_500, 12_500),
     new THREE.MeshStandardMaterial({ color: 0x87937a, map: makeGroundTexture(), roughness: 1 }),
   );
   ground.rotation.x = -Math.PI / 2;
@@ -1124,7 +1392,7 @@ function addCity(scene: THREE.Scene) {
 
   const clouds: THREE.Group[] = [];
   const cloudMaterial = new THREE.MeshStandardMaterial({ color: 0xe9e5d5, roughness: 1, transparent: true, opacity: 0.55 });
-  for (let i = 0; i < 7; i++) {
+  for (let i = 0; i < 14; i++) {
     const cloud = new THREE.Group();
     for (let puff = 0; puff < 5; puff++) {
       const sphere = new THREE.Mesh(new THREE.SphereGeometry(1, 18, 12), cloudMaterial);
@@ -1331,6 +1599,8 @@ export function BirdFlight() {
   const [controlsOpen, setControlsOpen] = useState(false);
   const [soundOn, setSoundOn] = useState(false);
   const [mapStatus, setMapStatus] = useState<MapStatus>("loading");
+  const [weatherStatus, setWeatherStatus] = useState<WeatherStatus>("loading");
+  const [weather, setWeather] = useState<WeatherSnapshot>(DEFAULT_WEATHER);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -1364,7 +1634,8 @@ export function BirdFlight() {
     skyUniforms.sunPosition.value.copy(sunPosition);
     scene.add(sky);
 
-    scene.add(new THREE.HemisphereLight(0xe8f3ee, 0x5d6c58, 1.8));
+    const hemisphere = new THREE.HemisphereLight(0xe8f3ee, 0x5d6c58, 1.8);
+    scene.add(hemisphere);
     const sun = new THREE.DirectionalLight(0xffd6a0, 3.35);
     sun.position.set(-400, 650, 280);
     sun.castShadow = true;
@@ -1399,7 +1670,20 @@ export function BirdFlight() {
         setMapStatus("live");
       })
       .catch(() => {
-        if (!disposed) setMapStatus("fallback");
+        if (disposed) return;
+        if (!(scene.userData.proceduralDistrictTiles as ProceduralDistrictTile[] | undefined)?.length) {
+          const emptyMap: OsmMapData = {
+            source: "OpenStreetMap",
+            fetchedAt: new Date().toISOString(),
+            buildings: [],
+            roads: [],
+            water: [],
+          };
+          const proceduralColliders = addProceduralDistrictTiles(scene, emptyMap, buildingColliders, crow.position);
+          buildingColliders.push(...proceduralColliders);
+          buildingColliderGrid = buildColliderGrid(buildingColliders);
+        }
+        setMapStatus("fallback");
       });
 
     const crow = new THREE.Group();
@@ -1408,6 +1692,28 @@ export function BirdFlight() {
     crow.position.set(spawnWorld.x, 92, spawnWorld.y);
     scene.add(crow);
     const airflowVfx = createAirflowVfx(crow);
+    const weatherVfx = createWeatherVfx(scene, renderer, sky, hemisphere, sun, skyFill, reducedMotion);
+    weatherVfx.apply(DEFAULT_WEATHER);
+    const weatherController = new AbortController();
+    const loadWeather = () => {
+      void fetch("/api/weather", { signal: weatherController.signal })
+        .then(async (response) => {
+          if (!response.ok) throw new Error(`Weather request failed with ${response.status}`);
+          return await response.json() as WeatherSnapshot;
+        })
+        .then((snapshot) => {
+          if (disposed || !["clear", "cloudy", "fog", "drizzle", "rain", "storm"].includes(snapshot.mode)) return;
+          weatherVfx.apply(snapshot);
+          setWeather(snapshot);
+          setWeatherStatus("live");
+        })
+        .catch((error: unknown) => {
+          if (disposed || (error instanceof DOMException && error.name === "AbortError")) return;
+          setWeatherStatus("fallback");
+        });
+    };
+    loadWeather();
+    const weatherRefresh = window.setInterval(loadWeather, 10 * 60 * 1_000);
     let mixer: THREE.AnimationMixer | null = null;
     let flapAction: THREE.AnimationAction | null = null;
     let glideAction: THREE.AnimationAction | null = null;
@@ -1659,7 +1965,7 @@ export function BirdFlight() {
           if (car.position.x < -1100) car.position.x = 1100;
         }
         for (const cloud of scene.userData.clouds as THREE.Group[]) {
-          cloud.position.x += cloud.userData.speed * dt;
+          cloud.position.x += (cloud.userData.weatherSpeed ?? cloud.userData.speed) * dt;
           if (cloud.position.x > 1250) cloud.position.x = -1250;
         }
         const markerTime = elapsedTime;
@@ -1710,6 +2016,7 @@ export function BirdFlight() {
         camera.updateProjectionMatrix();
       }
       airflowVfx.update(dt, speedAmount, verticalSpeed, boost, reducedMotion);
+      weatherVfx.update(dt, crow.position, pausedRef.current);
 
       if (speedRef.current) speedRef.current.textContent = Math.round(speed).toString();
       if (altitudeRef.current) altitudeRef.current.textContent = Math.round(crow.position.y).toString();
@@ -1762,6 +2069,9 @@ export function BirdFlight() {
       delete (window as BirdFlightWindow).__birdFlightDiagnostics;
       flightAudio.dispose();
       airflowVfx.dispose();
+      weatherVfx.dispose();
+      weatherController.abort();
+      window.clearInterval(weatherRefresh);
       audioRef.current = null;
       cancelAnimationFrame(animation);
       window.removeEventListener("keydown", onKeyDown);
@@ -1807,7 +2117,7 @@ export function BirdFlight() {
   return (
     <main className="flight-shell">
       <div ref={mountRef} className="world" aria-label="Interactive hybrid flight map of central Dhaka" />
-      <div className="atmosphere" />
+      <div className="atmosphere" data-weather={weather.mode} data-daylight={weather.isDay ? "day" : "night"} />
       <div ref={flightEffectRef} className="flight-dynamics" aria-hidden="true" />
 
       <header className={`topbar${flying ? " in-flight" : ""}`}>
@@ -1815,13 +2125,28 @@ export function BirdFlight() {
           <span className="brand-mark">BEV</span>
           <div><strong>BIRD&apos;S EYE VIEW</strong><small>DHAKA · EARLY FLIGHT</small></div>
         </div>}
-        {!flying && <div className="location"><span className="pulse" /> HATIRJHEEL &amp; CENTRAL DHAKA <b>23.7715° N</b></div>}
+        {!flying && <div className="header-center">
+          <div className="location"><span className="pulse" /> HATIRJHEEL &amp; CENTRAL DHAKA <b>23.7715° N</b></div>
+          <div className={`weather-chip ${weatherStatus}`} title={`Feels like ${Math.round(weather.apparentTemperature)}°C · Wind ${Math.round(weather.windSpeed)} km/h`}>
+            <strong>{weatherIcon(weather.mode, weather.isDay)}</strong>
+            <span>{weather.label}</span>
+            <b>{Math.round(weather.temperature)}°</b>
+            <i>{weatherStatus === "live" ? "LIVE" : weatherStatus === "loading" ? "SYNC" : "OFFLINE"}</i>
+          </div>
+        </div>}
         <div className="top-actions">
           <button className={`icon-button sound-button${soundOn ? " active" : ""}`} onClick={toggleSound} aria-label={soundOn ? "Mute ambient sound" : "Enable ambient sound"}>♫</button>
           {flying && <button className={`icon-button pause-button${paused ? " active" : ""}`} onClick={togglePause} aria-label={paused ? "Resume flight" : "Pause flight"}>{paused ? "▶" : "Ⅱ"}</button>}
           <button className="icon-button" onClick={() => setControlsOpen((value) => !value)} aria-label="Show flight controls">?</button>
         </div>
       </header>
+
+      {flying && <div className={`weather-chip weather-flight ${weatherStatus}`} title={`Feels like ${Math.round(weather.apparentTemperature)}°C · Wind ${Math.round(weather.windSpeed)} km/h`}>
+        <strong>{weatherIcon(weather.mode, weather.isDay)}</strong>
+        <span>{weather.label}</span>
+        <b>{Math.round(weather.temperature)}°</b>
+        <i>{weatherStatus === "live" ? "LIVE" : weatherStatus === "loading" ? "SYNC" : "OFFLINE"}</i>
+      </div>}
 
       {flying && (
         <>
@@ -1836,11 +2161,11 @@ export function BirdFlight() {
           </section>
           <div className="flight-mode"><i /><span ref={flightModeRef} data-mode="cruise">CRUISE</span></div>
 
-          <div className="minimap" aria-label="Mini map of Hatirjheel and central Dhaka districts">
+          <div className="minimap" aria-label="Mini map of the expanded central Dhaka flight grid">
             <span className="north">N</span>
             <div className="map-water one" /><div className="map-water two" />
             <div className="map-road" />
-            {AREA_LANDMARKS.map((landmark) => {
+            {AREA_LANDMARKS.filter((landmark) => landmark.minimap).map((landmark) => {
               const world = coordinatesToWorld(landmark.lat, landmark.lon);
               return (
                 <span
@@ -1855,7 +2180,7 @@ export function BirdFlight() {
               );
             })}
             <div ref={mapBirdRef} className="map-bird">▲</div>
-            <small>CENTRAL DHAKA</small>
+            <small>DHAKA FLIGHT GRID</small>
           </div>
 
           <div className="camera-chip"><span>CAMERA</span>{cameraMode}<kbd>C</kbd></div>
@@ -1874,7 +2199,7 @@ export function BirdFlight() {
         <section className="welcome-panel">
           <span className="eyebrow">A CITY FROM ANOTHER POINT OF VIEW</span>
           <h1>The sky<br />belongs to you.</h1>
-          <p>Take wing across central Dhaka—from Karwan Bazar and Banglamotor to Banani, Gulshan, Aftabnagar, and Banasree—with Hatirjheel at its heart.</p>
+          <p>Take wing across Dhaka—from Dhanmondi, Shahbagh, and Motijheel to Banani, Baridhara, Kuril, and Bashundhara—with Hatirjheel at its heart.</p>
           <button onClick={beginFlight} className="primary-button"><span>BEGIN FLIGHT</span><b>→</b></button>
           <div className="quick-controls"><span><kbd>WASD</kbd> STEER</span><span><kbd>CTRL / Q</kbd> BRAKE</span><span><kbd>SPACE</kbd> FLAP</span><span><kbd>C</kbd> CAMERA</span></div>
         </section>

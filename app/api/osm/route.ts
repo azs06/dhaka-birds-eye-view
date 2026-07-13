@@ -1,5 +1,14 @@
 const CENTER = { lat: 23.7715, lon: 90.4165 };
 const BOUNDS = {
+  south: 23.724,
+  west: 90.366,
+  north: 23.825,
+  east: 90.464,
+};
+// Dense building footprints stay focused on the original Greater Hatirjheel
+// core. The expanded tiles still fetch roads, water, and named/tall buildings;
+// the client fills remaining lots with its culled procedural district system.
+const CORE_BUILDING_BOUNDS = {
   south: 23.742,
   west: 90.389,
   north: 23.801,
@@ -9,7 +18,7 @@ const WORLD_SCALE = 1;
 const BUILDING_CELL_SIZE = 250;
 const BUILDINGS_PER_CELL = 16;
 const RELATION_ID_OFFSET = 1_000_000_000_000;
-const MAX_ROADS = 1_100;
+const MAX_ROADS = 1_800;
 
 type OsmPoint = { lat: number; lon: number };
 type OsmElement = {
@@ -164,6 +173,28 @@ function spatiallySampleBuildings<T extends { id: number; points: WorldPoint[]; 
     });
 }
 
+function spatiallySampleRoads<T extends { id: number; points: WorldPoint[]; kind: string }>(roads: T[]) {
+  const cellSize = 600;
+  const roadsPerCell = 9;
+  const majorRoads = new Set(["motorway", "trunk", "primary", "secondary"]);
+  const cells = new Map<string, T[]>();
+  for (const road of roads) {
+    const middle = road.points[Math.floor(road.points.length / 2)];
+    const key = `${Math.floor(middle[0] / cellSize)}:${Math.floor(middle[1] / cellSize)}`;
+    const cell = cells.get(key);
+    if (cell) cell.push(road);
+    else cells.set(key, [road]);
+  }
+
+  const candidates = Array.from(cells.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .flatMap(([, cell]) => cell
+      .sort((a, b) => Number(majorRoads.has(b.kind)) - Number(majorRoads.has(a.kind)) || a.id - b.id)
+      .slice(0, roadsPerCell));
+  if (candidates.length <= MAX_ROADS) return candidates;
+  return Array.from({ length: MAX_ROADS }, (_, index) => candidates[Math.floor(index * candidates.length / MAX_ROADS)]);
+}
+
 function xmlAttributes(source: string) {
   const attributes: Record<string, string> = {};
   for (const match of source.matchAll(/([:\w-]+)="([^"]*)"/g)) attributes[match[1]] = match[2];
@@ -299,9 +330,23 @@ export async function GET() {
   ];
   const tiles = tileBounds.map((bounds) => {
     const bbox = bounds.join(",");
-    return { bounds, query: `[out:json][timeout:20];(
-      way["building"](${bbox});
-      relation["building"]["type"="multipolygon"](${bbox});
+    const coreSouth = Math.max(bounds[0], CORE_BUILDING_BOUNDS.south);
+    const coreWest = Math.max(bounds[1], CORE_BUILDING_BOUNDS.west);
+    const coreNorth = Math.min(bounds[2], CORE_BUILDING_BOUNDS.north);
+    const coreEast = Math.min(bounds[3], CORE_BUILDING_BOUNDS.east);
+    const coreBuildingQuery = coreSouth < coreNorth && coreWest < coreEast
+      ? `way["building"](${coreSouth},${coreWest},${coreNorth},${coreEast});
+      relation["building"]["type"="multipolygon"](${coreSouth},${coreWest},${coreNorth},${coreEast});`
+      : "";
+    const fallbackBounds = coreSouth < coreNorth && coreWest < coreEast
+      ? [coreSouth, coreWest, coreNorth, coreEast]
+      : bounds;
+    return { bounds: fallbackBounds, query: `[out:json][timeout:20];(
+      ${coreBuildingQuery}
+      way["building"]["name"](${bbox});
+      way["building"]["height"](${bbox});
+      way["building"]["building:levels"](${bbox});
+      relation["building"]["name"]["type"="multipolygon"](${bbox});
       way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified)$"](${bbox});
       way["natural"="water"](${bbox});
       way["waterway"](${bbox});
@@ -341,7 +386,7 @@ export async function GET() {
       name: building.name,
     }));
 
-    const roads = elements
+    const roads = spatiallySampleRoads(elements
       .filter((element) => element.type === "way" && element.tags?.highway)
       .map((element) => {
         const points = cleanGeometry(element);
@@ -353,8 +398,7 @@ export async function GET() {
           name: element.tags?.name ?? null,
         };
       })
-      .filter((road): road is NonNullable<typeof road> => Boolean(road))
-      .slice(0, MAX_ROADS);
+      .filter((road): road is NonNullable<typeof road> => Boolean(road)));
 
     const water = elements
       .filter((element) => element.type === "way" && (element.tags?.natural === "water" || element.tags?.waterway))

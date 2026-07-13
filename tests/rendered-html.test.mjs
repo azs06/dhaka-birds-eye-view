@@ -27,11 +27,12 @@ test("server-renders the Bird's Eye View application shell", async () => {
 });
 
 test("keeps the finished flight experience free of starter preview code", async () => {
-  const [page, layout, component, mapRoute, css, packageJson] = await Promise.all([
+  const [page, layout, component, mapRoute, weatherRoute, css, packageJson] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/BirdFlight.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/api/osm/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/weather/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
   ]);
@@ -51,18 +52,33 @@ test("keeps the finished flight experience free of starter preview code", async 
   for (const area of ["Karwan Bazar", "Banglamotor", "Malibagh", "Mohakhali", "Banani", "Gulshan 2", "Merul Badda", "Aftabnagar", "Banasree"]) {
     assert.match(component, new RegExp(area));
   }
+  for (const area of ["Dhanmondi", "Farmgate", "Shahbagh", "Ramna", "Motijheel", "Khilgaon", "Agargaon", "Baridhara", "Kuril", "Bashundhara R/A"]) {
+    assert.match(component, new RegExp(area));
+  }
   assert.match(component, /addProceduralDistrictTiles/);
   assert.match(component, /proceduralDistrictTiles/);
   assert.match(component, /createAirflowVfx/);
+  assert.match(component, /createWeatherVfx/);
+  assert.match(component, /fetch\("\/api\/weather"/);
+  assert.match(component, /weatherVfx\.update/);
+  for (const weatherMode of ["cloudy", "fog", "drizzle", "rain", "storm"]) {
+    assert.match(weatherRoute, new RegExp(`mode: "${weatherMode}"`));
+  }
+  assert.match(weatherRoute, /api\.open-meteo\.com\/v1\/forecast/);
+  assert.match(weatherRoute, /cloud_cover/);
+  assert.match(weatherRoute, /wind_direction_10m/);
+  assert.match(weatherRoute, /stale-while-revalidate=600/);
   assert.match(component, /const BRAKE_SPEED = 18/);
   assert.match(component, /verticalSpeed = Math\.min\(22, verticalSpeed \+ 8\.5\)/);
   assert.match(component, /Ctrl \/ Q/);
   assert.match(component, /VERT M\/S/);
-  assert.match(mapRoute, /south: 23\.742/);
-  assert.match(mapRoute, /north: 23\.801/);
+  assert.match(mapRoute, /south: 23\.724/);
+  assert.match(mapRoute, /north: 23\.825/);
+  assert.match(mapRoute, /CORE_BUILDING_BOUNDS/);
   assert.match(mapRoute, /BUILDING_CELL_SIZE = 250/);
   assert.match(mapRoute, /BUILDINGS_PER_CELL = 16/);
   assert.match(mapRoute, /spatiallySampleBuildings/);
+  assert.match(mapRoute, /spatiallySampleRoads/);
   assert.match(mapRoute, /way\["building"\]/);
   assert.match(mapRoute, /relation\["building"\]\["type"="multipolygon"\]/);
   assert.match(component, /selectSpatiallyEvenBuildings/);
