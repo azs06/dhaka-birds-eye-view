@@ -316,14 +316,17 @@ export function BirdFlight() {
 
     const keys = new Set<string>();
     let yaw = 0.15;
-    let pitch = -0.03;
-    let speed = 48;
+    let yawRate = 0;
+    let pitch = 0;
+    let roll = 0;
+    let speed = 44;
     let wingPhase = 0;
     let flapKick = 0;
     const clock = new THREE.Clock();
     const desiredCamera = new THREE.Vector3();
     const desiredTarget = new THREE.Vector3();
     const forward = new THREE.Vector3();
+    const previousPosition = new THREE.Vector3();
     const targetQuat = new THREE.Quaternion();
     const euler = new THREE.Euler(0, 0, 0, "YXZ");
     const cameraTarget = new THREE.Vector3();
@@ -357,37 +360,48 @@ export function BirdFlight() {
       const dt = Math.min(clock.getDelta(), 0.035);
       const active = flyingRef.current;
       const turn = active ? (keys.has("KeyA") || keys.has("ArrowLeft") ? 1 : 0) - (keys.has("KeyD") || keys.has("ArrowRight") ? 1 : 0) : 0;
-      const pitchInput = active ? (keys.has("KeyS") || keys.has("ArrowDown") ? 1 : 0) - (keys.has("KeyW") || keys.has("ArrowUp") ? 1 : 0) : 0;
+      const climb = active ? (keys.has("KeyW") || keys.has("ArrowUp") ? 1 : 0) - (keys.has("KeyS") || keys.has("ArrowDown") ? 1 : 0) : 0;
       const boost = active && (keys.has("ShiftLeft") || keys.has("ShiftRight"));
 
-      yaw += turn * dt * (0.92 + speed / 110);
-      pitch += pitchInput * dt * 0.72;
-      pitch *= Math.pow(0.92, dt * 60);
+      const targetYawRate = turn * (0.58 + speed / 180);
+      yawRate = THREE.MathUtils.lerp(yawRate, targetYawRate, 1 - Math.pow(0.82, dt * 60));
+      yaw += yawRate * dt;
       flapKick = Math.max(0, flapKick - dt * 1.8);
-      if (flapKick > 0) pitch += dt * 0.34;
-      pitch = clamp(pitch, -0.48, 0.38);
-      const targetSpeed = boost ? 88 : 51 + Math.max(0, -pitch) * 28;
-      speed = THREE.MathUtils.lerp(speed, targetSpeed, 1 - Math.pow(0.94, dt * 60));
+      const targetPitch = clamp(climb * 0.25 + flapKick * 0.12, -0.27, 0.3);
+      pitch = THREE.MathUtils.lerp(pitch, targetPitch, 1 - Math.pow(0.88, dt * 60));
+      const targetRoll = turn * 0.48;
+      roll = THREE.MathUtils.lerp(roll, targetRoll, 1 - Math.pow(0.8, dt * 60));
+      const targetSpeed = boost ? 70 : 44 + Math.max(0, -pitch) * 30 - Math.max(0, pitch) * 10;
+      speed = THREE.MathUtils.lerp(speed, targetSpeed, 1 - Math.pow(0.96, dt * 60));
 
-      forward.set(Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch));
+      forward.set(-Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch));
+      previousPosition.copy(crow.position);
       if (active) crow.position.addScaledVector(forward, speed * dt);
-      let safeAltitude = 10;
+      let collided = false;
       for (const building of buildingColliders) {
         if (
           Math.abs(crow.position.x - building.x) < building.halfWidth &&
-          Math.abs(crow.position.z - building.z) < building.halfDepth
+          Math.abs(crow.position.z - building.z) < building.halfDepth &&
+          crow.position.y < building.top + 5.5
         ) {
-          safeAltitude = Math.max(safeAltitude, building.top + 5.5);
+          collided = true;
+          break;
         }
       }
-      crow.position.y = clamp(Math.max(crow.position.y, safeAltitude), 10, 390);
-      if (crow.position.y <= safeAltitude + 0.2) pitch = Math.max(pitch, 0.12);
-      if (Math.abs(crow.position.x) > 1120 || Math.abs(crow.position.z) > 1120) {
-        const homeYaw = Math.atan2(-crow.position.x, crow.position.z);
-        yaw = THREE.MathUtils.lerp(yaw, homeYaw, dt * 0.35);
+      if (collided) {
+        crow.position.copy(previousPosition);
+        pitch = Math.max(pitch, 0.15);
+        speed = Math.max(28, speed * 0.82);
+      }
+      crow.position.y = clamp(crow.position.y, 10, 390);
+      if (crow.position.y <= 10.2) pitch = Math.max(pitch, 0.16);
+      if (Math.abs(crow.position.x) > 1080 || Math.abs(crow.position.z) > 1080) {
+        const homeYaw = Math.atan2(crow.position.x, crow.position.z);
+        const angleDifference = Math.atan2(Math.sin(homeYaw - yaw), Math.cos(homeYaw - yaw));
+        yaw += angleDifference * dt * 0.75;
       }
 
-      euler.set(-pitch, yaw, -turn * 0.5);
+      euler.set(-pitch, yaw, roll);
       targetQuat.setFromEuler(euler);
       crow.quaternion.slerp(targetQuat, 1 - Math.pow(0.83, dt * 60));
       wingPhase += dt * (active ? (flapKick > 0 ? 18 : 5.2) : 2.2);
@@ -402,8 +416,8 @@ export function BirdFlight() {
         desiredCamera.copy(crow.position).addScaledVector(forward, 3.1).add(new THREE.Vector3(0, 1.2, 0));
         desiredTarget.copy(crow.position).addScaledVector(forward, 42).add(new THREE.Vector3(0, 1, 0));
       }
-      camera.position.lerp(desiredCamera, 1 - Math.pow(0.88, dt * 60));
-      cameraTarget.lerp(desiredTarget, 1 - Math.pow(0.84, dt * 60));
+      camera.position.lerp(desiredCamera, 1 - Math.pow(0.78, dt * 60));
+      cameraTarget.lerp(desiredTarget, 1 - Math.pow(0.76, dt * 60));
       camera.lookAt(cameraTarget);
 
       if (speedRef.current) speedRef.current.textContent = Math.round(speed).toString();
@@ -486,7 +500,7 @@ export function BirdFlight() {
           </div>
 
           <div className="camera-chip"><span>CAMERA</span>{cameraMode}<kbd>C</kbd></div>
-          <div className="flight-hint"><kbd>SPACE</kbd><span>FLAP</span><kbd>SHIFT</kbd><span>DIVE</span></div>
+          <div className="flight-hint"><kbd>W / S</kbd><span>CLIMB / DIVE</span><kbd>SHIFT</kbd><span>BOOST</span></div>
         </>
       )}
 
@@ -506,10 +520,10 @@ export function BirdFlight() {
           <span className="eyebrow">FLIGHT MANUAL</span>
           <h2>Move like a crow</h2>
           <dl>
-            <div><dt>W / S</dt><dd>Dive / climb</dd></div>
+            <div><dt>W / S</dt><dd>Climb / dive</dd></div>
             <div><dt>A / D</dt><dd>Bank left / right</dd></div>
             <div><dt>Space</dt><dd>Flap for lift</dd></div>
-            <div><dt>Shift</dt><dd>Accelerate into a dive</dd></div>
+            <div><dt>Shift</dt><dd>Controlled speed boost</dd></div>
             <div><dt>C</dt><dd>Switch camera</dd></div>
           </dl>
         </section>
