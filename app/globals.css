@@ -17,6 +17,9 @@ button { font: inherit; }
 .location b { margin-left: 12px; color: var(--acid); font-weight: 500; }
 .pulse { display: inline-block; width: 6px; height: 6px; margin-right: 8px; border-radius: 50%; background: var(--acid); box-shadow: 0 0 0 4px rgba(216,255,98,.13); }
 .icon-button { justify-self: end; width: 38px; height: 38px; border-radius: 50%; border: 1px solid rgba(241,235,216,.35); color: var(--cream); background: rgba(8,25,21,.42); cursor: pointer; }
+.top-actions { justify-self: end; display: flex; gap: 8px; }
+.sound-button { font-size: 13px; opacity: .68; transition: color .2s ease, border-color .2s ease, opacity .2s ease; }
+.sound-button.active { color: var(--acid); border-color: rgba(216,255,98,.65); opacity: 1; }
 .welcome-panel { position: absolute; z-index: 3; left: clamp(30px, 8vw, 130px); top: 50%; width: min(540px, 44vw); transform: translateY(-45%); text-shadow: 0 2px 30px rgba(6,25,20,.24); }
 .welcome-panel .eyebrow { margin-bottom: 18px; color: var(--acid); opacity: 1; }
 .welcome-panel h1 { margin: 0; max-width: 520px; font-size: clamp(62px, 7.3vw, 116px); line-height: .82; letter-spacing: -.072em; font-weight: 800; }

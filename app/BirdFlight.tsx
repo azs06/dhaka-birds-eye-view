@@ -6,6 +6,13 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 
 type CameraMode = "CHASE" | "BIRD'S EYE";
 type BuildingCollider = { x: number; z: number; halfWidth: number; halfDepth: number; top: number };
+type FlightAudio = {
+  start: () => Promise<boolean>;
+  toggle: () => Promise<boolean>;
+  flap: () => void;
+  setFlight: (speed: number, altitude: number) => void;
+  dispose: () => void;
+};
 
 const clamp = THREE.MathUtils.clamp;
 
@@ -14,6 +21,130 @@ function seededRandom(seed = 713) {
   return () => {
     value = (value * 16807) % 2147483647;
     return (value - 1) / 2147483646;
+  };
+}
+
+function createFlightAudio(): FlightAudio {
+  let context: AudioContext | null = null;
+  let master: GainNode | null = null;
+  let windGain: GainNode | null = null;
+  let windFilter: BiquadFilterNode | null = null;
+  let waterGain: GainNode | null = null;
+  let cityGain: GainNode | null = null;
+  let flapBuffer: AudioBuffer | null = null;
+  let enabled = false;
+
+  const makeNoise = (audioContext: AudioContext, duration: number, softness = 0.76) => {
+    const buffer = audioContext.createBuffer(1, audioContext.sampleRate * duration, audioContext.sampleRate);
+    const data = buffer.getChannelData(0);
+    let previous = 0;
+    for (let i = 0; i < data.length; i++) {
+      const white = Math.random() * 2 - 1;
+      previous = previous * softness + white * (1 - softness);
+      data[i] = previous;
+    }
+    return buffer;
+  };
+
+  const initialize = () => {
+    if (context) return;
+    context = new AudioContext();
+    master = context.createGain();
+    master.gain.value = 0;
+    master.connect(context.destination);
+
+    const windSource = context.createBufferSource();
+    windSource.buffer = makeNoise(context, 4.5, 0.84);
+    windSource.loop = true;
+    windFilter = context.createBiquadFilter();
+    windFilter.type = "lowpass";
+    windFilter.frequency.value = 620;
+    windFilter.Q.value = 0.45;
+    windGain = context.createGain();
+    windGain.gain.value = 0.038;
+    windSource.connect(windFilter).connect(windGain).connect(master);
+    windSource.start();
+
+    const waterSource = context.createBufferSource();
+    waterSource.buffer = makeNoise(context, 5.2, 0.91);
+    waterSource.loop = true;
+    const waterFilter = context.createBiquadFilter();
+    waterFilter.type = "bandpass";
+    waterFilter.frequency.value = 920;
+    waterFilter.Q.value = 0.7;
+    waterGain = context.createGain();
+    waterGain.gain.value = 0.01;
+    waterSource.connect(waterFilter).connect(waterGain).connect(master);
+    waterSource.start();
+
+    const cityTone = context.createOscillator();
+    cityTone.type = "sine";
+    cityTone.frequency.value = 73;
+    cityGain = context.createGain();
+    cityGain.gain.value = 0.008;
+    cityTone.connect(cityGain).connect(master);
+    cityTone.start();
+
+    const breath = context.createOscillator();
+    breath.type = "sine";
+    breath.frequency.value = 0.08;
+    const breathDepth = context.createGain();
+    breathDepth.gain.value = 0.008;
+    breath.connect(breathDepth).connect(windGain.gain);
+    breath.start();
+
+    flapBuffer = makeNoise(context, 0.34, 0.68);
+  };
+
+  const start = async () => {
+    initialize();
+    if (!context || !master) return false;
+    await context.resume();
+    enabled = true;
+    master.gain.cancelScheduledValues(context.currentTime);
+    master.gain.setTargetAtTime(0.28, context.currentTime, 0.45);
+    return true;
+  };
+
+  return {
+    start,
+    async toggle() {
+      if (!context || !master) return start();
+      if (context.state === "suspended") await context.resume();
+      enabled = !enabled;
+      master.gain.cancelScheduledValues(context.currentTime);
+      master.gain.setTargetAtTime(enabled ? 0.28 : 0, context.currentTime, 0.18);
+      return enabled;
+    },
+    flap() {
+      if (!enabled || !context || !master || !flapBuffer) return;
+      const source = context.createBufferSource();
+      source.buffer = flapBuffer;
+      const filter = context.createBiquadFilter();
+      filter.type = "lowpass";
+      filter.frequency.value = 780;
+      const gain = context.createGain();
+      const now = context.currentTime;
+      gain.gain.setValueAtTime(0.001, now);
+      gain.gain.exponentialRampToValueAtTime(0.055, now + 0.045);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+      source.connect(filter).connect(gain).connect(master);
+      source.start(now);
+    },
+    setFlight(speed, altitude) {
+      if (!context || !windGain || !windFilter || !waterGain || !cityGain) return;
+      const now = context.currentTime;
+      windGain.gain.setTargetAtTime(0.025 + speed / 1450, now, 0.35);
+      windFilter.frequency.setTargetAtTime(420 + speed * 7.5, now, 0.4);
+      const nearness = clamp(1 - altitude / 190, 0, 1);
+      waterGain.gain.setTargetAtTime(0.004 + nearness * 0.021, now, 0.7);
+      cityGain.gain.setTargetAtTime(0.004 + nearness * 0.008, now, 0.8);
+    },
+    dispose() {
+      enabled = false;
+      context?.close();
+      context = null;
+    },
   };
 }
 
@@ -307,13 +438,17 @@ export function BirdFlight() {
   const mapBirdRef = useRef<HTMLDivElement>(null);
   const flyingRef = useRef(false);
   const cameraModeRef = useRef<CameraMode>("CHASE");
+  const audioRef = useRef<FlightAudio | null>(null);
   const [flying, setFlying] = useState(false);
   const [cameraMode, setCameraMode] = useState<CameraMode>("CHASE");
   const [controlsOpen, setControlsOpen] = useState(false);
+  const [soundOn, setSoundOn] = useState(false);
 
   useEffect(() => {
     const mount = mountRef.current;
     if (!mount) return;
+    const flightAudio = createFlightAudio();
+    audioRef.current = flightAudio;
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x9fc6c9);
@@ -398,7 +533,10 @@ export function BirdFlight() {
         cameraModeRef.current = next;
         setCameraMode(next);
       }
-      if (event.code === "Space" && !event.repeat && flyingRef.current) flapKick = 1;
+      if (event.code === "Space" && !event.repeat && flyingRef.current) {
+        flapKick = 1;
+        flightAudio.flap();
+      }
     };
     const onKeyUp = (event: KeyboardEvent) => keys.delete(event.code);
     window.addEventListener("keydown", onKeyDown, { passive: false });
@@ -496,6 +634,7 @@ export function BirdFlight() {
 
       if (speedRef.current) speedRef.current.textContent = Math.round(speed).toString();
       if (altitudeRef.current) altitudeRef.current.textContent = Math.round(crow.position.y).toString();
+      flightAudio.setFlight(speed, crow.position.y);
       if (compassRef.current) {
         const headings = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
         const headingIndex = Math.round((((yaw % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2)) / (Math.PI / 4)) % 8;
@@ -513,6 +652,8 @@ export function BirdFlight() {
 
     return () => {
       disposed = true;
+      flightAudio.dispose();
+      audioRef.current = null;
       cancelAnimationFrame(animation);
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
@@ -529,9 +670,14 @@ export function BirdFlight() {
     };
   }, []);
 
-  const beginFlight = () => {
+  const beginFlight = async () => {
     flyingRef.current = true;
     setFlying(true);
+    setSoundOn(await audioRef.current?.start() ?? false);
+  };
+
+  const toggleSound = async () => {
+    setSoundOn(await audioRef.current?.toggle() ?? false);
   };
 
   return (
@@ -545,7 +691,10 @@ export function BirdFlight() {
           <div><strong>BIRD'S EYE VIEW</strong><small>DHAKA · EARLY FLIGHT</small></div>
         </div>
         <div className="location"><span className="pulse" /> HATIRJHEEL, DHAKA <b>23.7498° N</b></div>
-        <button className="icon-button" onClick={() => setControlsOpen((value) => !value)} aria-label="Show flight controls">?</button>
+        <div className="top-actions">
+          <button className={`icon-button sound-button${soundOn ? " active" : ""}`} onClick={toggleSound} aria-label={soundOn ? "Mute ambient sound" : "Enable ambient sound"}>♫</button>
+          <button className="icon-button" onClick={() => setControlsOpen((value) => !value)} aria-label="Show flight controls">?</button>
+        </div>
       </header>
 
       {flying && (
