@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 
 type CameraMode = "CHASE" | "BIRD'S EYE";
+type BuildingCollider = { x: number; z: number; halfWidth: number; halfDepth: number; top: number };
 
 const clamp = THREE.MathUtils.clamp;
 
@@ -17,57 +18,89 @@ function seededRandom(seed = 713) {
 
 function makeCrow() {
   const crow = new THREE.Group();
-  const black = new THREE.MeshStandardMaterial({ color: 0x12181b, roughness: 0.72 });
-  const feather = new THREE.MeshStandardMaterial({ color: 0x20282b, roughness: 0.62 });
-  const beak = new THREE.MeshStandardMaterial({ color: 0x2d3638, roughness: 0.8 });
+  const black = new THREE.MeshStandardMaterial({ color: 0x111719, roughness: 0.7, flatShading: true });
+  const feather = new THREE.MeshStandardMaterial({ color: 0x202a2d, roughness: 0.58, flatShading: true, side: THREE.DoubleSide });
+  const featherEdge = new THREE.MeshStandardMaterial({ color: 0x151d20, roughness: 0.72, flatShading: true });
+  const beakMaterial = new THREE.MeshStandardMaterial({ color: 0x343d3e, roughness: 0.82, flatShading: true });
 
-  const body = new THREE.Mesh(new THREE.SphereGeometry(1, 10, 8), black);
-  body.scale.set(1.25, 0.82, 2.15);
+  const body = new THREE.Mesh(new THREE.SphereGeometry(1, 12, 8), black);
+  body.scale.set(0.92, 0.67, 1.72);
   body.castShadow = true;
   crow.add(body);
 
-  const chest = new THREE.Mesh(new THREE.SphereGeometry(0.8, 9, 7), feather);
-  chest.position.set(0, 0.2, -1.2);
-  chest.scale.set(0.9, 0.9, 1.05);
-  chest.castShadow = true;
-  crow.add(chest);
+  const neck = new THREE.Mesh(new THREE.SphereGeometry(0.7, 10, 7), feather);
+  neck.position.set(0, 0.28, -1.15);
+  neck.scale.set(0.9, 0.92, 1.08);
+  neck.castShadow = true;
+  crow.add(neck);
 
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.73, 10, 8), black);
-  head.position.set(0, 0.68, -2.05);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.57, 10, 7), black);
+  head.position.set(0, 0.57, -1.77);
+  head.scale.set(0.94, 1, 1.08);
   head.castShadow = true;
   crow.add(head);
 
-  const bill = new THREE.Mesh(new THREE.ConeGeometry(0.38, 1.35, 5), beak);
-  bill.rotation.x = -Math.PI / 2;
-  bill.position.set(0, 0.55, -3.02);
+  const billGeometry = new THREE.BufferGeometry();
+  billGeometry.setAttribute("position", new THREE.Float32BufferAttribute([
+    -0.31, 0.17, 0, 0.31, 0.17, 0, -0.27, -0.16, 0, 0.27, -0.16, 0,
+    -0.035, 0.01, -1.16, 0.035, 0.01, -1.16,
+  ], 3));
+  billGeometry.setIndex([0, 1, 4, 1, 5, 4, 2, 4, 3, 3, 4, 5, 0, 4, 2, 1, 3, 5, 0, 2, 3, 0, 3, 1]);
+  billGeometry.computeVertexNormals();
+  const bill = new THREE.Mesh(billGeometry, beakMaterial);
+  bill.position.set(0, 0.47, -2.13);
+  bill.castShadow = true;
   crow.add(bill);
 
-  const eyeMaterial = new THREE.MeshBasicMaterial({ color: 0xd8d4b9 });
+  const eyeMaterial = new THREE.MeshStandardMaterial({ color: 0x202526, roughness: 0.25, metalness: 0.18 });
   for (const side of [-1, 1]) {
-    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.07, 6, 4), eyeMaterial);
-    eye.position.set(side * 0.63, 0.88, -2.31);
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.055, 7, 5), eyeMaterial);
+    eye.position.set(side * 0.53, 0.72, -1.99);
     crow.add(eye);
   }
 
   const makeWing = (side: number) => {
     const pivot = new THREE.Group();
-    pivot.position.set(side * 0.7, 0.18, -0.25);
+    pivot.position.set(side * 0.64, 0.16, -0.5);
     const geometry = new THREE.BufferGeometry();
     const s = side;
-    geometry.setAttribute(
-      "position",
-      new THREE.Float32BufferAttribute([
-        0, 0, -1.2,
-        s * 6.8, 0.05, 0.6,
-        s * 4.8, 0.02, 2.2,
-        0, 0, 1.1,
-      ], 3),
-    );
-    geometry.setIndex([0, 1, 2, 0, 2, 3]);
+    const outline = [
+      [0, -0.7], [s * 2.6, -0.24], [s * 5.7, 0.72],
+      [s * 5.15, 1.45], [s * 3.65, 2.18], [s * 1.65, 1.72], [0, 1.18],
+    ];
+    const thickness = 0.12;
+    const positions: number[] = [];
+    outline.forEach(([x, z]) => positions.push(x, thickness, z));
+    outline.forEach(([x, z]) => positions.push(x, -thickness, z));
+    const count = outline.length;
+    const indices: number[] = [];
+    for (let i = 1; i < count - 1; i++) indices.push(0, i, i + 1, count, count + i + 1, count + i);
+    for (let i = 0; i < count; i++) {
+      const next = (i + 1) % count;
+      indices.push(i, count + i, next, next, count + i, count + next);
+    }
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setIndex(indices);
     geometry.computeVertexNormals();
     const wing = new THREE.Mesh(geometry, feather);
     wing.castShadow = true;
     pivot.add(wing);
+
+    const shoulder = new THREE.Mesh(new THREE.SphereGeometry(0.76, 9, 6), featherEdge);
+    shoulder.scale.set(1.65, 0.26, 1.5);
+    shoulder.position.set(s * 0.34, 0.13, 0.2);
+    shoulder.castShadow = true;
+    pivot.add(shoulder);
+
+    for (let i = 0; i < 4; i++) {
+      const primary = new THREE.Mesh(new THREE.ConeGeometry(0.17, 1.65 + i * 0.15, 4), featherEdge);
+      primary.rotation.z = side * -Math.PI / 2;
+      primary.rotation.y = side * (0.08 + i * 0.025);
+      primary.position.set(s * (3.95 + i * 0.33), -0.02, 1.25 + i * 0.2);
+      primary.scale.z = 0.58;
+      primary.castShadow = true;
+      pivot.add(primary);
+    }
     crow.add(pivot);
     return pivot;
   };
@@ -75,15 +108,25 @@ function makeCrow() {
   const leftWing = makeWing(-1);
   const rightWing = makeWing(1);
 
-  for (const offset of [-0.52, 0, 0.52]) {
-    const tail = new THREE.Mesh(new THREE.ConeGeometry(0.48, 2.9, 3), feather);
+  for (const offset of [-0.42, 0, 0.42]) {
+    const tail = new THREE.Mesh(new THREE.ConeGeometry(0.32, 2.45, 4), featherEdge);
     tail.rotation.x = Math.PI / 2;
-    tail.position.set(offset, 0, 2.75);
-    tail.scale.x = 0.9;
+    tail.position.set(offset, -0.02, 2.25 + Math.abs(offset) * 0.28);
+    tail.scale.x = 1.25;
+    tail.castShadow = true;
     crow.add(tail);
   }
 
-  crow.scale.setScalar(0.78);
+  const legMaterial = new THREE.MeshStandardMaterial({ color: 0x33393a, roughness: 0.9 });
+  for (const side of [-1, 1]) {
+    const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.07, 0.72, 5), legMaterial);
+    leg.position.set(side * 0.34, -0.67, 0.35);
+    leg.rotation.x = -0.72;
+    leg.castShadow = true;
+    crow.add(leg);
+  }
+
+  crow.scale.setScalar(0.92);
   crow.userData.leftWing = leftWing;
   crow.userData.rightWing = rightWing;
   return crow;
@@ -91,6 +134,7 @@ function makeCrow() {
 
 function addCity(scene: THREE.Scene) {
   const random = seededRandom();
+  const colliders: BuildingCollider[] = [];
   const ground = new THREE.Mesh(
     new THREE.PlaneGeometry(2400, 2400),
     new THREE.MeshStandardMaterial({ color: 0x75856e, roughness: 1 }),
@@ -168,6 +212,13 @@ function addCity(scene: THREE.Scene) {
       building.castShadow = true;
       building.receiveShadow = true;
       scene.add(building);
+      colliders.push({
+        x: building.position.x,
+        z: building.position.z,
+        halfWidth: width * 0.58,
+        halfDepth: depth * 0.58,
+        top: height,
+      });
 
       if (height > 48) {
         const windows = new THREE.Mesh(new THREE.PlaneGeometry(width * 0.72, height * 0.72), windowMaterial);
@@ -208,6 +259,8 @@ function addCity(scene: THREE.Scene) {
   tower.add(spire);
   tower.position.set(720, 0, -430);
   scene.add(tower);
+  colliders.push({ x: 720, z: -430, halfWidth: 32, halfDepth: 32, top: 220 });
+  return colliders;
 }
 
 export function BirdFlight() {
@@ -255,7 +308,7 @@ export function BirdFlight() {
     const sunDisc = new THREE.Mesh(new THREE.SphereGeometry(34, 16, 12), new THREE.MeshBasicMaterial({ color: 0xffd394 }));
     sunDisc.position.set(-700, 570, -1300);
     scene.add(sunDisc);
-    addCity(scene);
+    const buildingColliders = addCity(scene);
 
     const crow = makeCrow();
     crow.position.set(180, 92, 420);
@@ -318,8 +371,17 @@ export function BirdFlight() {
 
       forward.set(Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch));
       if (active) crow.position.addScaledVector(forward, speed * dt);
-      crow.position.y = clamp(crow.position.y, 10, 390);
-      if (crow.position.y <= 10.2) pitch = Math.max(pitch, 0.12);
+      let safeAltitude = 10;
+      for (const building of buildingColliders) {
+        if (
+          Math.abs(crow.position.x - building.x) < building.halfWidth &&
+          Math.abs(crow.position.z - building.z) < building.halfDepth
+        ) {
+          safeAltitude = Math.max(safeAltitude, building.top + 5.5);
+        }
+      }
+      crow.position.y = clamp(Math.max(crow.position.y, safeAltitude), 10, 390);
+      if (crow.position.y <= safeAltitude + 0.2) pitch = Math.max(pitch, 0.12);
       if (Math.abs(crow.position.x) > 1120 || Math.abs(crow.position.z) > 1120) {
         const homeYaw = Math.atan2(-crow.position.x, crow.position.z);
         yaw = THREE.MathUtils.lerp(yaw, homeYaw, dt * 0.35);
