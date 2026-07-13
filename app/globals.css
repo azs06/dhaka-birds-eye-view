@@ -55,6 +55,11 @@ kbd { display: inline-grid; min-width: 23px; height: 22px; padding: 0 5px; place
 .camera-chip kbd { margin: 0; }
 .flight-hint { position: absolute; z-index: 3; left: 30px; bottom: 34px; display: flex; align-items: center; gap: 5px; font: 500 8px var(--font-mono); letter-spacing: .1em; }
 .flight-hint span { margin-right: 9px; opacity: .7; }
+.perch-prompt { position: absolute; z-index: 5; left: 50%; bottom: 102px; display: flex; align-items: center; gap: 7px; padding: 9px 13px; transform: translate(-50%, 12px); background: rgba(9,27,22,.82); border: 1px solid rgba(216,255,98,.38); font: 600 9px var(--font-mono); letter-spacing: .1em; opacity: 0; pointer-events: none; transition: opacity .2s ease, transform .2s ease; }
+.perch-prompt[data-visible="true"] { opacity: 1; transform: translate(-50%, 0); }
+.perch-prompt kbd { color: var(--acid); border-color: rgba(216,255,98,.55); }
+.resting-chip { position: absolute; z-index: 4; left: 50%; top: 108px; transform: translateX(-50%); padding: 9px 13px; background: rgba(9,27,22,.72); border: 1px solid rgba(241,235,216,.18); font: 500 8px var(--font-mono); letter-spacing: .14em; backdrop-filter: blur(10px); }
+.resting-chip i { display: inline-block; width: 5px; height: 5px; margin-right: 7px; border-radius: 50%; background: var(--acid); }
 .controls-panel { position: absolute; z-index: 10; top: 50%; right: 34px; width: 320px; padding: 27px; transform: translateY(-50%); background: rgba(9,27,22,.94); border: 1px solid rgba(241,235,216,.2); backdrop-filter: blur(18px); box-shadow: 0 24px 70px rgba(4,18,14,.35); }
 .controls-panel > button { position: absolute; right: 13px; top: 10px; border: 0; color: var(--cream); background: none; font-size: 25px; cursor: pointer; }
 .controls-panel .eyebrow { color: var(--acid); opacity: 1; }

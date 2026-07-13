@@ -153,8 +153,17 @@ const glide = new THREE.AnimationClip("Glide", 2.4, [
   new THREE.QuaternionKeyframeTrack("TailJoint.quaternion", glideTimes, quaternionValues(new THREE.Vector3(1, 0, 0), [0.02, -0.035, 0.02])),
 ]);
 
+const restTimes = [0, 1.5, 3];
+const rest = new THREE.AnimationClip("Rest", 3, [
+  new THREE.QuaternionKeyframeTrack("WingJoint.L.quaternion", restTimes, quaternionValues(new THREE.Vector3(0, 0, 1), [-1.12, -1.18, -1.12])),
+  new THREE.QuaternionKeyframeTrack("WingJoint.R.quaternion", restTimes, quaternionValues(new THREE.Vector3(0, 0, 1), [1.12, 1.18, 1.12])),
+  new THREE.QuaternionKeyframeTrack("HeadJoint.quaternion", restTimes, quaternionValues(new THREE.Vector3(0, 1, 0), [-0.16, 0.18, -0.16])),
+  new THREE.VectorKeyframeTrack("BodyJoint.position", restTimes, [0,0,0, 0,0.025,0, 0,0,0]),
+  new THREE.QuaternionKeyframeTrack("TailJoint.quaternion", restTimes, quaternionValues(new THREE.Vector3(1, 0, 0), [0.09, 0.06, 0.09])),
+]);
+
 const exporter = new GLTFExporter();
-const result = await exporter.parseAsync(scene, { binary: true, animations: [flap, glide], onlyVisible: true });
+const result = await exporter.parseAsync(scene, { binary: true, animations: [flap, glide, rest], onlyVisible: true });
 await mkdir("public/models", { recursive: true });
 await writeFile("public/models/dhaka-house-crow.glb", Buffer.from(result));
 console.log("Created public/models/dhaka-house-crow.glb");

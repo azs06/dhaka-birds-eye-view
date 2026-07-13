@@ -6,6 +6,7 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 
 type CameraMode = "CHASE" | "BIRD'S EYE";
 type BuildingCollider = { x: number; z: number; halfWidth: number; halfDepth: number; top: number };
+type Perch = { position: THREE.Vector3; label: string; heading: number };
 type FlightAudio = {
   start: () => Promise<boolean>;
   toggle: () => Promise<boolean>;
@@ -424,6 +425,22 @@ function addCity(scene: THREE.Scene) {
   scene.add(tower);
   colliders.push({ x: 720, z: -430, halfWidth: 32, halfDepth: 32, top: 220 });
 
+  const perches: Perch[] = [
+    { position: new THREE.Vector3(-571, 13, Math.sin(-590 * 0.0042) * 90 + 78), label: "West bridge rail", heading: 0 },
+    { position: new THREE.Vector3(-51, 13, Math.sin(-70 * 0.0042) * 90 - 72), label: "Central bridge rail", heading: Math.PI },
+    { position: new THREE.Vector3(529, 13, Math.sin(510 * 0.0042) * 90 + 62), label: "East bridge rail", heading: 0 },
+    { position: new THREE.Vector3(745, 174, -430), label: "Tower crown", heading: -Math.PI / 2 },
+  ];
+  const perchMaterial = new THREE.MeshStandardMaterial({ color: 0x4a5552, roughness: 0.72, metalness: 0.2 });
+  for (const perch of perches) {
+    const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.42, 17, 12), perchMaterial);
+    bar.position.copy(perch.position);
+    bar.rotation.x = Math.PI / 2;
+    bar.castShadow = true;
+    scene.add(bar);
+  }
+  scene.userData.perches = perches;
+
   const clouds: THREE.Group[] = [];
   const cloudMaterial = new THREE.MeshStandardMaterial({ color: 0xe9e5d5, roughness: 1, transparent: true, opacity: 0.55 });
   for (let i = 0; i < 7; i++) {
@@ -449,12 +466,16 @@ export function BirdFlight() {
   const altitudeRef = useRef<HTMLSpanElement>(null);
   const compassRef = useRef<HTMLSpanElement>(null);
   const mapBirdRef = useRef<HTMLDivElement>(null);
+  const perchPromptRef = useRef<HTMLDivElement>(null);
+  const perchLabelRef = useRef<HTMLSpanElement>(null);
   const flyingRef = useRef(false);
   const pausedRef = useRef(false);
+  const restingRef = useRef(false);
   const cameraModeRef = useRef<CameraMode>("CHASE");
   const audioRef = useRef<FlightAudio | null>(null);
   const [flying, setFlying] = useState(false);
   const [paused, setPaused] = useState(false);
+  const [resting, setResting] = useState(false);
   const [cameraMode, setCameraMode] = useState<CameraMode>("CHASE");
   const [controlsOpen, setControlsOpen] = useState(false);
   const [soundOn, setSoundOn] = useState(false);
@@ -503,6 +524,7 @@ export function BirdFlight() {
     let mixer: THREE.AnimationMixer | null = null;
     let flapAction: THREE.AnimationAction | null = null;
     let glideAction: THREE.AnimationAction | null = null;
+    let restAction: THREE.AnimationAction | null = null;
     let disposed = false;
     new GLTFLoader().load("/models/dhaka-house-crow.glb", (gltf) => {
       if (disposed) return;
@@ -518,10 +540,13 @@ export function BirdFlight() {
       mixer = new THREE.AnimationMixer(model);
       flapAction = mixer.clipAction(gltf.animations.find((clip) => clip.name === "Flap") ?? gltf.animations[0]);
       glideAction = mixer.clipAction(gltf.animations.find((clip) => clip.name === "Glide") ?? gltf.animations[1]);
+      restAction = mixer.clipAction(gltf.animations.find((clip) => clip.name === "Rest") ?? gltf.animations[2]);
       flapAction.play();
       glideAction.play();
+      restAction.play();
       flapAction.setEffectiveWeight(0.08);
       glideAction.setEffectiveWeight(0.92);
+      restAction.setEffectiveWeight(0);
     });
 
     const keys = new Set<string>();
@@ -539,6 +564,7 @@ export function BirdFlight() {
     const targetQuat = new THREE.Quaternion();
     const euler = new THREE.Euler(0, 0, 0, "YXZ");
     const cameraTarget = new THREE.Vector3();
+    let nearestPerch: Perch | null = null;
 
     const onKeyDown = (event: KeyboardEvent) => {
       keys.add(event.code);
@@ -548,7 +574,8 @@ export function BirdFlight() {
         cameraModeRef.current = next;
         setCameraMode(next);
       }
-      if (event.code === "KeyP" && !event.repeat && flyingRef.current) {
+      if ((event.code === "KeyP" || event.code === "Escape") && !event.repeat && flyingRef.current) {
+        event.preventDefault();
         const nextPaused = !pausedRef.current;
         pausedRef.current = nextPaused;
         setPaused(nextPaused);
@@ -558,6 +585,26 @@ export function BirdFlight() {
       if (event.code === "Space" && !event.repeat && flyingRef.current && !pausedRef.current) {
         flapKick = 1;
         flightAudio.flap();
+      }
+      if (event.code === "KeyE" && !event.repeat && flyingRef.current && !pausedRef.current) {
+        if (restingRef.current) {
+          restingRef.current = false;
+          setResting(false);
+          crow.position.y += 5;
+          speed = 34;
+          pitch = 0.16;
+          flapKick = 1;
+          flightAudio.flap();
+        } else if (nearestPerch) {
+          restingRef.current = true;
+          setResting(true);
+          crow.position.copy(nearestPerch.position).add(new THREE.Vector3(0, 1.6, 0));
+          yaw = nearestPerch.heading;
+          yawRate = 0;
+          pitch = 0;
+          roll = 0;
+          speed = 0;
+        }
       }
     };
     const onKeyUp = (event: KeyboardEvent) => keys.delete(event.code);
@@ -577,7 +624,7 @@ export function BirdFlight() {
     const animate = () => {
       animation = requestAnimationFrame(animate);
       const dt = Math.min(clock.getDelta(), 0.035);
-      const active = flyingRef.current && !pausedRef.current;
+      const active = flyingRef.current && !pausedRef.current && !restingRef.current;
       const turn = active ? (keys.has("KeyA") || keys.has("ArrowLeft") ? 1 : 0) - (keys.has("KeyD") || keys.has("ArrowRight") ? 1 : 0) : 0;
       const climb = active ? (keys.has("KeyW") || keys.has("ArrowUp") ? 1 : 0) - (keys.has("KeyS") || keys.has("ArrowDown") ? 1 : 0) : 0;
       const boost = active && (keys.has("ShiftLeft") || keys.has("ShiftRight"));
@@ -597,14 +644,16 @@ export function BirdFlight() {
       previousPosition.copy(crow.position);
       if (active) crow.position.addScaledVector(forward, speed * dt);
       let collided = false;
-      for (const building of buildingColliders) {
-        if (
-          Math.abs(crow.position.x - building.x) < building.halfWidth &&
-          Math.abs(crow.position.z - building.z) < building.halfDepth &&
-          crow.position.y < building.top + 5.5
-        ) {
-          collided = true;
-          break;
+      if (!restingRef.current) {
+        for (const building of buildingColliders) {
+          if (
+            Math.abs(crow.position.x - building.x) < building.halfWidth &&
+            Math.abs(crow.position.z - building.z) < building.halfDepth &&
+            crow.position.y < building.top + 5.5
+          ) {
+            collided = true;
+            break;
+          }
         }
       }
       if (collided) {
@@ -623,14 +672,41 @@ export function BirdFlight() {
       euler.set(-pitch, yaw, roll);
       targetQuat.setFromEuler(euler);
       crow.quaternion.slerp(targetQuat, 1 - Math.pow(0.83, dt * 60));
-      if (!pausedRef.current && mixer && flapAction && glideAction) {
-        const desiredFlapWeight = active ? (flapKick > 0 ? 0.96 : 0.16) : 0.08;
+      if (!pausedRef.current && mixer && flapAction && glideAction && restAction) {
+        const desiredRestWeight = restingRef.current ? 0.96 : 0;
+        const restWeight = THREE.MathUtils.lerp(restAction.getEffectiveWeight(), desiredRestWeight, 1 - Math.pow(0.78, dt * 60));
+        restAction.setEffectiveWeight(restWeight);
+        restAction.timeScale = 0.55;
+        const desiredFlapWeight = active ? (flapKick > 0 ? 0.96 : 0.16) : 0;
         const flapWeight = THREE.MathUtils.lerp(flapAction.getEffectiveWeight(), desiredFlapWeight, 1 - Math.pow(0.8, dt * 60));
         flapAction.setEffectiveWeight(flapWeight);
         flapAction.timeScale = flapKick > 0 ? 2.15 : 0.7;
-        glideAction.setEffectiveWeight(1 - flapWeight);
+        glideAction.setEffectiveWeight(Math.max(0, 1 - flapWeight - restWeight));
         glideAction.timeScale = 0.72;
         mixer.update(dt);
+      }
+
+      nearestPerch = null;
+      let nearestDistance = Number.POSITIVE_INFINITY;
+      if (!restingRef.current && !pausedRef.current) {
+        for (const perch of scene.userData.perches as Perch[]) {
+          const distance = crow.position.distanceTo(perch.position);
+          if (distance < 27 && distance < nearestDistance) {
+            nearestPerch = perch;
+            nearestDistance = distance;
+          }
+        }
+      }
+      if (perchPromptRef.current && perchLabelRef.current) {
+        if (restingRef.current) {
+          perchPromptRef.current.dataset.visible = "true";
+          perchLabelRef.current.textContent = "TAKE OFF";
+        } else if (nearestPerch) {
+          perchPromptRef.current.dataset.visible = "true";
+          perchLabelRef.current.textContent = `LAND · ${nearestPerch.label.toUpperCase()}`;
+        } else {
+          perchPromptRef.current.dataset.visible = "false";
+        }
       }
 
       if (!pausedRef.current) {
@@ -697,8 +773,10 @@ export function BirdFlight() {
   const beginFlight = async () => {
     flyingRef.current = true;
     pausedRef.current = false;
+    restingRef.current = false;
     setFlying(true);
     setPaused(false);
+    setResting(false);
     setSoundOn(await audioRef.current?.start() ?? false);
   };
 
@@ -763,6 +841,8 @@ export function BirdFlight() {
 
           <div className="camera-chip"><span>CAMERA</span>{cameraMode}<kbd>C</kbd></div>
           <div className="flight-hint"><kbd>W / S</kbd><span>CLIMB / DIVE</span><kbd>SHIFT</kbd><span>BOOST</span></div>
+          <div ref={perchPromptRef} className="perch-prompt" data-visible="false"><kbd>E</kbd><span ref={perchLabelRef}>LAND</span></div>
+          {resting && <div className="resting-chip"><i /> RESTING · WATCHING DHAKA</div>}
         </>
       )}
 
@@ -787,7 +867,8 @@ export function BirdFlight() {
             <div><dt>Space</dt><dd>Flap for lift</dd></div>
             <div><dt>Shift</dt><dd>Controlled speed boost</dd></div>
             <div><dt>C</dt><dd>Switch camera</dd></div>
-            <div><dt>P</dt><dd>Pause / resume flight</dd></div>
+            <div><dt>P / Esc</dt><dd>Pause / resume flight</dd></div>
+            <div><dt>E</dt><dd>Land / take off at a perch</dd></div>
           </dl>
         </section>
       )}
