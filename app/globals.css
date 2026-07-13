@@ -20,6 +20,8 @@ button { font: inherit; }
 .top-actions { justify-self: end; display: flex; gap: 8px; }
 .sound-button { font-size: 13px; opacity: .68; transition: color .2s ease, border-color .2s ease, opacity .2s ease; }
 .sound-button.active { color: var(--acid); border-color: rgba(216,255,98,.65); opacity: 1; }
+.pause-button { font: 600 11px var(--font-mono); }
+.pause-button.active { color: var(--acid); border-color: rgba(216,255,98,.65); }
 .welcome-panel { position: absolute; z-index: 3; left: clamp(30px, 8vw, 130px); top: 50%; width: min(540px, 44vw); transform: translateY(-45%); text-shadow: 0 2px 30px rgba(6,25,20,.24); }
 .welcome-panel .eyebrow { margin-bottom: 18px; color: var(--acid); opacity: 1; }
 .welcome-panel h1 { margin: 0; max-width: 520px; font-size: clamp(62px, 7.3vw, 116px); line-height: .82; letter-spacing: -.072em; font-weight: 800; }
@@ -61,6 +63,12 @@ kbd { display: inline-grid; min-width: 23px; height: 22px; padding: 0 5px; place
 .controls-panel dl div { display: grid; grid-template-columns: 92px 1fr; padding: 11px 0; border-top: 1px solid rgba(241,235,216,.12); }
 .controls-panel dt { font: 600 10px var(--font-mono); color: var(--acid); text-transform: uppercase; }
 .controls-panel dd { margin: 0; font-size: 12px; opacity: .7; }
+.pause-overlay { position: absolute; z-index: 8; left: 50%; top: 50%; width: 340px; padding: 30px; transform: translate(-50%, -50%); text-align: center; background: rgba(9,27,22,.91); border: 1px solid rgba(241,235,216,.24); backdrop-filter: blur(18px); box-shadow: 0 28px 90px rgba(4,18,14,.4); }
+.pause-overlay .eyebrow { color: var(--acid); opacity: 1; }
+.pause-overlay h2 { margin: 12px 0 7px; font-size: 31px; letter-spacing: -.03em; }
+.pause-overlay p { margin: 0 0 22px; font-size: 13px; opacity: .65; }
+.pause-overlay small { display: block; margin-top: 17px; font: 500 8px var(--font-mono); letter-spacing: .14em; opacity: .48; }
+.resume-button { gap: 24px; }
 .desktop-note { position: absolute; z-index: 3; right: 28px; bottom: 10px; font: 500 6px var(--font-mono); letter-spacing: .12em; opacity: .48; }
 
 @media (max-width: 900px) {

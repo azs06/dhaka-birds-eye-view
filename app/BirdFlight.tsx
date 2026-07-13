@@ -9,6 +9,8 @@ type BuildingCollider = { x: number; z: number; halfWidth: number; halfDepth: nu
 type FlightAudio = {
   start: () => Promise<boolean>;
   toggle: () => Promise<boolean>;
+  pause: () => void;
+  resume: () => void;
   flap: () => void;
   setFlight: (speed: number, altitude: number) => void;
   dispose: () => void;
@@ -115,6 +117,17 @@ function createFlightAudio(): FlightAudio {
       master.gain.cancelScheduledValues(context.currentTime);
       master.gain.setTargetAtTime(enabled ? 0.28 : 0, context.currentTime, 0.18);
       return enabled;
+    },
+    pause() {
+      if (!context || !master) return;
+      master.gain.cancelScheduledValues(context.currentTime);
+      master.gain.setTargetAtTime(0, context.currentTime, 0.22);
+    },
+    resume() {
+      if (!enabled || !context || !master) return;
+      void context.resume();
+      master.gain.cancelScheduledValues(context.currentTime);
+      master.gain.setTargetAtTime(0.28, context.currentTime, 0.35);
     },
     flap() {
       if (!enabled || !context || !master || !flapBuffer) return;
@@ -437,9 +450,11 @@ export function BirdFlight() {
   const compassRef = useRef<HTMLSpanElement>(null);
   const mapBirdRef = useRef<HTMLDivElement>(null);
   const flyingRef = useRef(false);
+  const pausedRef = useRef(false);
   const cameraModeRef = useRef<CameraMode>("CHASE");
   const audioRef = useRef<FlightAudio | null>(null);
   const [flying, setFlying] = useState(false);
+  const [paused, setPaused] = useState(false);
   const [cameraMode, setCameraMode] = useState<CameraMode>("CHASE");
   const [controlsOpen, setControlsOpen] = useState(false);
   const [soundOn, setSoundOn] = useState(false);
@@ -533,7 +548,14 @@ export function BirdFlight() {
         cameraModeRef.current = next;
         setCameraMode(next);
       }
-      if (event.code === "Space" && !event.repeat && flyingRef.current) {
+      if (event.code === "KeyP" && !event.repeat && flyingRef.current) {
+        const nextPaused = !pausedRef.current;
+        pausedRef.current = nextPaused;
+        setPaused(nextPaused);
+        if (nextPaused) flightAudio.pause();
+        else flightAudio.resume();
+      }
+      if (event.code === "Space" && !event.repeat && flyingRef.current && !pausedRef.current) {
         flapKick = 1;
         flightAudio.flap();
       }
@@ -555,7 +577,7 @@ export function BirdFlight() {
     const animate = () => {
       animation = requestAnimationFrame(animate);
       const dt = Math.min(clock.getDelta(), 0.035);
-      const active = flyingRef.current;
+      const active = flyingRef.current && !pausedRef.current;
       const turn = active ? (keys.has("KeyA") || keys.has("ArrowLeft") ? 1 : 0) - (keys.has("KeyD") || keys.has("ArrowRight") ? 1 : 0) : 0;
       const climb = active ? (keys.has("KeyW") || keys.has("ArrowUp") ? 1 : 0) - (keys.has("KeyS") || keys.has("ArrowDown") ? 1 : 0) : 0;
       const boost = active && (keys.has("ShiftLeft") || keys.has("ShiftRight"));
@@ -601,7 +623,7 @@ export function BirdFlight() {
       euler.set(-pitch, yaw, roll);
       targetQuat.setFromEuler(euler);
       crow.quaternion.slerp(targetQuat, 1 - Math.pow(0.83, dt * 60));
-      if (mixer && flapAction && glideAction) {
+      if (!pausedRef.current && mixer && flapAction && glideAction) {
         const desiredFlapWeight = active ? (flapKick > 0 ? 0.96 : 0.16) : 0.08;
         const flapWeight = THREE.MathUtils.lerp(flapAction.getEffectiveWeight(), desiredFlapWeight, 1 - Math.pow(0.8, dt * 60));
         flapAction.setEffectiveWeight(flapWeight);
@@ -611,14 +633,16 @@ export function BirdFlight() {
         mixer.update(dt);
       }
 
-      for (const car of scene.userData.traffic as THREE.Mesh[]) {
-        car.position.x += car.userData.direction * car.userData.speed * dt;
-        if (car.position.x > 1100) car.position.x = -1100;
-        if (car.position.x < -1100) car.position.x = 1100;
-      }
-      for (const cloud of scene.userData.clouds as THREE.Group[]) {
-        cloud.position.x += cloud.userData.speed * dt;
-        if (cloud.position.x > 1250) cloud.position.x = -1250;
+      if (!pausedRef.current) {
+        for (const car of scene.userData.traffic as THREE.Mesh[]) {
+          car.position.x += car.userData.direction * car.userData.speed * dt;
+          if (car.position.x > 1100) car.position.x = -1100;
+          if (car.position.x < -1100) car.position.x = 1100;
+        }
+        for (const cloud of scene.userData.clouds as THREE.Group[]) {
+          cloud.position.x += cloud.userData.speed * dt;
+          if (cloud.position.x > 1250) cloud.position.x = -1250;
+        }
       }
 
       if (cameraModeRef.current === "CHASE") {
@@ -672,12 +696,25 @@ export function BirdFlight() {
 
   const beginFlight = async () => {
     flyingRef.current = true;
+    pausedRef.current = false;
     setFlying(true);
+    setPaused(false);
     setSoundOn(await audioRef.current?.start() ?? false);
   };
 
   const toggleSound = async () => {
-    setSoundOn(await audioRef.current?.toggle() ?? false);
+    const enabled = await audioRef.current?.toggle() ?? false;
+    if (pausedRef.current && enabled) audioRef.current?.pause();
+    setSoundOn(enabled);
+  };
+
+  const togglePause = () => {
+    if (!flyingRef.current) return;
+    const nextPaused = !pausedRef.current;
+    pausedRef.current = nextPaused;
+    setPaused(nextPaused);
+    if (nextPaused) audioRef.current?.pause();
+    else audioRef.current?.resume();
   };
 
   return (
@@ -693,6 +730,7 @@ export function BirdFlight() {
         <div className="location"><span className="pulse" /> HATIRJHEEL, DHAKA <b>23.7498° N</b></div>
         <div className="top-actions">
           <button className={`icon-button sound-button${soundOn ? " active" : ""}`} onClick={toggleSound} aria-label={soundOn ? "Mute ambient sound" : "Enable ambient sound"}>♫</button>
+          {flying && <button className={`icon-button pause-button${paused ? " active" : ""}`} onClick={togglePause} aria-label={paused ? "Resume flight" : "Pause flight"}>{paused ? "▶" : "Ⅱ"}</button>}
           <button className="icon-button" onClick={() => setControlsOpen((value) => !value)} aria-label="Show flight controls">?</button>
         </div>
       </header>
@@ -749,7 +787,18 @@ export function BirdFlight() {
             <div><dt>Space</dt><dd>Flap for lift</dd></div>
             <div><dt>Shift</dt><dd>Controlled speed boost</dd></div>
             <div><dt>C</dt><dd>Switch camera</dd></div>
+            <div><dt>P</dt><dd>Pause / resume flight</dd></div>
           </dl>
+        </section>
+      )}
+
+      {flying && paused && (
+        <section className="pause-overlay" role="dialog" aria-label="Flight paused">
+          <span className="eyebrow">FLIGHT SUSPENDED</span>
+          <h2>Take a breath.</h2>
+          <p>Your place in the sky is waiting.</p>
+          <button className="primary-button resume-button" onClick={togglePause}><span>RESUME FLIGHT</span><b>▶</b></button>
+          <small>PRESS P TO CONTINUE</small>
         </section>
       )}
 
