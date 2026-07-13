@@ -53,6 +53,8 @@ kbd { display: inline-grid; min-width: 23px; height: 22px; padding: 0 5px; place
 .camera-chip { position: absolute; z-index: 3; right: 29px; top: 112px; display: flex; align-items: center; gap: 11px; padding: 9px 9px 9px 13px; background: var(--glass); font: 500 9px var(--font-mono); letter-spacing: .09em; }
 .camera-chip span { opacity: .5; }
 .camera-chip kbd { margin: 0; }
+.perch-legend { position: absolute; z-index: 3; right: 29px; top: 159px; padding: 8px 11px; background: rgba(9,27,22,.62); border: 1px solid rgba(216,255,98,.2); font: 500 8px var(--font-mono); letter-spacing: .12em; backdrop-filter: blur(9px); }
+.perch-legend i { display: inline-block; width: 7px; height: 7px; margin-right: 7px; border: 1px solid var(--acid); border-radius: 50%; box-shadow: 0 0 8px rgba(216,255,98,.65); }
 .flight-hint { position: absolute; z-index: 3; left: 30px; bottom: 34px; display: flex; align-items: center; gap: 5px; font: 500 8px var(--font-mono); letter-spacing: .1em; }
 .flight-hint span { margin-right: 9px; opacity: .7; }
 .perch-prompt { position: absolute; z-index: 5; left: 50%; bottom: 102px; display: flex; align-items: center; gap: 7px; padding: 9px 13px; transform: translate(-50%, 12px); background: rgba(9,27,22,.82); border: 1px solid rgba(216,255,98,.38); font: 600 9px var(--font-mono); letter-spacing: .1em; opacity: 0; pointer-events: none; transition: opacity .2s ease, transform .2s ease; }

@@ -432,14 +432,43 @@ function addCity(scene: THREE.Scene) {
     { position: new THREE.Vector3(745, 174, -430), label: "Tower crown", heading: -Math.PI / 2 },
   ];
   const perchMaterial = new THREE.MeshStandardMaterial({ color: 0x4a5552, roughness: 0.72, metalness: 0.2 });
-  for (const perch of perches) {
+  const perchMarkers: THREE.Group[] = [];
+  for (const [index, perch] of perches.entries()) {
     const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.42, 17, 12), perchMaterial);
     bar.position.copy(perch.position);
     bar.rotation.x = Math.PI / 2;
     bar.castShadow = true;
     scene.add(bar);
+
+    const marker = new THREE.Group();
+    marker.position.copy(perch.position).add(new THREE.Vector3(0, 3.2, 0));
+    marker.userData.baseY = marker.position.y;
+    marker.userData.phase = index * 0.9;
+    const markerMaterial = new THREE.MeshBasicMaterial({
+      color: 0xd8ff62,
+      transparent: true,
+      opacity: 0.68,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(3.3, 0.12, 10, 40), markerMaterial);
+    ring.rotation.x = Math.PI / 2;
+    marker.add(ring);
+    const innerRing = new THREE.Mesh(new THREE.TorusGeometry(1.45, 0.06, 8, 32), markerMaterial.clone());
+    innerRing.rotation.x = Math.PI / 2;
+    innerRing.position.y = 0.25;
+    marker.add(innerRing);
+    const shimmer = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.08, 0.34, 5.5, 10, 1, true),
+      new THREE.MeshBasicMaterial({ color: 0xd8ff62, transparent: true, opacity: 0.16, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide }),
+    );
+    shimmer.position.y = 2.8;
+    marker.add(shimmer);
+    scene.add(marker);
+    perchMarkers.push(marker);
   }
   scene.userData.perches = perches;
+  scene.userData.perchMarkers = perchMarkers;
 
   const clouds: THREE.Group[] = [];
   const cloudMaterial = new THREE.MeshStandardMaterial({ color: 0xe9e5d5, roughness: 1, transparent: true, opacity: 0.55 });
@@ -719,6 +748,22 @@ export function BirdFlight() {
           cloud.position.x += cloud.userData.speed * dt;
           if (cloud.position.x > 1250) cloud.position.x = -1250;
         }
+        const markerTime = clock.elapsedTime;
+        for (const marker of scene.userData.perchMarkers as THREE.Group[]) {
+          const pulse = Math.sin(markerTime * 1.8 + marker.userData.phase);
+          const settled = restingRef.current;
+          marker.position.y = marker.userData.baseY + (settled ? 0 : pulse * 0.28);
+          const markerScale = settled ? 0.86 : 1 + pulse * 0.08;
+          marker.scale.setScalar(markerScale);
+          marker.rotation.y += dt * 0.18;
+          for (const child of marker.children) {
+            if (child instanceof THREE.Mesh && child.material instanceof THREE.MeshBasicMaterial) {
+              child.material.opacity = child.geometry.type === "CylinderGeometry"
+                ? (settled ? 0.06 : 0.13 + (pulse + 1) * 0.035)
+                : (settled ? 0.24 : 0.52 + (pulse + 1) * 0.08);
+            }
+          }
+        }
       }
 
       if (cameraModeRef.current === "CHASE") {
@@ -840,6 +885,7 @@ export function BirdFlight() {
           </div>
 
           <div className="camera-chip"><span>CAMERA</span>{cameraMode}<kbd>C</kbd></div>
+          <div className="perch-legend"><i /> REST PERCH</div>
           <div className="flight-hint"><kbd>W / S</kbd><span>CLIMB / DIVE</span><kbd>SHIFT</kbd><span>BOOST</span></div>
           <div ref={perchPromptRef} className="perch-prompt" data-visible="false"><kbd>E</kbd><span ref={perchLabelRef}>LAND</span></div>
           {resting && <div className="resting-chip"><i /> RESTING · WATCHING DHAKA</div>}
