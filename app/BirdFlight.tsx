@@ -552,12 +552,15 @@ function addCity(scene: THREE.Scene) {
     marker.position.copy(perch.position).add(new THREE.Vector3(0, 3.2, 0));
     marker.userData.baseY = marker.position.y;
     marker.userData.phase = index * 0.9;
+    marker.renderOrder = 20;
     const markerMaterial = new THREE.MeshBasicMaterial({
       color: 0xd8ff62,
       transparent: true,
       opacity: 0.68,
+      depthTest: false,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
+      toneMapped: false,
     });
     const ring = new THREE.Mesh(new THREE.TorusGeometry(3.3, 0.12, 10, 40), markerMaterial);
     ring.rotation.x = Math.PI / 2;
@@ -568,7 +571,7 @@ function addCity(scene: THREE.Scene) {
     marker.add(innerRing);
     const shimmer = new THREE.Mesh(
       new THREE.CylinderGeometry(0.08, 0.34, 5.5, 10, 1, true),
-      new THREE.MeshBasicMaterial({ color: 0xd8ff62, transparent: true, opacity: 0.16, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide }),
+      new THREE.MeshBasicMaterial({ color: 0xd8ff62, transparent: true, opacity: 0.16, depthTest: false, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, toneMapped: false }),
     );
     shimmer.position.y = 2.8;
     marker.add(shimmer);
