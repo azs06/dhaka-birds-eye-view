@@ -27,12 +27,14 @@ const rig = new THREE.Group();
 rig.name = "CrowRig";
 scene.add(rig);
 
-const plumage = new THREE.MeshStandardMaterial({ color: 0x172126, roughness: 0.46, metalness: 0.18 });
-const breast = new THREE.MeshStandardMaterial({ color: 0x29353a, roughness: 0.6, metalness: 0.08 });
-const wingMaterial = new THREE.MeshStandardMaterial({ color: 0x10191d, roughness: 0.4, metalness: 0.22 });
-const flightFeather = new THREE.MeshStandardMaterial({ color: 0x0c1418, roughness: 0.54, metalness: 0.13 });
+const plumage = new THREE.MeshPhysicalMaterial({ color: 0x172126, roughness: 0.42, metalness: 0.12, iridescence: 0.22, iridescenceIOR: 1.35, flatShading: true });
+const breast = new THREE.MeshPhysicalMaterial({ color: 0x344247, roughness: 0.64, metalness: 0.04, sheen: 0.34, sheenColor: new THREE.Color(0x789096), flatShading: true });
+const wingMaterial = new THREE.MeshPhysicalMaterial({ color: 0x10191d, roughness: 0.36, metalness: 0.16, iridescence: 0.3, iridescenceIOR: 1.4, flatShading: true });
+const flightFeather = new THREE.MeshPhysicalMaterial({ color: 0x0c1418, roughness: 0.5, metalness: 0.1, iridescence: 0.18, flatShading: true });
 const beakMaterial = new THREE.MeshStandardMaterial({ color: 0x2e3738, roughness: 0.72 });
 const eyeMaterial = new THREE.MeshStandardMaterial({ color: 0x090b0b, roughness: 0.12, metalness: 0.28 });
+const catchlightMaterial = new THREE.MeshBasicMaterial({ color: 0xcdd9d6 });
+const featherGeometry = new THREE.SphereGeometry(1, 10, 6);
 
 function mesh(geometry, material, name, position, scale) {
   const object = new THREE.Mesh(geometry, material);
@@ -47,20 +49,42 @@ function mesh(geometry, material, name, position, scale) {
 const bodyJoint = new THREE.Group();
 bodyJoint.name = "BodyJoint";
 rig.add(bodyJoint);
-bodyJoint.add(mesh(new THREE.SphereGeometry(1, 28, 18), plumage, "Body", [0, 0, 0.15], [0.88, 0.66, 1.72]));
-bodyJoint.add(mesh(new THREE.SphereGeometry(1, 26, 16), breast, "Breast", [0, 0.05, -0.92], [0.72, 0.62, 0.95]));
+bodyJoint.add(mesh(new THREE.SphereGeometry(1, 18, 12), plumage, "Body", [0, 0, 0.15], [0.88, 0.66, 1.72]));
+bodyJoint.add(mesh(new THREE.SphereGeometry(1, 16, 11), breast, "Breast", [0, 0.04, -0.92], [0.72, 0.62, 0.95]));
+
+for (let row = 0; row < 4; row++) {
+  const count = 3 + row;
+  for (let column = 0; column < count; column++) {
+    const x = (column - (count - 1) / 2) * (0.2 - row * 0.008);
+    const feather = mesh(
+      featherGeometry,
+      row < 2 ? breast : plumage,
+      `BreastFeather.${row}.${column}`,
+      [x, -0.09 - row * 0.12, -1.42 + row * 0.28],
+      [0.18, 0.055, 0.34],
+    );
+    feather.rotation.x = -0.18 + row * 0.035;
+    bodyJoint.add(feather);
+  }
+}
 
 const neckJoint = new THREE.Group();
 neckJoint.name = "NeckJoint";
 neckJoint.position.set(0, 0.22, -1.35);
 bodyJoint.add(neckJoint);
-neckJoint.add(mesh(new THREE.SphereGeometry(1, 24, 15), breast, "Neck", [0, 0.18, 0], [0.62, 0.61, 0.78]));
+neckJoint.add(mesh(new THREE.SphereGeometry(1, 15, 10), breast, "Neck", [0, 0.18, 0], [0.62, 0.61, 0.78]));
 
 const headJoint = new THREE.Group();
 headJoint.name = "HeadJoint";
 headJoint.position.set(0, 0.44, -0.52);
 neckJoint.add(headJoint);
-headJoint.add(mesh(new THREE.SphereGeometry(1, 26, 17), plumage, "Head", [0, 0, 0], [0.54, 0.52, 0.59]));
+headJoint.add(mesh(new THREE.SphereGeometry(1, 16, 11), plumage, "Head", [0, 0, 0], [0.54, 0.52, 0.59]));
+
+for (const side of [-1, 1]) {
+  const cheek = mesh(featherGeometry, breast, side < 0 ? "Cheek.L" : "Cheek.R", [side * 0.31, -0.07, -0.34], [0.3, 0.08, 0.3]);
+  cheek.rotation.z = side * 0.32;
+  headJoint.add(cheek);
+}
 
 const billGeometry = new THREE.BufferGeometry();
 billGeometry.setAttribute("position", new THREE.Float32BufferAttribute([
@@ -70,10 +94,20 @@ billGeometry.setAttribute("position", new THREE.Float32BufferAttribute([
 billGeometry.setIndex([0, 1, 4, 1, 5, 4, 2, 4, 3, 3, 4, 5, 0, 4, 2, 1, 3, 5, 0, 2, 3, 0, 3, 1]);
 billGeometry.computeVertexNormals();
 headJoint.add(mesh(billGeometry, beakMaterial, "Beak", [0, -0.04, -0.5], [1, 1, 1]));
+const lowerBeak = mesh(new THREE.ConeGeometry(0.18, 0.86, 4), beakMaterial, "LowerBeak", [0, -0.18, -0.83], [1, 0.72, 1]);
+lowerBeak.rotation.x = Math.PI / 2;
+headJoint.add(lowerBeak);
+
+for (const side of [-1, 1]) {
+  const nostril = mesh(new THREE.SphereGeometry(1, 8, 5), eyeMaterial, side < 0 ? "Nostril.L" : "Nostril.R", [side * 0.17, 0.02, -0.79], [0.035, 0.018, 0.018]);
+  headJoint.add(nostril);
+}
 
 for (const side of [-1, 1]) {
   const eye = mesh(new THREE.SphereGeometry(1, 16, 10), eyeMaterial, side < 0 ? "Eye.L" : "Eye.R", [side * 0.48, 0.12, -0.22], [0.065, 0.065, 0.052]);
   headJoint.add(eye);
+  const catchlight = mesh(new THREE.SphereGeometry(1, 7, 5), catchlightMaterial, side < 0 ? "Catchlight.L" : "Catchlight.R", [side * 0.523, 0.145, -0.257], [0.017, 0.017, 0.012]);
+  headJoint.add(catchlight);
 }
 
 function wingGeometry(side) {
@@ -98,12 +132,26 @@ function addWing(side) {
   bodyJoint.add(joint);
   joint.add(mesh(wingGeometry(side), wingMaterial, side < 0 ? "Wing.L" : "Wing.R", [0, 0, 0], [1, 1, 1]));
 
-  for (let i = 0; i < 5; i++) {
+  for (let row = 0; row < 2; row++) {
+    for (let i = 0; i < 7 - row; i++) {
+      const covert = mesh(
+        featherGeometry,
+        row === 0 ? plumage : wingMaterial,
+        `${side < 0 ? "Covert.L" : "Covert.R"}.${row}.${i}`,
+        [side * (0.55 + i * 0.55 + row * 0.18), 0.05 + row * 0.04, 0.14 + row * 0.45 + i * 0.16],
+        [0.2 + i * 0.017, 0.065, 0.56 + i * 0.045],
+      );
+      covert.rotation.y = side * (0.08 + i * 0.022);
+      joint.add(covert);
+    }
+  }
+
+  for (let i = 0; i < 7; i++) {
     const feather = mesh(
       new THREE.SphereGeometry(1, 18, 10), flightFeather,
       `${side < 0 ? "Primary.L" : "Primary.R"}.${i + 1}`,
-      [side * (3.5 + i * 0.35), -0.05, 1.05 + i * 0.2],
-      [0.19, 0.085, 1.15 + i * 0.12],
+      [side * (3.25 + i * 0.34), -0.05, 0.95 + i * 0.2],
+      [0.2, 0.075, 1.18 + i * 0.1],
     );
     feather.rotation.y = side * (0.17 + i * 0.035);
     joint.add(feather);
@@ -111,8 +159,8 @@ function addWing(side) {
   return joint;
 }
 
-const leftWing = addWing(-1);
-const rightWing = addWing(1);
+addWing(-1);
+addWing(1);
 
 const tailJoint = new THREE.Group();
 tailJoint.name = "TailJoint";
@@ -128,6 +176,15 @@ for (const side of [-1, 1]) {
   const leg = mesh(new THREE.CylinderGeometry(0.055, 0.07, 0.7, 8), beakMaterial, side < 0 ? "Leg.L" : "Leg.R", [side * 0.28, -0.58, 0.38], [1, 1, 1]);
   leg.rotation.x = -0.78;
   bodyJoint.add(leg);
+  for (let toe = -1; toe <= 1; toe++) {
+    const digit = mesh(new THREE.CylinderGeometry(0.02, 0.028, 0.42, 6), beakMaterial, `${side < 0 ? "Toe.L" : "Toe.R"}.${toe + 2}`, [side * 0.28 + toe * 0.07, -0.86, 0.69], [1, 1, 1]);
+    digit.rotation.x = Math.PI / 2 + toe * 0.16;
+    digit.rotation.z = toe * 0.24;
+    bodyJoint.add(digit);
+    const claw = mesh(new THREE.ConeGeometry(0.025, 0.16, 6), eyeMaterial, `${side < 0 ? "Claw.L" : "Claw.R"}.${toe + 2}`, [side * 0.28 + toe * 0.1, -0.86, 0.91], [1, 1, 1]);
+    claw.rotation.x = Math.PI / 2;
+    bodyJoint.add(claw);
+  }
 }
 
 function quaternionValues(axis, angles) {

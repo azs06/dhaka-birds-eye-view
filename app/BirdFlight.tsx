@@ -3,10 +3,22 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
+import { Sky } from "three/examples/jsm/objects/Sky.js";
 
 type CameraMode = "CHASE" | "BIRD'S EYE";
 type BuildingCollider = { x: number; z: number; halfWidth: number; halfDepth: number; top: number };
 type Perch = { position: THREE.Vector3; label: string; heading: number };
+type WaterRibbon = THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+type BirdFlightWindow = Window & {
+  __birdFlightDiagnostics?: () => {
+    calls: number;
+    triangles: number;
+    geometries: number;
+    textures: number;
+    objects: number;
+  };
+};
 type FlightAudio = {
   start: () => Promise<boolean>;
   toggle: () => Promise<boolean>;
@@ -162,128 +174,36 @@ function createFlightAudio(): FlightAudio {
   };
 }
 
-function makeCrow() {
-  const crow = new THREE.Group();
-  const black = new THREE.MeshStandardMaterial({ color: 0x111719, roughness: 0.7, flatShading: true });
-  const feather = new THREE.MeshStandardMaterial({ color: 0x202a2d, roughness: 0.58, flatShading: true, side: THREE.DoubleSide });
-  const featherEdge = new THREE.MeshStandardMaterial({ color: 0x151d20, roughness: 0.72, flatShading: true });
-  const beakMaterial = new THREE.MeshStandardMaterial({ color: 0x343d3e, roughness: 0.82, flatShading: true });
-
-  const body = new THREE.Mesh(new THREE.SphereGeometry(1, 12, 8), black);
-  body.scale.set(0.92, 0.67, 1.72);
-  body.castShadow = true;
-  crow.add(body);
-
-  const neck = new THREE.Mesh(new THREE.SphereGeometry(0.7, 10, 7), feather);
-  neck.position.set(0, 0.28, -1.15);
-  neck.scale.set(0.9, 0.92, 1.08);
-  neck.castShadow = true;
-  crow.add(neck);
-
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.57, 10, 7), black);
-  head.position.set(0, 0.57, -1.77);
-  head.scale.set(0.94, 1, 1.08);
-  head.castShadow = true;
-  crow.add(head);
-
-  const billGeometry = new THREE.BufferGeometry();
-  billGeometry.setAttribute("position", new THREE.Float32BufferAttribute([
-    -0.31, 0.17, 0, 0.31, 0.17, 0, -0.27, -0.16, 0, 0.27, -0.16, 0,
-    -0.035, 0.01, -1.16, 0.035, 0.01, -1.16,
-  ], 3));
-  billGeometry.setIndex([0, 1, 4, 1, 5, 4, 2, 4, 3, 3, 4, 5, 0, 4, 2, 1, 3, 5, 0, 2, 3, 0, 3, 1]);
-  billGeometry.computeVertexNormals();
-  const bill = new THREE.Mesh(billGeometry, beakMaterial);
-  bill.position.set(0, 0.47, -2.13);
-  bill.castShadow = true;
-  crow.add(bill);
-
-  const eyeMaterial = new THREE.MeshStandardMaterial({ color: 0x202526, roughness: 0.25, metalness: 0.18 });
-  for (const side of [-1, 1]) {
-    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.055, 7, 5), eyeMaterial);
-    eye.position.set(side * 0.53, 0.72, -1.99);
-    crow.add(eye);
-  }
-
-  const makeWing = (side: number) => {
-    const pivot = new THREE.Group();
-    pivot.position.set(side * 0.64, 0.16, -0.5);
-    const geometry = new THREE.BufferGeometry();
-    const s = side;
-    const outline = [
-      [0, -0.7], [s * 2.6, -0.24], [s * 5.7, 0.72],
-      [s * 5.15, 1.45], [s * 3.65, 2.18], [s * 1.65, 1.72], [0, 1.18],
-    ];
-    const thickness = 0.12;
-    const positions: number[] = [];
-    outline.forEach(([x, z]) => positions.push(x, thickness, z));
-    outline.forEach(([x, z]) => positions.push(x, -thickness, z));
-    const count = outline.length;
-    const indices: number[] = [];
-    for (let i = 1; i < count - 1; i++) indices.push(0, i, i + 1, count, count + i + 1, count + i);
-    for (let i = 0; i < count; i++) {
-      const next = (i + 1) % count;
-      indices.push(i, count + i, next, next, count + i, count + next);
-    }
-    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-    geometry.setIndex(indices);
-    geometry.computeVertexNormals();
-    const wing = new THREE.Mesh(geometry, feather);
-    wing.castShadow = true;
-    pivot.add(wing);
-
-    const shoulder = new THREE.Mesh(new THREE.SphereGeometry(0.76, 9, 6), featherEdge);
-    shoulder.scale.set(1.65, 0.26, 1.5);
-    shoulder.position.set(s * 0.34, 0.13, 0.2);
-    shoulder.castShadow = true;
-    pivot.add(shoulder);
-
-    for (let i = 0; i < 4; i++) {
-      const primary = new THREE.Mesh(new THREE.ConeGeometry(0.17, 1.65 + i * 0.15, 4), featherEdge);
-      primary.rotation.z = side * -Math.PI / 2;
-      primary.rotation.y = side * (0.08 + i * 0.025);
-      primary.position.set(s * (3.95 + i * 0.33), -0.02, 1.25 + i * 0.2);
-      primary.scale.z = 0.58;
-      primary.castShadow = true;
-      pivot.add(primary);
-    }
-    crow.add(pivot);
-    return pivot;
-  };
-
-  const leftWing = makeWing(-1);
-  const rightWing = makeWing(1);
-
-  for (const offset of [-0.42, 0, 0.42]) {
-    const tail = new THREE.Mesh(new THREE.ConeGeometry(0.32, 2.45, 4), featherEdge);
-    tail.rotation.x = Math.PI / 2;
-    tail.position.set(offset, -0.02, 2.25 + Math.abs(offset) * 0.28);
-    tail.scale.x = 1.25;
-    tail.castShadow = true;
-    crow.add(tail);
-  }
-
-  const legMaterial = new THREE.MeshStandardMaterial({ color: 0x33393a, roughness: 0.9 });
-  for (const side of [-1, 1]) {
-    const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.07, 0.72, 5), legMaterial);
-    leg.position.set(side * 0.34, -0.67, 0.35);
-    leg.rotation.x = -0.72;
-    leg.castShadow = true;
-    crow.add(leg);
-  }
-
-  crow.scale.setScalar(0.92);
-  crow.userData.leftWing = leftWing;
-  crow.userData.rightWing = rightWing;
-  return crow;
-}
-
 function addCity(scene: THREE.Scene) {
   const random = seededRandom();
   const colliders: BuildingCollider[] = [];
+  const sharedBox = new RoundedBoxGeometry(1, 1, 1, 2, 0.055);
+  const unitBox = new THREE.BoxGeometry(1, 1, 1);
+
+  const makeGroundTexture = () => {
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 192;
+    const context = canvas.getContext("2d");
+    if (!context) return null;
+    context.fillStyle = "#77866e";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    for (let i = 0; i < 3600; i++) {
+      const lightness = 34 + Math.floor(random() * 18);
+      context.fillStyle = `hsla(${82 + random() * 20}, 15%, ${lightness}%, ${0.06 + random() * 0.1})`;
+      const size = 1 + random() * 3.5;
+      context.fillRect(random() * canvas.width, random() * canvas.height, size, size);
+    }
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+    texture.repeat.set(24, 24);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.anisotropy = 4;
+    return texture;
+  };
+
   const ground = new THREE.Mesh(
     new THREE.PlaneGeometry(2400, 2400),
-    new THREE.MeshStandardMaterial({ color: 0x75856e, roughness: 1 }),
+    new THREE.MeshStandardMaterial({ color: 0x87937a, map: makeGroundTexture(), roughness: 1 }),
   );
   ground.rotation.x = -Math.PI / 2;
   ground.receiveShadow = true;
@@ -304,7 +224,14 @@ function addCity(scene: THREE.Scene) {
   waterShape.closePath();
   const water = new THREE.Mesh(
     new THREE.ShapeGeometry(waterShape),
-    new THREE.MeshStandardMaterial({ color: 0x3f7f87, roughness: 0.28, metalness: 0.12 }),
+    new THREE.MeshPhysicalMaterial({
+      color: 0x397f88,
+      roughness: 0.2,
+      metalness: 0.05,
+      clearcoat: 0.72,
+      clearcoatRoughness: 0.24,
+      reflectivity: 0.64,
+    }),
   );
   water.rotation.x = -Math.PI / 2;
   water.position.y = 0.45;
@@ -312,8 +239,29 @@ function addCity(scene: THREE.Scene) {
   water.name = "Hatirjheel Lake";
   scene.add(water);
 
-  const roadMaterial = new THREE.MeshStandardMaterial({ color: 0x545957, roughness: 0.95 });
-  const lineMaterial = new THREE.MeshBasicMaterial({ color: 0xc7b96d });
+  const waterRibbons: WaterRibbon[] = [];
+  const ribbonGeometry = new THREE.PlaneGeometry(54, 1.25);
+  for (let i = 0; i < 52; i++) {
+    const x = -980 + random() * 1960;
+    const center = Math.sin(x * 0.0042) * 90 + Math.sin(x * 0.009) * 24;
+    const ribbon = new THREE.Mesh(
+      ribbonGeometry,
+      new THREE.MeshBasicMaterial({ color: i % 3 === 0 ? 0xc9e1d7 : 0x7eb7b2, transparent: true, opacity: 0.18, depthWrite: false }),
+    );
+    ribbon.rotation.x = -Math.PI / 2;
+    ribbon.rotation.z = (random() - 0.5) * 0.14;
+    ribbon.scale.x = 0.45 + random() * 1.15;
+    ribbon.position.set(x, 0.58 + random() * 0.025, center + (random() - 0.5) * 125);
+    ribbon.userData.phase = random() * Math.PI * 2;
+    scene.add(ribbon);
+    waterRibbons.push(ribbon);
+  }
+  scene.userData.waterRibbons = waterRibbons;
+
+  const roadMaterial = new THREE.MeshStandardMaterial({ color: 0x3f4746, roughness: 0.92 });
+  const lineMaterial = new THREE.MeshStandardMaterial({ color: 0xd6c879, roughness: 0.74 });
+  const concreteMaterial = new THREE.MeshStandardMaterial({ color: 0xa6a696, roughness: 0.95 });
+  const curbGeometry = new THREE.BoxGeometry(2200, 1.4, 3.2);
   for (const z of [-285, 285]) {
     const road = new THREE.Mesh(new THREE.BoxGeometry(2200, 1.1, 38), roadMaterial);
     road.position.set(0, 0.55, z);
@@ -324,17 +272,37 @@ function addCity(scene: THREE.Scene) {
       line.position.set(x, 1.15, z);
       scene.add(line);
     }
+    for (const side of [-1, 1]) {
+      const curb = new THREE.Mesh(curbGeometry, concreteMaterial);
+      curb.position.set(0, 1.05, z + side * 21);
+      curb.receiveShadow = true;
+      scene.add(curb);
+    }
   }
 
-  const traffic: THREE.Mesh[] = [];
+  const traffic: THREE.Group[] = [];
   const carColors = [0xe0b653, 0xb54f46, 0x4e7380, 0xd8d2ba, 0x45604f];
   for (let i = 0; i < 24; i++) {
-    const car = new THREE.Mesh(
-      new THREE.CapsuleGeometry(2.3, 5.8, 3, 8),
-      new THREE.MeshStandardMaterial({ color: carColors[i % carColors.length], roughness: 0.48, metalness: 0.12 }),
-    );
-    car.rotation.z = Math.PI / 2;
-    car.scale.set(1, 1, 0.62);
+    const car = new THREE.Group();
+    const paint = new THREE.MeshStandardMaterial({ color: carColors[i % carColors.length], roughness: 0.38, metalness: 0.22 });
+    const chassis = new THREE.Mesh(sharedBox, paint);
+    chassis.scale.set(6.6, 1.8, 3.2);
+    chassis.position.y = 1.15;
+    chassis.castShadow = true;
+    car.add(chassis);
+    const cabin = new THREE.Mesh(sharedBox, new THREE.MeshStandardMaterial({ color: 0x7f9998, roughness: 0.2, metalness: 0.18 }));
+    cabin.scale.set(3.2, 1.35, 2.75);
+    cabin.position.set(-0.25, 2.35, 0);
+    cabin.castShadow = true;
+    car.add(cabin);
+    for (const side of [-1, 1]) {
+      for (const axle of [-2.1, 2.15]) {
+        const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.66, 0.66, 0.38, 10), new THREE.MeshStandardMaterial({ color: 0x171b1b, roughness: 0.95 }));
+        wheel.rotation.x = Math.PI / 2;
+        wheel.position.set(axle, 0.68, side * 1.7);
+        car.add(wheel);
+      }
+    }
     car.position.set(-1050 + random() * 2100, 3.1, i % 2 === 0 ? -281 : 281);
     car.userData.direction = i % 4 < 2 ? 1 : -1;
     car.userData.speed = 13 + random() * 12;
@@ -344,37 +312,100 @@ function addCity(scene: THREE.Scene) {
   }
   scene.userData.traffic = traffic;
 
+  const lampPosts = new THREE.Group();
+  const lampMetal = new THREE.MeshStandardMaterial({ color: 0x454f4e, roughness: 0.64, metalness: 0.5 });
+  const lampGlow = new THREE.MeshBasicMaterial({ color: 0xffe4a8 });
+  for (const z of [-309, 309]) {
+    for (let x = -1000; x <= 1000; x += 95) {
+      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.48, 10, 7), lampMetal);
+      post.position.set(x, 6, z);
+      const light = new THREE.Mesh(new THREE.SphereGeometry(0.66, 8, 5), lampGlow);
+      light.position.set(x, 11.2, z);
+      lampPosts.add(post, light);
+    }
+  }
+  scene.add(lampPosts);
+
   for (const x of [-590, -70, 510]) {
-    const bridge = new THREE.Mesh(new THREE.BoxGeometry(42, 5, 440), roadMaterial);
-    bridge.position.set(x, 6, Math.sin(x * 0.0042) * 90);
-    bridge.castShadow = true;
-    bridge.receiveShadow = true;
-    scene.add(bridge);
+    const bridgeCenter = Math.sin(x * 0.0042) * 90;
+    const bridge = new THREE.Group();
+    bridge.position.set(x, 0, bridgeCenter);
+    const deck = new THREE.Mesh(new THREE.BoxGeometry(42, 5, 440), roadMaterial);
+    deck.position.y = 6;
+    deck.castShadow = true;
+    deck.receiveShadow = true;
+    bridge.add(deck);
     for (const side of [-1, 1]) {
       const rail = new THREE.Mesh(new THREE.BoxGeometry(3, 5, 440), lineMaterial);
-      rail.position.set(x + side * 19, 10, bridge.position.z);
-      scene.add(rail);
+      rail.position.set(side * 19, 10, 0);
+      bridge.add(rail);
     }
+    for (const offset of [-150, 0, 150]) {
+      const pier = new THREE.Mesh(new THREE.CylinderGeometry(5.5, 7.5, 16, 8), concreteMaterial);
+      pier.position.set(0, 0.5, offset);
+      pier.castShadow = true;
+      bridge.add(pier);
+    }
+    scene.add(bridge);
   }
 
   const buildingColors = [0xd6c49f, 0xb8c0b7, 0xc99072, 0x9cad9d, 0xd0d0c1, 0xa77f68];
-  const windowMaterial = new THREE.MeshBasicMaterial({ color: 0xc8d7c4, transparent: true, opacity: 0.48 });
-  for (let gx = -1050; gx <= 1050; gx += 92) {
-    for (let gz = -980; gz <= 980; gz += 92) {
+  const buildingMaterials = buildingColors.map((color) => new THREE.MeshStandardMaterial({ color, roughness: 0.78 }));
+  const facadeMaterials = buildingColors.map((color) => new THREE.MeshStandardMaterial({ color: new THREE.Color(color).multiplyScalar(0.82), roughness: 0.84 }));
+  const rooftopMaterial = new THREE.MeshStandardMaterial({ color: 0x777f74, roughness: 0.86 });
+  const tankMaterials = [0x4c5b55, 0x947f68, 0x325d62].map((color) => new THREE.MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.08 }));
+  const windows: Array<{ position: THREE.Vector3; quaternion: THREE.Quaternion; scale: THREE.Vector3; color: THREE.Color }> = [];
+  const local = new THREE.Vector3();
+  const world = new THREE.Vector3();
+  const buildingQuaternion = new THREE.Quaternion();
+
+  for (let gx = -1050; gx <= 1050; gx += 126) {
+    for (let gz = -980; gz <= 980; gz += 126) {
       const lakeCenter = Math.sin(gx * 0.0042) * 90 + Math.sin(gx * 0.009) * 24;
-      if (Math.abs(gz - lakeCenter) < 205 || Math.abs(Math.abs(gz) - 285) < 46 || random() < 0.12) continue;
+      if (
+        Math.abs(gz - lakeCenter) < 205 ||
+        Math.abs(Math.abs(gz) - 285) < 46 ||
+        Math.abs(gx - 180) < 220 ||
+        random() < 0.12
+      ) continue;
       const width = 42 + random() * 35;
       const depth = 40 + random() * 34;
       const central = 1 - clamp(Math.hypot(gx * 0.55, gz * 0.55) / 950, 0, 1);
       const height = 18 + random() * 52 + central * random() * 82;
-      const building = new THREE.Mesh(
-        new THREE.BoxGeometry(width, height, depth),
-        new THREE.MeshStandardMaterial({ color: buildingColors[Math.floor(random() * buildingColors.length)], roughness: 0.88 }),
-      );
-      building.position.set(gx + (random() - 0.5) * 20, height / 2, gz + (random() - 0.5) * 20);
+      const colorIndex = Math.floor(random() * buildingMaterials.length);
+      const building = new THREE.Group();
+      building.position.set(gx + (random() - 0.5) * 20, 0, gz + (random() - 0.5) * 20);
       building.rotation.y = (random() - 0.5) * 0.12;
-      building.castShadow = true;
-      building.receiveShadow = true;
+      const body = new THREE.Mesh(sharedBox, buildingMaterials[colorIndex]);
+      body.scale.set(width, height, depth);
+      body.position.y = height / 2;
+      body.castShadow = true;
+      body.receiveShadow = true;
+      building.add(body);
+
+      const lowerBand = new THREE.Mesh(unitBox, facadeMaterials[colorIndex]);
+      lowerBand.scale.set(width * 1.015, 4.2, depth * 1.015);
+      lowerBand.position.y = 2.15;
+      building.add(lowerBand);
+
+      const parapet = new THREE.Mesh(sharedBox, rooftopMaterial);
+      parapet.scale.set(width * 0.88, 1.6, depth * 0.88);
+      parapet.position.y = height + 0.7;
+      building.add(parapet);
+
+      if (height > 40 && random() > 0.35) {
+        const stairHouse = new THREE.Mesh(sharedBox, facadeMaterials[colorIndex]);
+        stairHouse.scale.set(width * (0.2 + random() * 0.16), 5 + random() * 7, depth * (0.22 + random() * 0.17));
+        stairHouse.position.set((random() - 0.5) * width * 0.42, height + stairHouse.scale.y / 2 + 1.2, (random() - 0.5) * depth * 0.36);
+        stairHouse.castShadow = true;
+        building.add(stairHouse);
+        if (random() > 0.45) {
+          const tank = new THREE.Mesh(new THREE.CylinderGeometry(2.1, 2.35, 4.4, 10), tankMaterials[Math.floor(random() * tankMaterials.length)]);
+          tank.position.set(-stairHouse.position.x * 0.65, height + 3.2, -stairHouse.position.z * 0.55);
+          tank.castShadow = true;
+          building.add(tank);
+        }
+      }
       scene.add(building);
       colliders.push({
         x: building.position.x,
@@ -384,30 +415,93 @@ function addCity(scene: THREE.Scene) {
         top: height,
       });
 
-      if (height > 48) {
-        const windows = new THREE.Mesh(new THREE.PlaneGeometry(width * 0.72, height * 0.72), windowMaterial);
-        windows.position.set(building.position.x, height * 0.54, building.position.z - depth / 2 - 0.08);
-        scene.add(windows);
+      if (height > 24 && random() > 0.18) {
+        buildingQuaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), building.rotation.y);
+        const floors = Math.min(14, Math.floor((height - 8) / 6));
+        const frontColumns = Math.max(3, Math.floor(width / 8));
+        const sideColumns = Math.max(3, Math.floor(depth / 8));
+        for (let floor = 0; floor < floors; floor++) {
+          const y = 7.2 + floor * 5.8;
+          for (let column = 0; column < frontColumns; column++) {
+            local.set(-width * 0.37 + (column / Math.max(1, frontColumns - 1)) * width * 0.74, y, -depth / 2 - 0.08);
+            world.copy(local).applyQuaternion(buildingQuaternion).add(building.position);
+            windows.push({
+              position: world.clone(),
+              quaternion: buildingQuaternion.clone(),
+              scale: new THREE.Vector3(Math.min(4.3, width / (frontColumns * 1.7)), 2.35, 0.16),
+              color: new THREE.Color(random() > 0.18 ? 0x719092 : 0xd6b879),
+            });
+          }
+          if (random() > 0.28) {
+            for (let column = 0; column < sideColumns; column++) {
+              local.set(width / 2 + 0.08, y, -depth * 0.37 + (column / Math.max(1, sideColumns - 1)) * depth * 0.74);
+              world.copy(local).applyQuaternion(buildingQuaternion).add(building.position);
+              const sideQuaternion = buildingQuaternion.clone().multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 2));
+              windows.push({
+                position: world.clone(),
+                quaternion: sideQuaternion,
+                scale: new THREE.Vector3(Math.min(4.2, depth / (sideColumns * 1.7)), 2.35, 0.16),
+                color: new THREE.Color(random() > 0.17 ? 0x6d8989 : 0xd6b879),
+              });
+            }
+          }
+        }
       }
     }
   }
 
-  const treeTrunk = new THREE.CylinderGeometry(1.2, 1.6, 6, 5);
-  const treeTop = new THREE.ConeGeometry(5.4, 13, 7);
-  const trunkMaterial = new THREE.MeshStandardMaterial({ color: 0x665244 });
-  const leafMaterials = [0x3f654a, 0x527653, 0x6e8652].map((color) => new THREE.MeshStandardMaterial({ color }));
+  const windowMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.26, metalness: 0.24, vertexColors: true });
+  const windowMesh = new THREE.InstancedMesh(unitBox, windowMaterial, windows.length);
+  windowMesh.name = "Building windows";
+  const matrix = new THREE.Matrix4();
+  windows.forEach((window, index) => {
+    matrix.compose(window.position, window.quaternion, window.scale);
+    windowMesh.setMatrixAt(index, matrix);
+    windowMesh.setColorAt(index, window.color);
+  });
+  windowMesh.instanceMatrix.needsUpdate = true;
+  if (windowMesh.instanceColor) windowMesh.instanceColor.needsUpdate = true;
+  scene.add(windowMesh);
+
+  const treeTrunk = new THREE.CylinderGeometry(1.1, 1.65, 7.5, 6);
+  const treeTop = new THREE.IcosahedronGeometry(1, 1);
+  const trunkMaterial = new THREE.MeshStandardMaterial({ color: 0x665244, roughness: 1 });
+  const leafMaterials = [0x355f44, 0x4d744c, 0x70834d].map((color) => new THREE.MeshStandardMaterial({ color, roughness: 0.92, flatShading: true }));
+  const trunkMatrices: THREE.Matrix4[] = [];
+  const foliageMatrices: THREE.Matrix4[][] = [[], [], []];
+  const treeQuaternion = new THREE.Quaternion();
+  const treeScale = new THREE.Vector3();
   for (let i = 0; i < 170; i++) {
     const x = (random() - 0.5) * 2200;
     const z = (random() - 0.5) * 2100;
     const lakeCenter = Math.sin(x * 0.0042) * 90;
     if (Math.abs(z - lakeCenter) < 125) continue;
-    const trunk = new THREE.Mesh(treeTrunk, trunkMaterial);
-    trunk.position.set(x, 3, z);
-    const crown = new THREE.Mesh(treeTop, leafMaterials[i % leafMaterials.length]);
-    crown.position.set(x, 12, z);
-    crown.castShadow = true;
-    scene.add(trunk, crown);
+    const treeHeight = 0.75 + random() * 0.55;
+    treeScale.set(1, treeHeight, 1);
+    trunkMatrices.push(new THREE.Matrix4().compose(new THREE.Vector3(x, 3.75 * treeHeight, z), treeQuaternion, treeScale.clone()));
+    for (let cluster = 0; cluster < 3; cluster++) {
+      const foliageIndex = (i + cluster) % leafMaterials.length;
+      const foliagePosition = new THREE.Vector3(
+        x + (cluster - 1) * (2.3 + random() * 1.8),
+        9.2 * treeHeight + (cluster === 1 ? 3 : 0),
+        z + (random() - 0.5) * 3.6,
+      );
+      const foliageQuaternion = new THREE.Quaternion().setFromEuler(new THREE.Euler(random(), random(), random()));
+      const foliageScale = new THREE.Vector3(4.4 + random() * 2.5, 4 + random() * 3, 4.4 + random() * 2.8);
+      foliageMatrices[foliageIndex].push(new THREE.Matrix4().compose(foliagePosition, foliageQuaternion, foliageScale));
+    }
   }
+  const trunks = new THREE.InstancedMesh(treeTrunk, trunkMaterial, trunkMatrices.length);
+  trunkMatrices.forEach((transform, index) => trunks.setMatrixAt(index, transform));
+  trunks.instanceMatrix.needsUpdate = true;
+  scene.add(trunks);
+  foliageMatrices.forEach((transforms, materialIndex) => {
+    const foliage = new THREE.InstancedMesh(treeTop, leafMaterials[materialIndex], transforms.length);
+    transforms.forEach((transform, index) => foliage.setMatrixAt(index, transform));
+    foliage.instanceMatrix.needsUpdate = true;
+    foliage.castShadow = true;
+    scene.add(foliage);
+  });
 
   const tower = new THREE.Group();
   const towerMaterial = new THREE.MeshStandardMaterial({ color: 0xd7c9ac, roughness: 0.75 });
@@ -516,21 +610,32 @@ export function BirdFlight() {
     audioRef.current = flightAudio;
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x9fc6c9);
-    scene.fog = new THREE.FogExp2(0xa8c5c4, 0.00072);
+    scene.background = new THREE.Color(0xa9c9ca);
+    scene.fog = new THREE.FogExp2(0xa9c3bf, 0.00062);
     const camera = new THREE.PerspectiveCamera(58, mount.clientWidth / mount.clientHeight, 0.5, 4000);
     const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
     renderer.setSize(mount.clientWidth, mount.clientHeight);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75));
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
     renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.shadowMap.type = THREE.PCFShadowMap;
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.05;
+    renderer.toneMappingExposure = 0.82;
     mount.appendChild(renderer.domElement);
 
-    scene.add(new THREE.HemisphereLight(0xe3f1e7, 0x68705c, 2.35));
-    const sun = new THREE.DirectionalLight(0xffdfad, 3.2);
+    const sky = new Sky();
+    sky.scale.setScalar(3800);
+    const skyUniforms = sky.material.uniforms;
+    skyUniforms.turbidity.value = 5.8;
+    skyUniforms.rayleigh.value = 3.15;
+    skyUniforms.mieCoefficient.value = 0.0035;
+    skyUniforms.mieDirectionalG.value = 0.84;
+    const sunPosition = new THREE.Vector3().setFromSphericalCoords(1, THREE.MathUtils.degToRad(63), THREE.MathUtils.degToRad(232));
+    skyUniforms.sunPosition.value.copy(sunPosition);
+    scene.add(sky);
+
+    scene.add(new THREE.HemisphereLight(0xe8f3ee, 0x5d6c58, 1.8));
+    const sun = new THREE.DirectionalLight(0xffd6a0, 3.35);
     sun.position.set(-400, 650, 280);
     sun.castShadow = true;
     sun.shadow.mapSize.set(2048, 2048);
@@ -539,11 +644,13 @@ export function BirdFlight() {
     sun.shadow.camera.top = 700;
     sun.shadow.camera.bottom = -700;
     sun.shadow.camera.far = 1700;
+    sun.shadow.bias = -0.00012;
+    sun.shadow.normalBias = 0.035;
     scene.add(sun);
+    const skyFill = new THREE.DirectionalLight(0x9bc8d2, 0.48);
+    skyFill.position.set(500, 260, -600);
+    scene.add(skyFill);
 
-    const sunDisc = new THREE.Mesh(new THREE.SphereGeometry(34, 16, 12), new THREE.MeshBasicMaterial({ color: 0xffd394 }));
-    sunDisc.position.set(-700, 570, -1300);
-    scene.add(sunDisc);
     const buildingColliders = addCity(scene);
 
     const crow = new THREE.Group();
@@ -578,6 +685,14 @@ export function BirdFlight() {
       restAction.setEffectiveWeight(0);
     });
 
+    (window as BirdFlightWindow).__birdFlightDiagnostics = () => ({
+      calls: renderer.info.render.calls,
+      triangles: renderer.info.render.triangles,
+      geometries: renderer.info.memory.geometries,
+      textures: renderer.info.memory.textures,
+      objects: scene.children.reduce((count, child) => count + 1 + child.children.length, 0),
+    });
+
     const keys = new Set<string>();
     let yaw = 0.15;
     let yawRate = 0;
@@ -585,7 +700,9 @@ export function BirdFlight() {
     let roll = 0;
     let speed = 44;
     let flapKick = 0;
-    const clock = new THREE.Clock();
+    let lastFrame = performance.now();
+    let elapsedTime = 0;
+    let diagnosticFrame = 0;
     const desiredCamera = new THREE.Vector3();
     const desiredTarget = new THREE.Vector3();
     const forward = new THREE.Vector3();
@@ -652,7 +769,10 @@ export function BirdFlight() {
     let animation = 0;
     const animate = () => {
       animation = requestAnimationFrame(animate);
-      const dt = Math.min(clock.getDelta(), 0.035);
+      const now = performance.now();
+      const dt = Math.min((now - lastFrame) / 1000, 0.035);
+      lastFrame = now;
+      elapsedTime += dt;
       const active = flyingRef.current && !pausedRef.current && !restingRef.current;
       const turn = active ? (keys.has("KeyA") || keys.has("ArrowLeft") ? 1 : 0) - (keys.has("KeyD") || keys.has("ArrowRight") ? 1 : 0) : 0;
       const climb = active ? (keys.has("KeyW") || keys.has("ArrowUp") ? 1 : 0) - (keys.has("KeyS") || keys.has("ArrowDown") ? 1 : 0) : 0;
@@ -739,7 +859,7 @@ export function BirdFlight() {
       }
 
       if (!pausedRef.current) {
-        for (const car of scene.userData.traffic as THREE.Mesh[]) {
+        for (const car of scene.userData.traffic as THREE.Group[]) {
           car.position.x += car.userData.direction * car.userData.speed * dt;
           if (car.position.x > 1100) car.position.x = -1100;
           if (car.position.x < -1100) car.position.x = 1100;
@@ -748,7 +868,12 @@ export function BirdFlight() {
           cloud.position.x += cloud.userData.speed * dt;
           if (cloud.position.x > 1250) cloud.position.x = -1250;
         }
-        const markerTime = clock.elapsedTime;
+        const markerTime = elapsedTime;
+        for (const ribbon of scene.userData.waterRibbons as WaterRibbon[]) {
+          const wave = Math.sin(markerTime * 0.42 + ribbon.userData.phase);
+          ribbon.material.opacity = 0.105 + (wave + 1) * 0.055;
+          ribbon.scale.y = 0.72 + (wave + 1) * 0.18;
+        }
         for (const marker of scene.userData.perchMarkers as THREE.Group[]) {
           const pulse = Math.sin(markerTime * 1.8 + marker.userData.phase);
           const settled = restingRef.current;
@@ -792,11 +917,19 @@ export function BirdFlight() {
       }
 
       renderer.render(scene, camera);
+      diagnosticFrame++;
+      if (diagnosticFrame % 30 === 0) {
+        renderer.domElement.dataset.calls = renderer.info.render.calls.toString();
+        renderer.domElement.dataset.triangles = renderer.info.render.triangles.toString();
+        renderer.domElement.dataset.geometries = renderer.info.memory.geometries.toString();
+        renderer.domElement.dataset.textures = renderer.info.memory.textures.toString();
+      }
     };
     animate();
 
     return () => {
       disposed = true;
+      delete (window as BirdFlightWindow).__birdFlightDiagnostics;
       flightAudio.dispose();
       audioRef.current = null;
       cancelAnimationFrame(animation);
@@ -848,7 +981,7 @@ export function BirdFlight() {
       <header className="topbar">
         <div className="brand">
           <span className="brand-mark">BEV</span>
-          <div><strong>BIRD'S EYE VIEW</strong><small>DHAKA · EARLY FLIGHT</small></div>
+          <div><strong>BIRD&apos;S EYE VIEW</strong><small>DHAKA · EARLY FLIGHT</small></div>
         </div>
         <div className="location"><span className="pulse" /> HATIRJHEEL, DHAKA <b>23.7498° N</b></div>
         <div className="top-actions">
