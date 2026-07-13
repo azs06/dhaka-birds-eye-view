@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 
 type CameraMode = "CHASE" | "BIRD'S EYE";
 type BuildingCollider = { x: number; z: number; halfWidth: number; halfDepth: number; top: number };
@@ -180,6 +181,24 @@ function addCity(scene: THREE.Scene) {
     }
   }
 
+  const traffic: THREE.Mesh[] = [];
+  const carColors = [0xe0b653, 0xb54f46, 0x4e7380, 0xd8d2ba, 0x45604f];
+  for (let i = 0; i < 24; i++) {
+    const car = new THREE.Mesh(
+      new THREE.CapsuleGeometry(2.3, 5.8, 3, 8),
+      new THREE.MeshStandardMaterial({ color: carColors[i % carColors.length], roughness: 0.48, metalness: 0.12 }),
+    );
+    car.rotation.z = Math.PI / 2;
+    car.scale.set(1, 1, 0.62);
+    car.position.set(-1050 + random() * 2100, 3.1, i % 2 === 0 ? -281 : 281);
+    car.userData.direction = i % 4 < 2 ? 1 : -1;
+    car.userData.speed = 13 + random() * 12;
+    car.castShadow = true;
+    scene.add(car);
+    traffic.push(car);
+  }
+  scene.userData.traffic = traffic;
+
   for (const x of [-590, -70, 510]) {
     const bridge = new THREE.Mesh(new THREE.BoxGeometry(42, 5, 440), roadMaterial);
     bridge.position.set(x, 6, Math.sin(x * 0.0042) * 90);
@@ -260,6 +279,23 @@ function addCity(scene: THREE.Scene) {
   tower.position.set(720, 0, -430);
   scene.add(tower);
   colliders.push({ x: 720, z: -430, halfWidth: 32, halfDepth: 32, top: 220 });
+
+  const clouds: THREE.Group[] = [];
+  const cloudMaterial = new THREE.MeshStandardMaterial({ color: 0xe9e5d5, roughness: 1, transparent: true, opacity: 0.55 });
+  for (let i = 0; i < 7; i++) {
+    const cloud = new THREE.Group();
+    for (let puff = 0; puff < 5; puff++) {
+      const sphere = new THREE.Mesh(new THREE.SphereGeometry(1, 18, 12), cloudMaterial);
+      sphere.position.set((puff - 2) * 18 + random() * 8, random() * 7, random() * 10);
+      sphere.scale.set(19 + random() * 12, 7 + random() * 5, 11 + random() * 8);
+      cloud.add(sphere);
+    }
+    cloud.position.set(-1000 + random() * 2000, 245 + random() * 115, -1100 + random() * 2200);
+    cloud.userData.speed = 1.2 + random() * 1.8;
+    scene.add(cloud);
+    clouds.push(cloud);
+  }
+  scene.userData.clouds = clouds;
   return colliders;
 }
 
@@ -310,9 +346,33 @@ export function BirdFlight() {
     scene.add(sunDisc);
     const buildingColliders = addCity(scene);
 
-    const crow = makeCrow();
+    const crow = new THREE.Group();
+    crow.name = "PlayerCrow";
     crow.position.set(180, 92, 420);
     scene.add(crow);
+    let mixer: THREE.AnimationMixer | null = null;
+    let flapAction: THREE.AnimationAction | null = null;
+    let glideAction: THREE.AnimationAction | null = null;
+    let disposed = false;
+    new GLTFLoader().load("/models/dhaka-house-crow.glb", (gltf) => {
+      if (disposed) return;
+      const model = gltf.scene;
+      model.scale.setScalar(0.92);
+      model.traverse((object) => {
+        if (object instanceof THREE.Mesh) {
+          object.castShadow = true;
+          object.receiveShadow = true;
+        }
+      });
+      crow.add(model);
+      mixer = new THREE.AnimationMixer(model);
+      flapAction = mixer.clipAction(gltf.animations.find((clip) => clip.name === "Flap") ?? gltf.animations[0]);
+      glideAction = mixer.clipAction(gltf.animations.find((clip) => clip.name === "Glide") ?? gltf.animations[1]);
+      flapAction.play();
+      glideAction.play();
+      flapAction.setEffectiveWeight(0.08);
+      glideAction.setEffectiveWeight(0.92);
+    });
 
     const keys = new Set<string>();
     let yaw = 0.15;
@@ -320,7 +380,6 @@ export function BirdFlight() {
     let pitch = 0;
     let roll = 0;
     let speed = 44;
-    let wingPhase = 0;
     let flapKick = 0;
     const clock = new THREE.Clock();
     const desiredCamera = new THREE.Vector3();
@@ -404,10 +463,25 @@ export function BirdFlight() {
       euler.set(-pitch, yaw, roll);
       targetQuat.setFromEuler(euler);
       crow.quaternion.slerp(targetQuat, 1 - Math.pow(0.83, dt * 60));
-      wingPhase += dt * (active ? (flapKick > 0 ? 18 : 5.2) : 2.2);
-      const flap = active ? Math.sin(wingPhase) * (flapKick > 0 ? 0.78 : 0.15) : Math.sin(wingPhase) * 0.12;
-      crow.userData.leftWing.rotation.z = flap;
-      crow.userData.rightWing.rotation.z = -flap;
+      if (mixer && flapAction && glideAction) {
+        const desiredFlapWeight = active ? (flapKick > 0 ? 0.96 : 0.16) : 0.08;
+        const flapWeight = THREE.MathUtils.lerp(flapAction.getEffectiveWeight(), desiredFlapWeight, 1 - Math.pow(0.8, dt * 60));
+        flapAction.setEffectiveWeight(flapWeight);
+        flapAction.timeScale = flapKick > 0 ? 2.15 : 0.7;
+        glideAction.setEffectiveWeight(1 - flapWeight);
+        glideAction.timeScale = 0.72;
+        mixer.update(dt);
+      }
+
+      for (const car of scene.userData.traffic as THREE.Mesh[]) {
+        car.position.x += car.userData.direction * car.userData.speed * dt;
+        if (car.position.x > 1100) car.position.x = -1100;
+        if (car.position.x < -1100) car.position.x = 1100;
+      }
+      for (const cloud of scene.userData.clouds as THREE.Group[]) {
+        cloud.position.x += cloud.userData.speed * dt;
+        if (cloud.position.x > 1250) cloud.position.x = -1250;
+      }
 
       if (cameraModeRef.current === "CHASE") {
         desiredCamera.copy(crow.position).addScaledVector(forward, -18).add(new THREE.Vector3(0, 7.5, 0));
@@ -438,6 +512,7 @@ export function BirdFlight() {
     animate();
 
     return () => {
+      disposed = true;
       cancelAnimationFrame(animation);
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
@@ -461,7 +536,7 @@ export function BirdFlight() {
 
   return (
     <main className="flight-shell">
-      <div ref={mountRef} className="world" aria-label="Interactive low-poly flight over Hatirjheel, Dhaka" />
+      <div ref={mountRef} className="world" aria-label="Interactive stylized flight over Hatirjheel, Dhaka" />
       <div className="atmosphere" />
 
       <header className="topbar">
