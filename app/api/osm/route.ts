@@ -6,7 +6,9 @@ const BOUNDS = {
   east: 90.444,
 };
 const WORLD_SCALE = 1;
-const MAX_BUILDINGS = 1_600;
+const BUILDING_CELL_SIZE = 250;
+const BUILDINGS_PER_CELL = 16;
+const RELATION_ID_OFFSET = 1_000_000_000_000;
 const MAX_ROADS = 1_100;
 
 type OsmPoint = { lat: number; lon: number };
@@ -15,6 +17,12 @@ type OsmElement = {
   type: "way" | "node" | "relation";
   tags?: Record<string, string>;
   geometry?: OsmPoint[];
+  members?: Array<{
+    type: "way" | "node" | "relation";
+    ref: number;
+    role: string;
+    geometry?: OsmPoint[];
+  }>;
 };
 type OsmResponse = { elements?: OsmElement[]; osm3s?: { timestamp_osm_base?: string } };
 type WorldPoint = [number, number];
@@ -36,8 +44,12 @@ function toWorld(point: OsmPoint): WorldPoint {
 }
 
 function cleanGeometry(element: OsmElement, closed = false): WorldPoint[] | null {
-  if (!element.geometry || element.geometry.length < (closed ? 3 : 2)) return null;
-  const points = element.geometry
+  return cleanPoints(element.geometry, closed);
+}
+
+function cleanPoints(geometry: OsmPoint[] | undefined, closed = false): WorldPoint[] | null {
+  if (!geometry || geometry.length < (closed ? 3 : 2)) return null;
+  const points = geometry
     .filter((point) => Number.isFinite(point.lat) && Number.isFinite(point.lon))
     .map(toWorld);
   if (closed && points.length > 3) {
@@ -46,6 +58,47 @@ function cleanGeometry(element: OsmElement, closed = false): WorldPoint[] | null
     if (Math.hypot(firstX - lastX, firstZ - lastZ) < 0.5) points.pop();
   }
   return points.length >= (closed ? 3 : 2) ? points : null;
+}
+
+function pointsMeet(a: WorldPoint, b: WorldPoint) {
+  return Math.hypot(a[0] - b[0], a[1] - b[1]) < 0.75;
+}
+
+/** Join the outer member ways of an OSM multipolygon into closed footprint rings. */
+function relationOuterRings(element: OsmElement) {
+  const segments = (element.members ?? [])
+    .filter((member) => member.type === "way" && (member.role === "outer" || member.role === ""))
+    .map((member) => cleanPoints(member.geometry))
+    .filter((points): points is WorldPoint[] => Boolean(points));
+  const rings: WorldPoint[][] = [];
+
+  while (segments.length > 0) {
+    const ring = segments.pop()!;
+    let joined = true;
+    while (!pointsMeet(ring[0], ring[ring.length - 1]) && joined) {
+      joined = false;
+      for (let index = 0; index < segments.length; index++) {
+        const segment = segments[index];
+        if (pointsMeet(ring[ring.length - 1], segment[0])) {
+          ring.push(...segment.slice(1));
+        } else if (pointsMeet(ring[ring.length - 1], segment[segment.length - 1])) {
+          ring.push(...segment.reverse().slice(1));
+        } else {
+          continue;
+        }
+        segments.splice(index, 1);
+        joined = true;
+        break;
+      }
+    }
+
+    if (ring.length >= 4 && pointsMeet(ring[0], ring[ring.length - 1])) {
+      ring.pop();
+      if (ring.length >= 3) rings.push(ring);
+    }
+  }
+
+  return rings;
 }
 
 function polygonArea(points: WorldPoint[]) {
@@ -66,14 +119,60 @@ function buildingHeight(tags: Record<string, string>, id: number) {
   return 11 + (id % 7) * 2.4;
 }
 
+function isPriorityBuilding(tags: Record<string, string>) {
+  if (tags.name) return true;
+  const taggedHeight = Number.parseFloat(tags.height ?? "");
+  if (Number.isFinite(taggedHeight) && taggedHeight >= 30) return true;
+  const levels = Number.parseFloat(tags["building:levels"] ?? "");
+  return Number.isFinite(levels) && levels >= 8;
+}
+
+function deterministicBuildingOrder(id: number) {
+  let value = Math.abs(id) % 2_147_483_647;
+  value = Math.imul(value ^ (value >>> 16), 0x45d9f3b);
+  value = Math.imul(value ^ (value >>> 16), 0x45d9f3b);
+  return (value ^ (value >>> 16)) >>> 0;
+}
+
+function spatiallySampleBuildings<T extends { id: number; points: WorldPoint[]; priority: boolean }>(buildings: T[]) {
+  const cells = new Map<string, T[]>();
+  for (const building of buildings) {
+    const [sumX, sumZ] = building.points.reduce(
+      ([x, z], point) => [x + point[0], z + point[1]],
+      [0, 0],
+    );
+    const cellX = Math.floor((sumX / building.points.length) / BUILDING_CELL_SIZE);
+    const cellZ = Math.floor((sumZ / building.points.length) / BUILDING_CELL_SIZE);
+    const key = `${cellX}:${cellZ}`;
+    const cell = cells.get(key);
+    if (cell) cell.push(building);
+    else cells.set(key, [building]);
+  }
+
+  return Array.from(cells.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .flatMap(([, cell]) => {
+      const priority = cell
+        .filter((building) => building.priority)
+        .sort((a, b) => deterministicBuildingOrder(a.id) - deterministicBuildingOrder(b.id) || a.id - b.id);
+      const remainingSlots = Math.max(0, BUILDINGS_PER_CELL - priority.length);
+      const sampled = cell
+        .filter((building) => !building.priority)
+        .sort((a, b) => deterministicBuildingOrder(a.id) - deterministicBuildingOrder(b.id) || a.id - b.id)
+        .slice(0, remainingSlots);
+      return [...priority, ...sampled];
+    });
+}
+
 function xmlAttributes(source: string) {
   const attributes: Record<string, string> = {};
   for (const match of source.matchAll(/([:\w-]+)="([^"]*)"/g)) attributes[match[1]] = match[2];
   return attributes;
 }
 
-async function fetchOsmMapApi() {
-  const bbox = `${BOUNDS.west},${BOUNDS.south},${BOUNDS.east},${BOUNDS.north}`;
+async function fetchOsmMapApi(bounds: number[]) {
+  const [south, west, north, east] = bounds;
+  const bbox = `${west},${south},${east},${north}`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 20_000);
   try {
@@ -148,15 +247,21 @@ async function requestOverpass(query: string, preferredEndpoint = 0) {
   throw lastError instanceof Error ? lastError : new Error("OpenStreetMap data is unavailable");
 }
 
-async function fetchOverpass(queries: string[]) {
+async function fetchOverpass(tiles: Array<{ bounds: number[]; query: string }>) {
   if (cachedOsm && Date.now() < cachedUntil) return cachedOsm;
   if (!inFlightRequest) {
-    inFlightRequest = Promise.allSettled(queries.map((query, index) => requestOverpass(query, index)))
+    inFlightRequest = Promise.allSettled(tiles.map(async (tile, index) => {
+      try {
+        return await requestOverpass(tile.query, index);
+      } catch {
+        return fetchOsmMapApi(tile.bounds);
+      }
+    }))
       .then(async (results) => {
         const successful = results
           .filter((result): result is PromiseFulfilledResult<OsmResponse> => result.status === "fulfilled")
           .map((result) => result.value);
-        if (successful.length === 0) return fetchOsmMapApi();
+        if (successful.length === 0) throw new Error("OpenStreetMap data is unavailable");
         const elements = new Map<string, OsmElement>();
         for (const osm of successful) {
           for (const element of osm.elements ?? []) elements.set(`${element.type}:${element.id}`, element);
@@ -192,45 +297,49 @@ export async function GET() {
     [middleLatitude, BOUNDS.west, BOUNDS.north, middleLongitude],
     [middleLatitude, middleLongitude, BOUNDS.north, BOUNDS.east],
   ];
-  const queries = tileBounds.map((bounds) => {
+  const tiles = tileBounds.map((bounds) => {
     const bbox = bounds.join(",");
-    return `[out:json][timeout:20];(
-      way["building"]["building:levels"](if:number(t["building:levels"]) >= 6)(${bbox});
-      way["building"]["height"](${bbox});
+    return { bounds, query: `[out:json][timeout:20];(
+      way["building"](${bbox});
+      relation["building"]["type"="multipolygon"](${bbox});
       way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified)$"](${bbox});
       way["natural"="water"](${bbox});
       way["waterway"](${bbox});
-    );out geom qt;`;
+    );out geom qt;` };
   });
 
   try {
-    const osm = await fetchOverpass(queries);
+    const osm = await fetchOverpass(tiles);
     const elements = osm.elements ?? [];
-    const buildings = elements
-      .filter((element) => element.type === "way" && element.tags?.building)
-      .map((element) => {
-        const points = cleanGeometry(element, true);
-        if (!points) return null;
-        const area = polygonArea(points);
-        if (area < 16 || area > 30_000) return null;
-        const tags = element.tags ?? {};
-        return {
-          id: element.id,
+    const relationMemberWayIds = new Set(elements
+      .filter((element) => element.type === "relation" && element.tags?.building)
+      .flatMap((element) => (element.members ?? [])
+        .filter((member) => member.type === "way" && (member.role === "outer" || member.role === ""))
+        .map((member) => member.ref)));
+    const buildingCandidates = elements.flatMap((element) => {
+      if (!element.tags?.building) return [];
+      const tags = element.tags;
+      const footprints = element.type === "relation"
+        ? relationOuterRings(element)
+        : element.type === "way" && !relationMemberWayIds.has(element.id)
+          ? [cleanGeometry(element, true)].filter((points): points is WorldPoint[] => Boolean(points))
+          : [];
+      return footprints
+        .filter((points) => polygonArea(points) >= 9)
+        .map((points, ringIndex) => ({
+          id: element.type === "relation" ? RELATION_ID_OFFSET + element.id * 100 + ringIndex : element.id,
           points,
           height: buildingHeight(tags, element.id),
           name: tags.name ?? null,
-          score: area + (tags.name ? 8_000 : 0) + (tags["building:levels"] ? 4_000 : 0),
-        };
-      })
-      .filter((building): building is NonNullable<typeof building> => Boolean(building))
-      .sort((a, b) => b.score - a.score)
-      .slice(0, MAX_BUILDINGS)
-      .map((building) => ({
-        id: building.id,
-        points: building.points,
-        height: building.height,
-        name: building.name,
-      }));
+          priority: isPriorityBuilding(tags),
+        }));
+    });
+    const buildings = spatiallySampleBuildings(buildingCandidates).map((building) => ({
+      id: building.id,
+      points: building.points,
+      height: building.height,
+      name: building.name,
+    }));
 
     const roads = elements
       .filter((element) => element.type === "way" && element.tags?.highway)

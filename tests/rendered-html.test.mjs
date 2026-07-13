@@ -55,7 +55,16 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(component, /proceduralDistrictTiles/);
   assert.match(mapRoute, /south: 23\.742/);
   assert.match(mapRoute, /north: 23\.801/);
-  assert.match(mapRoute, /MAX_BUILDINGS = 1_600/);
+  assert.match(mapRoute, /BUILDING_CELL_SIZE = 250/);
+  assert.match(mapRoute, /BUILDINGS_PER_CELL = 16/);
+  assert.match(mapRoute, /spatiallySampleBuildings/);
+  assert.match(mapRoute, /way\["building"\]/);
+  assert.match(mapRoute, /relation\["building"\]\["type"="multipolygon"\]/);
+  assert.match(component, /selectSpatiallyEvenBuildings/);
+  assert.match(component, /buildColliderGrid/);
+  for (const landmark of ["Holy Rosary Church", "Bashundhara City", "Hatirjheel Amphitheatre", "Police Plaza Concord", "BRAC Centre", "Four Points by Sheraton"]) {
+    assert.match(component, new RegExp(landmark));
+  }
   assert.match(component, /© OpenStreetMap contributors/);
   assert.doesNotMatch(component, /className="mission-card"/);
   assert.match(css, /\.flight-shell/);

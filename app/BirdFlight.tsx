@@ -11,6 +11,7 @@ type CameraMode = "CHASE" | "BIRD'S EYE";
 type BuildingCollider = { x: number; z: number; halfWidth: number; halfDepth: number; top: number };
 type Perch = { position: THREE.Vector3; label: string; heading: number };
 type AreaLandmark = { label: string; shortLabel: string; lat: number; lon: number; altitude: number; heading: number };
+type DhakaLandmark = AreaLandmark & { kind: "church" | "mall" | "amphitheatre" | "twin-tower" | "brac" | "hotel" };
 type ProceduralDistrictTile = { group: THREE.Group; centerX: number; centerZ: number; colliders: BuildingCollider[] };
 type WaterRibbon = THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
 type MapStatus = "loading" | "live" | "fallback";
@@ -46,6 +47,7 @@ type FlightAudio = {
 const clamp = THREE.MathUtils.clamp;
 const MAP_CENTER = { lat: 23.7715, lon: 90.4165 };
 const FLIGHT_EXTENT = { x: 3_000, z: 3_450 };
+const COLLISION_CELL_SIZE = 180;
 const AREA_LANDMARKS: AreaLandmark[] = [
   { label: "Moghbazar", shortLabel: "MOG", lat: 23.75096, lon: 90.40489, altitude: 44, heading: Math.PI },
   { label: "Tejgaon I/A", shortLabel: "TEJ", lat: 23.76535, lon: 90.40062, altitude: 58, heading: Math.PI / 2 },
@@ -63,6 +65,14 @@ const AREA_LANDMARKS: AreaLandmark[] = [
   { label: "Aftabnagar", shortLabel: "AFT", lat: 23.76562, lon: 90.42931, altitude: 42, heading: -Math.PI / 2 },
   { label: "Banasree", shortLabel: "BNS", lat: 23.76294, lon: 90.43415, altitude: 46, heading: Math.PI },
 ];
+const DHAKA_LANDMARKS: DhakaLandmark[] = [
+  { label: "Holy Rosary Church", shortLabel: "HRC", lat: 23.759151, lon: 90.392216, altitude: 61, heading: Math.PI / 2, kind: "church" },
+  { label: "Bashundhara City", shortLabel: "BSC", lat: 23.751142, lon: 90.3906411, altitude: 135, heading: Math.PI / 2, kind: "mall" },
+  { label: "Hatirjheel Amphitheatre", shortLabel: "HJA", lat: 23.771125, lon: 90.4133385, altitude: 28, heading: Math.PI, kind: "amphitheatre" },
+  { label: "Police Plaza Concord", shortLabel: "PPC", lat: 23.772911, lon: 90.4161391, altitude: 86, heading: 0, kind: "twin-tower" },
+  { label: "BRAC Centre", shortLabel: "BRC", lat: 23.78065, lon: 90.40715, altitude: 78, heading: Math.PI / 2, kind: "brac" },
+  { label: "Four Points by Sheraton", shortLabel: "SHD", lat: 23.7920829, lon: 90.4137283, altitude: 95, heading: 0, kind: "hotel" },
+];
 
 function coordinatesToWorld(lat: number, lon: number) {
   const metresPerLongitude = 111_320 * Math.cos(MAP_CENTER.lat * Math.PI / 180);
@@ -70,6 +80,29 @@ function coordinatesToWorld(lat: number, lon: number) {
     (lon - MAP_CENTER.lon) * metresPerLongitude,
     -(lat - MAP_CENTER.lat) * 110_540,
   );
+}
+
+function buildColliderGrid(colliders: BuildingCollider[]) {
+  const grid = new Map<string, BuildingCollider[]>();
+  for (const collider of colliders) {
+    const minX = Math.floor((collider.x - collider.halfWidth) / COLLISION_CELL_SIZE);
+    const maxX = Math.floor((collider.x + collider.halfWidth) / COLLISION_CELL_SIZE);
+    const minZ = Math.floor((collider.z - collider.halfDepth) / COLLISION_CELL_SIZE);
+    const maxZ = Math.floor((collider.z + collider.halfDepth) / COLLISION_CELL_SIZE);
+    for (let cellX = minX; cellX <= maxX; cellX++) {
+      for (let cellZ = minZ; cellZ <= maxZ; cellZ++) {
+        const key = `${cellX}:${cellZ}`;
+        const entries = grid.get(key);
+        if (entries) entries.push(collider);
+        else grid.set(key, [collider]);
+      }
+    }
+  }
+  return grid;
+}
+
+function collisionCandidates(grid: Map<string, BuildingCollider[]>, x: number, z: number) {
+  return grid.get(`${Math.floor(x / COLLISION_CELL_SIZE)}:${Math.floor(z / COLLISION_CELL_SIZE)}`) ?? [];
 }
 
 function seededRandom(seed = 713) {
@@ -189,6 +222,25 @@ function addProceduralDistrictTiles(
     ));
   };
 
+  const roadHeadingAt = (x: number, z: number) => {
+    const cellX = Math.floor(x / spatialCellSize);
+    const cellZ = Math.floor(z / spatialCellSize);
+    let nearest: AvoidanceSegment | null = null;
+    let nearestDistance = 150 ** 2;
+    for (let offsetX = -1; offsetX <= 1; offsetX++) {
+      for (let offsetZ = -1; offsetZ <= 1; offsetZ++) {
+        for (const segment of roadGrid.get(spatialKey(cellX + offsetX, cellZ + offsetZ)) ?? []) {
+          const distance = distanceToSegmentSquared(x, z, segment.x1, segment.z1, segment.x2, segment.z2);
+          if (distance < nearestDistance) {
+            nearest = segment;
+            nearestDistance = distance;
+          }
+        }
+      }
+    }
+    return nearest ? -Math.atan2(nearest.z2 - nearest.z1, nearest.x2 - nearest.x1) : 0;
+  };
+
   const matrix = new THREE.Matrix4();
   const quaternion = new THREE.Quaternion();
   const position = new THREE.Vector3();
@@ -208,30 +260,38 @@ function addProceduralDistrictTiles(
       const roofTransforms: THREE.Matrix4[] = [];
       const treeTransforms: THREE.Matrix4[] = [];
       const tileColliders: BuildingCollider[] = [];
-      const targetBuildings = 10 + Math.floor(random() * 12);
+      let tileIntensity = 0.2;
+      for (const district of districtCenters) {
+        const proximity = clamp(1 - Math.hypot(centerX - district.x, centerZ - district.z) / 1_350, 0, 1);
+        tileIntensity = Math.max(tileIntensity, proximity * district.intensity);
+      }
+      // These are placement attempts rather than guaranteed buildings. Dense, compact lots
+      // survive the road/water/OSM rejection pass and still render in only a few draw calls.
+      const targetBuildings = 52 + Math.floor(tileIntensity * 34 + random() * 14);
 
       for (let index = 0; index < targetBuildings; index++) {
         const x = centerX + (random() - 0.5) * (tileSize - 44);
         const z = centerZ + (random() - 0.5) * (tileSize - 44);
-        const width = 12 + random() * 21;
-        const depth = 12 + random() * 22;
+        const width = 9 + random() * 17;
+        const depth = 10 + random() * 18;
         const halfWidth = width / 2;
         const halfDepth = depth / 2;
         if (Math.abs(x) > FLIGHT_EXTENT.x - halfWidth || Math.abs(z) > FLIGHT_EXTENT.z - halfDepth) continue;
         if (blockedByMap(x, z, halfWidth, halfDepth)) continue;
         if (tileColliders.some((collider) => (
-          Math.abs(x - collider.x) < halfWidth + collider.halfWidth + 7 &&
-          Math.abs(z - collider.z) < halfDepth + collider.halfDepth + 7
+          Math.abs(x - collider.x) < halfWidth + collider.halfWidth + 3.5 &&
+          Math.abs(z - collider.z) < halfDepth + collider.halfDepth + 3.5
         ))) continue;
         let districtInfluence = 0.18;
         for (const district of districtCenters) {
           const proximity = clamp(1 - Math.hypot(x - district.x, z - district.z) / 1_150, 0, 1);
           districtInfluence = Math.max(districtInfluence, proximity * district.intensity);
         }
-        const floors = 2 + Math.floor(random() * 4 + districtInfluence * 8);
+        const floors = 2 + Math.floor(random() * 5 + districtInfluence * 9);
         const height = floors * (2.95 + random() * 0.38);
         const bucket = height > 34 ? 2 : height > 20 ? 1 : 0;
-        quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), (random() - 0.5) * 0.12);
+        const streetHeading = roadHeadingAt(x, z);
+        quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), streetHeading + (random() - 0.5) * 0.055);
         position.set(x, height / 2 + 0.92, z);
         scale.set(width, height, depth);
         transforms[bucket].push(matrix.compose(position, quaternion, scale).clone());
@@ -246,7 +306,7 @@ function addProceduralDistrictTiles(
         }
       }
 
-      const targetTrees = 3 + Math.floor(random() * 5);
+      const targetTrees = 2 + Math.floor(random() * 4);
       for (let index = 0; index < targetTrees; index++) {
         const x = centerX + (random() - 0.5) * (tileSize - 34);
         const z = centerZ + (random() - 0.5) * (tileSize - 34);
@@ -266,7 +326,7 @@ function addProceduralDistrictTiles(
         const mesh = new THREE.InstancedMesh(unitBox, materials[bucket], bucketTransforms.length);
         bucketTransforms.forEach((transform, index) => mesh.setMatrixAt(index, transform));
         mesh.instanceMatrix.needsUpdate = true;
-        mesh.castShadow = true;
+        mesh.castShadow = bucket === 2;
         mesh.receiveShadow = true;
         group.add(mesh);
       });
@@ -428,6 +488,156 @@ function createFlightAudio(): FlightAudio {
       context = null;
     },
   };
+}
+
+function addPersistentDhakaLandmarks(scene: THREE.Scene) {
+  const root = new THREE.Group();
+  root.name = "Persistent Dhaka landmarks";
+  const colliders: BuildingCollider[] = [];
+  const perches: Perch[] = [];
+  const unitBox = new THREE.BoxGeometry(1, 1, 1);
+  const concrete = new THREE.MeshStandardMaterial({ color: 0xc9c2ad, roughness: 0.86 });
+  const paleConcrete = new THREE.MeshStandardMaterial({ color: 0xe0d9c3, roughness: 0.8 });
+  const brick = new THREE.MeshStandardMaterial({ color: 0x9b5e49, roughness: 0.84 });
+  const glass = new THREE.MeshStandardMaterial({ color: 0x497b82, roughness: 0.22, metalness: 0.16 });
+  const darkGlass = new THREE.MeshStandardMaterial({ color: 0x294e56, roughness: 0.18, metalness: 0.22 });
+  const roof = new THREE.MeshStandardMaterial({ color: 0x5d6866, roughness: 0.72, metalness: 0.12 });
+  const accent = new THREE.MeshStandardMaterial({ color: 0xc89c44, roughness: 0.6, metalness: 0.18 });
+
+  const addBox = (
+    parent: THREE.Object3D,
+    size: [number, number, number],
+    position: [number, number, number],
+    material: THREE.Material,
+  ) => {
+    const mesh = new THREE.Mesh(unitBox, material);
+    mesh.scale.set(...size);
+    mesh.position.set(...position);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    parent.add(mesh);
+    return mesh;
+  };
+
+  const addLabel = (position: THREE.Vector3, text: string) => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 512;
+    canvas.height = 96;
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    context.fillStyle = "rgba(17, 23, 22, 0.9)";
+    context.fillRect(3, 3, 506, 90);
+    context.strokeStyle = "rgba(255, 204, 91, 0.92)";
+    context.lineWidth = 4;
+    context.strokeRect(5, 5, 502, 86);
+    context.fillStyle = "#ffcc5b";
+    context.font = "700 31px monospace";
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+    context.fillText(text.toUpperCase(), 256, 50);
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.minFilter = THREE.LinearFilter;
+    const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false, toneMapped: false }));
+    label.position.copy(position);
+    label.scale.set(96, 18, 1);
+    root.add(label);
+  };
+
+  for (const landmark of DHAKA_LANDMARKS) {
+    const world = coordinatesToWorld(landmark.lat, landmark.lon);
+    const model = new THREE.Group();
+    model.name = landmark.label;
+    model.position.set(world.x, 0.9, world.y);
+    model.rotation.y = landmark.heading;
+    root.add(model);
+    let halfWidth = 28;
+    let halfDepth = 24;
+
+    if (landmark.kind === "church") {
+      halfWidth = 38;
+      halfDepth = 25;
+      addBox(model, [72, 10, 44], [0, 5, 0], paleConcrete);
+      addBox(model, [54, 22, 34], [0, 19, 0], paleConcrete);
+      for (const side of [-1, 1]) {
+        addBox(model, [12, 35, 13], [side * 23, 27.5, -12], concrete);
+        const spire = new THREE.Mesh(new THREE.ConeGeometry(7, 17, 8), roof);
+        spire.position.set(side * 23, 53.5, -12);
+        spire.castShadow = true;
+        model.add(spire);
+      }
+      const rose = new THREE.Mesh(new THREE.TorusGeometry(5.5, 1.1, 8, 24), darkGlass);
+      rose.position.set(0, 25, -17.4);
+      model.add(rose);
+    } else if (landmark.kind === "mall") {
+      halfWidth = 44;
+      halfDepth = 34;
+      addBox(model, [88, 19, 68], [0, 9.5, 0], paleConcrete);
+      addBox(model, [38, 91, 36], [0, 64.5, 0], concrete);
+      addBox(model, [40, 78, 5], [0, 65, -20.2], glass);
+      for (let y = 31; y < 108; y += 13) addBox(model, [42, 1.5, 39], [0, y, 0], accent);
+      const crown = new THREE.Mesh(new THREE.CylinderGeometry(19, 23, 10, 14), roof);
+      crown.position.y = 115;
+      crown.castShadow = true;
+      model.add(crown);
+      const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.9, 1.7, 17, 8), accent);
+      mast.position.y = 128;
+      model.add(mast);
+    } else if (landmark.kind === "amphitheatre") {
+      halfWidth = 52;
+      halfDepth = 38;
+      addBox(model, [74, 3, 46], [0, 1.5, 3], concrete);
+      for (let tier = 0; tier < 6; tier++) {
+        const seating = new THREE.Mesh(new THREE.TorusGeometry(17 + tier * 4.6, 1.25, 5, 32, Math.PI), paleConcrete);
+        seating.rotation.x = Math.PI / 2;
+        seating.rotation.z = Math.PI;
+        seating.position.set(0, 3 + tier * 1.7, 16 - tier * 2.3);
+        model.add(seating);
+      }
+      const shell = new THREE.Mesh(new THREE.TorusGeometry(20, 2.4, 7, 36, Math.PI), accent);
+      shell.position.set(0, 17, -15);
+      model.add(shell);
+      addBox(model, [39, 2, 15], [0, 3, -12], darkGlass);
+    } else if (landmark.kind === "twin-tower") {
+      halfWidth = 39;
+      halfDepth = 29;
+      addBox(model, [78, 12, 56], [0, 6, 0], paleConcrete);
+      for (const side of [-1, 1]) {
+        addBox(model, [27, 72, 32], [side * 21, 48, 0], glass);
+        addBox(model, [29, 2, 34], [side * 21, 85, 0], accent);
+      }
+      addBox(model, [24, 12, 18], [0, 59, 0], darkGlass);
+    } else if (landmark.kind === "brac") {
+      halfWidth = 27;
+      halfDepth = 24;
+      addBox(model, [54, 12, 48], [0, 6, 0], concrete);
+      addBox(model, [47, 63, 39], [0, 43.5, 0], brick);
+      addBox(model, [9, 65, 41], [7, 44.5, -0.5], darkGlass);
+      addBox(model, [51, 2.5, 43], [0, 76, 0], roof);
+    } else {
+      halfWidth = 34;
+      halfDepth = 27;
+      addBox(model, [68, 10, 54], [0, 5, 0], paleConcrete);
+      addBox(model, [51, 81, 34], [-5, 50.5, 0], paleConcrete);
+      addBox(model, [6, 79, 36], [-5, 51, -18.5], glass);
+      addBox(model, [22, 57, 23], [25, 38.5, 6], concrete);
+      addBox(model, [55, 3, 38], [-5, 92.5, 0], roof);
+    }
+
+    colliders.push({ x: world.x, z: world.y, halfWidth, halfDepth, top: landmark.altitude + 2 });
+    const perch = {
+      position: new THREE.Vector3(world.x, landmark.altitude, world.y),
+      label: landmark.label,
+      heading: landmark.heading,
+    };
+    perches.push(perch);
+    addLabel(perch.position.clone().add(new THREE.Vector3(0, 28, 0)), landmark.label);
+  }
+
+  scene.add(root);
+  scene.userData.landmarkColliders = colliders;
+  scene.userData.landmarkRoot = root;
+  return { colliders, perches };
 }
 
 function addCity(scene: THREE.Scene) {
@@ -767,21 +977,8 @@ function addCity(scene: THREE.Scene) {
     fallbackWorld.add(foliage);
   });
 
-  const tower = new THREE.Group();
-  const towerMaterial = new THREE.MeshStandardMaterial({ color: 0xd7c9ac, roughness: 0.75 });
-  const towerBody = new THREE.Mesh(new THREE.CylinderGeometry(18, 27, 150, 8), towerMaterial);
-  towerBody.position.y = 75;
-  towerBody.castShadow = true;
-  tower.add(towerBody);
-  const crown = new THREE.Mesh(new THREE.CylinderGeometry(30, 22, 24, 8), new THREE.MeshStandardMaterial({ color: 0x647b76 }));
-  crown.position.y = 157;
-  tower.add(crown);
-  const spire = new THREE.Mesh(new THREE.CylinderGeometry(2, 4, 62, 6), towerMaterial);
-  spire.position.y = 200;
-  tower.add(spire);
-  tower.position.set(720, 0, -430);
-  fallbackWorld.add(tower);
-  colliders.push({ x: 720, z: -430, halfWidth: 32, halfDepth: 32, top: 220 });
+  const landmarkWorld = addPersistentDhakaLandmarks(scene);
+  colliders.push(...landmarkWorld.colliders);
 
   const perches: Perch[] = AREA_LANDMARKS.map((landmark) => {
     const world = coordinatesToWorld(landmark.lat, landmark.lon);
@@ -790,7 +987,7 @@ function addCity(scene: THREE.Scene) {
       label: landmark.label,
       heading: landmark.heading,
     };
-  });
+  }).concat(landmarkWorld.perches);
   const areaLabels = new THREE.Group();
   areaLabels.name = "Greater Hatirjheel area labels";
   for (const [index, landmark] of AREA_LANDMARKS.entries()) {
@@ -907,6 +1104,46 @@ function mergeIntoMesh(
   group.add(mesh);
 }
 
+function selectSpatiallyEvenBuildings(buildings: OsmMapData["buildings"], budget = 2_600) {
+  const tileSize = 380;
+  const perTile = 9;
+  const tiles = new Map<string, Array<{ building: OsmMapData["buildings"][number]; score: number }>>();
+  for (const building of buildings) {
+    if (building.points.length < 3 || building.points.length > 96) continue;
+    let x = 0;
+    let z = 0;
+    for (const point of building.points) {
+      x += point[0];
+      z += point[1];
+    }
+    x /= building.points.length;
+    z /= building.points.length;
+    if (Math.abs(x) > FLIGHT_EXTENT.x + 500 || Math.abs(z) > FLIGHT_EXTENT.z + 500) continue;
+    const key = `${Math.floor(x / tileSize)}:${Math.floor(z / tileSize)}`;
+    const score = Math.abs(Math.imul(building.id || 1, 2_654_435_761));
+    const entries = tiles.get(key) ?? [];
+    if (entries.length < perTile) {
+      entries.push({ building, score });
+      tiles.set(key, entries);
+      continue;
+    }
+    let worstIndex = 0;
+    for (let index = 1; index < entries.length; index++) {
+      if (entries[index].score > entries[worstIndex].score) worstIndex = index;
+    }
+    if (score < entries[worstIndex].score) entries[worstIndex] = { building, score };
+  }
+  const tileEntries = [...tiles.values()];
+  const selected: OsmMapData["buildings"] = [];
+  for (let index = 0; index < perTile && selected.length < budget; index++) {
+    for (const entries of tileEntries) {
+      if (entries[index]) selected.push(entries[index].building);
+      if (selected.length >= budget) break;
+    }
+  }
+  return selected;
+}
+
 function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData) {
   const root = new THREE.Group();
   root.name = "Live OpenStreetMap world";
@@ -958,7 +1195,9 @@ function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData) {
   roadBuckets.forEach((geometries, index) => mergeIntoMesh(root, geometries, roadMaterials[index], `OSM roads ${index}`));
 
   const buildingBuckets: THREE.BufferGeometry[][] = [[], [], [], []];
-  for (const building of data.buildings) {
+  // The full Dhaka payload can contain tens of thousands of footprints. Keep the
+  // live mesh deterministic and geographically even; procedural tiles fill the gaps.
+  for (const building of selectSpatiallyEvenBuildings(data.buildings)) {
     if (building.points.length < 3) continue;
     const geometry = new THREE.ExtrudeGeometry(polygonShape(building.points), {
       depth: building.height,
@@ -966,7 +1205,7 @@ function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData) {
       curveSegments: 1,
     });
     geometry.rotateX(-Math.PI / 2);
-    buildingBuckets[building.id % buildingBuckets.length].push(geometry);
+    buildingBuckets[Math.abs(building.id) % buildingBuckets.length].push(geometry);
     const xs = building.points.map(([x]) => x);
     const zs = building.points.map(([, z]) => z);
     const minX = Math.min(...xs);
@@ -984,7 +1223,10 @@ function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData) {
   const buildingMaterials = [0xcdbd9f, 0xb5beb5, 0xc58e72, 0x99aa9d].map(
     (color) => new THREE.MeshStandardMaterial({ color, roughness: 0.8, metalness: 0.02 }),
   );
-  buildingBuckets.forEach((geometries, index) => mergeIntoMesh(root, geometries, buildingMaterials[index], `OSM buildings ${index}`, true));
+  // Nearby procedural towers and landmarks provide local shadows. Keeping the
+  // four citywide merged meshes out of the shadow pass avoids redrawing the
+  // entire map into the large directional-light shadow camera every frame.
+  buildingBuckets.forEach((geometries, index) => mergeIntoMesh(root, geometries, buildingMaterials[index], `OSM buildings ${index}`));
 
   if (colliders.length === 0) {
     root.traverse((object) => {
@@ -1071,6 +1313,7 @@ export function BirdFlight() {
     scene.add(skyFill);
 
     const buildingColliders = addCity(scene);
+    let buildingColliderGrid = buildColliderGrid(buildingColliders);
     void fetch("/api/osm")
       .then(async (response) => {
         if (!response.ok) throw new Error(`Map request failed with ${response.status}`);
@@ -1080,8 +1323,10 @@ export function BirdFlight() {
         if (disposed) return;
         const osmColliders = addOpenStreetMapWorld(scene, data);
         if (!osmColliders) throw new Error("OpenStreetMap response contained no usable buildings");
-        const proceduralColliders = addProceduralDistrictTiles(scene, data, osmColliders, crow.position);
-        buildingColliders.splice(0, buildingColliders.length, ...osmColliders, ...proceduralColliders);
+        const landmarkColliders = scene.userData.landmarkColliders as BuildingCollider[] | undefined ?? [];
+        const proceduralColliders = addProceduralDistrictTiles(scene, data, [...osmColliders, ...landmarkColliders], crow.position);
+        buildingColliders.splice(0, buildingColliders.length, ...osmColliders, ...proceduralColliders, ...landmarkColliders);
+        buildingColliderGrid = buildColliderGrid(buildingColliders);
         setMapStatus("live");
       })
       .catch(() => {
@@ -1232,7 +1477,7 @@ export function BirdFlight() {
       if (active) crow.position.addScaledVector(forward, speed * dt);
       let collided = false;
       if (!restingRef.current) {
-        for (const building of buildingColliders) {
+        for (const building of collisionCandidates(buildingColliderGrid, crow.position.x, crow.position.z)) {
           if (
             Math.abs(crow.position.x - building.x) < building.halfWidth &&
             Math.abs(crow.position.z - building.z) < building.halfDepth &&
