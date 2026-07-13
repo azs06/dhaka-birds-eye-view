@@ -27,10 +27,11 @@ test("server-renders the Bird's Eye View application shell", async () => {
 });
 
 test("keeps the finished flight experience free of starter preview code", async () => {
-  const [page, layout, component, css, packageJson] = await Promise.all([
+  const [page, layout, component, mapRoute, css, packageJson] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/BirdFlight.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/osm/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
   ]);
@@ -43,6 +44,13 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(component, /Hatirjheel Lake/);
   assert.match(component, /fetch\("\/api\/osm"\)/);
   assert.match(component, /addOpenStreetMapWorld/);
+  assert.match(component, /GREATER HATIRJHEEL/);
+  for (const area of ["Moghbazar", "Tejgaon I\/A", "Niketan", "Gulshan 1", "Badda Link Road", "Rampura Bridge"]) {
+    assert.match(component, new RegExp(area));
+  }
+  assert.match(mapRoute, /south: 23\.746/);
+  assert.match(mapRoute, /north: 23\.782/);
+  assert.match(mapRoute, /MAX_BUILDINGS = 1_200/);
   assert.match(component, /© OpenStreetMap contributors/);
   assert.doesNotMatch(component, /className="mission-card"/);
   assert.match(css, /\.flight-shell/);

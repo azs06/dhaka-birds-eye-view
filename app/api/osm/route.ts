@@ -1,13 +1,13 @@
-const CENTER = { lat: 23.7498, lon: 90.4127 };
+const CENTER = { lat: 23.764, lon: 90.41 };
 const BOUNDS = {
-  south: 23.7468,
-  west: 90.4097,
-  north: 23.7528,
-  east: 90.4157,
+  south: 23.746,
+  west: 90.394,
+  north: 23.782,
+  east: 90.426,
 };
-const WORLD_SCALE = 3.2;
-const MAX_BUILDINGS = 700;
-const MAX_ROADS = 360;
+const WORLD_SCALE = 1;
+const MAX_BUILDINGS = 1_200;
+const MAX_ROADS = 800;
 
 type OsmPoint = { lat: number; lon: number };
 type OsmElement = {
@@ -174,10 +174,10 @@ async function fetchOverpass(query: string) {
 export async function GET() {
   const bbox = `${BOUNDS.south},${BOUNDS.west},${BOUNDS.north},${BOUNDS.east}`;
   const query = `[out:json][timeout:22];(
-    way["building"]["building:levels"](${bbox});
+    way["building"]["building:levels"](if:number(t["building:levels"]) >= 6)(${bbox});
     way["building"]["height"](${bbox});
     way["building"]["name"](${bbox});
-    way["highway"](${bbox});
+    way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified|service)$"](${bbox});
     way["natural"="water"](${bbox});
     way["waterway"](${bbox});
   );out geom qt;`;

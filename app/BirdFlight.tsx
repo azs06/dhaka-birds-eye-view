@@ -10,6 +10,7 @@ import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js
 type CameraMode = "CHASE" | "BIRD'S EYE";
 type BuildingCollider = { x: number; z: number; halfWidth: number; halfDepth: number; top: number };
 type Perch = { position: THREE.Vector3; label: string; heading: number };
+type AreaLandmark = { label: string; shortLabel: string; lat: number; lon: number; altitude: number; heading: number };
 type WaterRibbon = THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
 type MapStatus = "loading" | "live" | "fallback";
 type MapPoint = [number, number];
@@ -40,6 +41,24 @@ type FlightAudio = {
 };
 
 const clamp = THREE.MathUtils.clamp;
+const MAP_CENTER = { lat: 23.764, lon: 90.41 };
+const FLIGHT_EXTENT = { x: 1_800, z: 2_100 };
+const AREA_LANDMARKS: AreaLandmark[] = [
+  { label: "Moghbazar", shortLabel: "MOG", lat: 23.75096, lon: 90.40489, altitude: 44, heading: Math.PI },
+  { label: "Tejgaon I/A", shortLabel: "TEJ", lat: 23.76535, lon: 90.40062, altitude: 58, heading: Math.PI / 2 },
+  { label: "Niketan", shortLabel: "NIK", lat: 23.77485, lon: 90.41017, altitude: 62, heading: 0 },
+  { label: "Gulshan 1", shortLabel: "GUL", lat: 23.77512, lon: 90.41607, altitude: 78, heading: -Math.PI / 2 },
+  { label: "Badda Link Road", shortLabel: "BAD", lat: 23.77157, lon: 90.42045, altitude: 46, heading: -Math.PI / 2 },
+  { label: "Rampura Bridge", shortLabel: "RAM", lat: 23.76863, lon: 90.42245, altitude: 36, heading: Math.PI },
+];
+
+function coordinatesToWorld(lat: number, lon: number) {
+  const metresPerLongitude = 111_320 * Math.cos(MAP_CENTER.lat * Math.PI / 180);
+  return new THREE.Vector2(
+    (lon - MAP_CENTER.lon) * metresPerLongitude,
+    -(lat - MAP_CENTER.lat) * 110_540,
+  );
+}
 
 function seededRandom(seed = 713) {
   let value = seed;
@@ -187,9 +206,13 @@ function createFlightAudio(): FlightAudio {
 function addCity(scene: THREE.Scene) {
   const random = seededRandom();
   const colliders: BuildingCollider[] = [];
+  const fallbackWorld = new THREE.Group();
+  fallbackWorld.name = "Procedural map fallback";
+  scene.add(fallbackWorld);
+  scene.userData.fallbackWorld = fallbackWorld;
   const proceduralBuildings = new THREE.Group();
   proceduralBuildings.name = "Procedural building fallback";
-  scene.add(proceduralBuildings);
+  fallbackWorld.add(proceduralBuildings);
   scene.userData.proceduralBuildings = proceduralBuildings;
   const sharedBox = new RoundedBoxGeometry(1, 1, 1, 2, 0.055);
   const unitBox = new THREE.BoxGeometry(1, 1, 1);
@@ -209,14 +232,14 @@ function addCity(scene: THREE.Scene) {
     }
     const texture = new THREE.CanvasTexture(canvas);
     texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
-    texture.repeat.set(24, 24);
+    texture.repeat.set(52, 52);
     texture.colorSpace = THREE.SRGBColorSpace;
     texture.anisotropy = 4;
     return texture;
   };
 
   const ground = new THREE.Mesh(
-    new THREE.PlaneGeometry(2400, 2400),
+    new THREE.PlaneGeometry(5200, 5200),
     new THREE.MeshStandardMaterial({ color: 0x87937a, map: makeGroundTexture(), roughness: 1 }),
   );
   ground.rotation.x = -Math.PI / 2;
@@ -251,7 +274,7 @@ function addCity(scene: THREE.Scene) {
   water.position.y = 0.45;
   water.receiveShadow = true;
   water.name = "Hatirjheel Lake";
-  scene.add(water);
+  fallbackWorld.add(water);
 
   const waterRibbons: WaterRibbon[] = [];
   const ribbonGeometry = new THREE.PlaneGeometry(54, 1.25);
@@ -267,7 +290,7 @@ function addCity(scene: THREE.Scene) {
     ribbon.scale.x = 0.45 + random() * 1.15;
     ribbon.position.set(x, 0.58 + random() * 0.025, center + (random() - 0.5) * 125);
     ribbon.userData.phase = random() * Math.PI * 2;
-    scene.add(ribbon);
+    fallbackWorld.add(ribbon);
     waterRibbons.push(ribbon);
   }
   scene.userData.waterRibbons = waterRibbons;
@@ -280,17 +303,17 @@ function addCity(scene: THREE.Scene) {
     const road = new THREE.Mesh(new THREE.BoxGeometry(2200, 1.1, 38), roadMaterial);
     road.position.set(0, 0.55, z);
     road.receiveShadow = true;
-    scene.add(road);
+    fallbackWorld.add(road);
     for (let x = -1050; x < 1050; x += 55) {
       const line = new THREE.Mesh(new THREE.BoxGeometry(26, 0.15, 1.5), lineMaterial);
       line.position.set(x, 1.15, z);
-      scene.add(line);
+      fallbackWorld.add(line);
     }
     for (const side of [-1, 1]) {
       const curb = new THREE.Mesh(curbGeometry, concreteMaterial);
       curb.position.set(0, 1.05, z + side * 21);
       curb.receiveShadow = true;
-      scene.add(curb);
+      fallbackWorld.add(curb);
     }
   }
 
@@ -321,7 +344,7 @@ function addCity(scene: THREE.Scene) {
     car.userData.direction = i % 4 < 2 ? 1 : -1;
     car.userData.speed = 13 + random() * 12;
     car.castShadow = true;
-    scene.add(car);
+    fallbackWorld.add(car);
     traffic.push(car);
   }
   scene.userData.traffic = traffic;
@@ -338,7 +361,7 @@ function addCity(scene: THREE.Scene) {
       lampPosts.add(post, light);
     }
   }
-  scene.add(lampPosts);
+  fallbackWorld.add(lampPosts);
 
   for (const x of [-590, -70, 510]) {
     const bridgeCenter = Math.sin(x * 0.0042) * 90;
@@ -360,7 +383,7 @@ function addCity(scene: THREE.Scene) {
       pier.castShadow = true;
       bridge.add(pier);
     }
-    scene.add(bridge);
+    fallbackWorld.add(bridge);
   }
 
   const buildingColors = [0xd6c49f, 0xb8c0b7, 0xc99072, 0x9cad9d, 0xd0d0c1, 0xa77f68];
@@ -508,13 +531,13 @@ function addCity(scene: THREE.Scene) {
   const trunks = new THREE.InstancedMesh(treeTrunk, trunkMaterial, trunkMatrices.length);
   trunkMatrices.forEach((transform, index) => trunks.setMatrixAt(index, transform));
   trunks.instanceMatrix.needsUpdate = true;
-  scene.add(trunks);
+  fallbackWorld.add(trunks);
   foliageMatrices.forEach((transforms, materialIndex) => {
     const foliage = new THREE.InstancedMesh(treeTop, leafMaterials[materialIndex], transforms.length);
     transforms.forEach((transform, index) => foliage.setMatrixAt(index, transform));
     foliage.instanceMatrix.needsUpdate = true;
     foliage.castShadow = true;
-    scene.add(foliage);
+    fallbackWorld.add(foliage);
   });
 
   const tower = new THREE.Group();
@@ -530,15 +553,44 @@ function addCity(scene: THREE.Scene) {
   spire.position.y = 200;
   tower.add(spire);
   tower.position.set(720, 0, -430);
-  scene.add(tower);
+  fallbackWorld.add(tower);
   colliders.push({ x: 720, z: -430, halfWidth: 32, halfDepth: 32, top: 220 });
 
-  const perches: Perch[] = [
-    { position: new THREE.Vector3(-571, 13, Math.sin(-590 * 0.0042) * 90 + 78), label: "West bridge rail", heading: 0 },
-    { position: new THREE.Vector3(-51, 13, Math.sin(-70 * 0.0042) * 90 - 72), label: "Central bridge rail", heading: Math.PI },
-    { position: new THREE.Vector3(529, 13, Math.sin(510 * 0.0042) * 90 + 62), label: "East bridge rail", heading: 0 },
-    { position: new THREE.Vector3(745, 174, -430), label: "Tower crown", heading: -Math.PI / 2 },
-  ];
+  const perches: Perch[] = AREA_LANDMARKS.map((landmark) => {
+    const world = coordinatesToWorld(landmark.lat, landmark.lon);
+    return {
+      position: new THREE.Vector3(world.x, landmark.altitude, world.y),
+      label: landmark.label,
+      heading: landmark.heading,
+    };
+  });
+  const areaLabels = new THREE.Group();
+  areaLabels.name = "Greater Hatirjheel area labels";
+  for (const [index, landmark] of AREA_LANDMARKS.entries()) {
+    const canvas = document.createElement("canvas");
+    canvas.width = 384;
+    canvas.height = 80;
+    const context = canvas.getContext("2d");
+    if (!context) continue;
+    context.fillStyle = "rgba(9, 27, 22, 0.82)";
+    context.fillRect(2, 2, 380, 76);
+    context.strokeStyle = "rgba(216, 255, 98, 0.72)";
+    context.lineWidth = 3;
+    context.strokeRect(3.5, 3.5, 377, 73);
+    context.fillStyle = "#d8ff62";
+    context.font = "600 29px monospace";
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+    context.fillText(landmark.label.toUpperCase(), 192, 41);
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.minFilter = THREE.LinearFilter;
+    const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false, toneMapped: false }));
+    label.position.copy(perches[index].position).add(new THREE.Vector3(0, 22, 0));
+    label.scale.set(72, 15, 1);
+    areaLabels.add(label);
+  }
+  scene.add(areaLabels);
   const perchMaterial = new THREE.MeshStandardMaterial({ color: 0x4a5552, roughness: 0.72, metalness: 0.2 });
   const perchMarkers: THREE.Group[] = [];
   for (const [index, perch] of perches.entries()) {
@@ -717,7 +769,7 @@ function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData) {
     return null;
   }
   scene.add(root);
-  const fallback = scene.userData.proceduralBuildings as THREE.Group | undefined;
+  const fallback = scene.userData.fallbackWorld as THREE.Group | undefined;
   if (fallback) fallback.visible = false;
   return colliders;
 }
@@ -751,8 +803,8 @@ export function BirdFlight() {
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0xa9c9ca);
-    scene.fog = new THREE.FogExp2(0xa9c3bf, 0.00062);
-    const camera = new THREE.PerspectiveCamera(58, mount.clientWidth / mount.clientHeight, 0.5, 4000);
+    scene.fog = new THREE.FogExp2(0xa9c3bf, 0.00038);
+    const camera = new THREE.PerspectiveCamera(58, mount.clientWidth / mount.clientHeight, 0.5, 6000);
     const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
     renderer.setSize(mount.clientWidth, mount.clientHeight);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
@@ -764,7 +816,7 @@ export function BirdFlight() {
     mount.appendChild(renderer.domElement);
 
     const sky = new Sky();
-    sky.scale.setScalar(3800);
+    sky.scale.setScalar(7000);
     const skyUniforms = sky.material.uniforms;
     skyUniforms.turbidity.value = 5.8;
     skyUniforms.rayleigh.value = 3.15;
@@ -779,11 +831,11 @@ export function BirdFlight() {
     sun.position.set(-400, 650, 280);
     sun.castShadow = true;
     sun.shadow.mapSize.set(2048, 2048);
-    sun.shadow.camera.left = -700;
-    sun.shadow.camera.right = 700;
-    sun.shadow.camera.top = 700;
-    sun.shadow.camera.bottom = -700;
-    sun.shadow.camera.far = 1700;
+    sun.shadow.camera.left = -2200;
+    sun.shadow.camera.right = 2200;
+    sun.shadow.camera.top = 2200;
+    sun.shadow.camera.bottom = -2200;
+    sun.shadow.camera.far = 3000;
     sun.shadow.bias = -0.00012;
     sun.shadow.normalBias = 0.035;
     scene.add(sun);
@@ -792,7 +844,6 @@ export function BirdFlight() {
     scene.add(skyFill);
 
     const buildingColliders = addCity(scene);
-    const landmarkColliders = buildingColliders.filter((collider) => collider.top >= 200);
     void fetch("/api/osm")
       .then(async (response) => {
         if (!response.ok) throw new Error(`Map request failed with ${response.status}`);
@@ -802,7 +853,7 @@ export function BirdFlight() {
         if (disposed) return;
         const osmColliders = addOpenStreetMapWorld(scene, data);
         if (!osmColliders) throw new Error("OpenStreetMap response contained no usable buildings");
-        buildingColliders.splice(0, buildingColliders.length, ...osmColliders, ...landmarkColliders);
+        buildingColliders.splice(0, buildingColliders.length, ...osmColliders);
         setMapStatus("live");
       })
       .catch(() => {
@@ -968,7 +1019,7 @@ export function BirdFlight() {
       }
       crow.position.y = clamp(crow.position.y, 10, 390);
       if (crow.position.y <= 10.2) pitch = Math.max(pitch, 0.16);
-      if (Math.abs(crow.position.x) > 1080 || Math.abs(crow.position.z) > 1080) {
+      if (Math.abs(crow.position.x) > FLIGHT_EXTENT.x || Math.abs(crow.position.z) > FLIGHT_EXTENT.z) {
         const homeYaw = Math.atan2(crow.position.x, crow.position.z);
         const angleDifference = Math.atan2(Math.sin(homeYaw - yaw), Math.cos(homeYaw - yaw));
         yaw += angleDifference * dt * 0.75;
@@ -1067,8 +1118,8 @@ export function BirdFlight() {
         compassRef.current.textContent = headings[headingIndex];
       }
       if (mapBirdRef.current) {
-        mapBirdRef.current.style.left = `${50 + clamp(crow.position.x / 24, -39, 39)}%`;
-        mapBirdRef.current.style.top = `${50 + clamp(crow.position.z / 24, -39, 39)}%`;
+        mapBirdRef.current.style.left = `${50 + clamp(crow.position.x / FLIGHT_EXTENT.x, -1, 1) * 43}%`;
+        mapBirdRef.current.style.top = `${50 + clamp(crow.position.z / FLIGHT_EXTENT.z, -1, 1) * 43}%`;
         mapBirdRef.current.style.transform = `translate(-50%, -50%) rotate(${yaw}rad)`;
       }
 
@@ -1131,7 +1182,7 @@ export function BirdFlight() {
 
   return (
     <main className="flight-shell">
-      <div ref={mountRef} className="world" aria-label="Interactive stylized flight over Hatirjheel, Dhaka" />
+      <div ref={mountRef} className="world" aria-label="Interactive flight over Greater Hatirjheel, Dhaka" />
       <div className="atmosphere" />
 
       <header className={`topbar${flying ? " in-flight" : ""}`}>
@@ -1139,7 +1190,7 @@ export function BirdFlight() {
           <span className="brand-mark">BEV</span>
           <div><strong>BIRD&apos;S EYE VIEW</strong><small>DHAKA · EARLY FLIGHT</small></div>
         </div>}
-        {!flying && <div className="location"><span className="pulse" /> HATIRJHEEL, DHAKA <b>23.7498° N</b></div>}
+        {!flying && <div className="location"><span className="pulse" /> GREATER HATIRJHEEL, DHAKA <b>23.7640° N</b></div>}
         <div className="top-actions">
           <button className={`icon-button sound-button${soundOn ? " active" : ""}`} onClick={toggleSound} aria-label={soundOn ? "Mute ambient sound" : "Enable ambient sound"}>♫</button>
           {flying && <button className={`icon-button pause-button${paused ? " active" : ""}`} onClick={togglePause} aria-label={paused ? "Resume flight" : "Pause flight"}>{paused ? "▶" : "Ⅱ"}</button>}
@@ -1157,16 +1208,30 @@ export function BirdFlight() {
             <div><span ref={compassRef}>N</span><small>HEADING</small></div>
           </section>
 
-          <div className="minimap" aria-label="Mini map of Hatirjheel">
+          <div className="minimap" aria-label="Mini map of Greater Hatirjheel and surrounding areas">
             <span className="north">N</span>
             <div className="map-water one" /><div className="map-water two" />
             <div className="map-road" />
+            {AREA_LANDMARKS.map((landmark) => {
+              const world = coordinatesToWorld(landmark.lat, landmark.lon);
+              return (
+                <span
+                  key={landmark.label}
+                  className="map-area"
+                  title={landmark.label}
+                  style={{
+                    left: `${50 + clamp(world.x / FLIGHT_EXTENT.x, -1, 1) * 43}%`,
+                    top: `${50 + clamp(world.y / FLIGHT_EXTENT.z, -1, 1) * 43}%`,
+                  }}
+                >{landmark.shortLabel}</span>
+              );
+            })}
             <div ref={mapBirdRef} className="map-bird">▲</div>
-            <small>HATIRJHEEL</small>
+            <small>GREATER HATIRJHEEL</small>
           </div>
 
           <div className="camera-chip"><span>CAMERA</span>{cameraMode}<kbd>C</kbd></div>
-          <div className="perch-legend"><i /> REST PERCH</div>
+          <div className="perch-legend"><i /> AREA PERCH</div>
           <div className="flight-hint"><kbd>W / S</kbd><span>CLIMB / DIVE</span><kbd>SHIFT</kbd><span>BOOST</span></div>
           <div ref={perchPromptRef} className="perch-prompt" data-visible="false"><kbd>E</kbd><span ref={perchLabelRef}>LAND</span></div>
           {resting && <div className="resting-chip"><i /> RESTING · WATCHING DHAKA</div>}
@@ -1181,7 +1246,7 @@ export function BirdFlight() {
         <section className="welcome-panel">
           <span className="eyebrow">A CITY FROM ANOTHER POINT OF VIEW</span>
           <h1>The sky<br />belongs to you.</h1>
-          <p>Take wing as a Dhaka crow. Ride the warm air above Hatirjheel, skim the water, and find your own path through the city.</p>
+          <p>Take wing as a Dhaka crow. Follow Hatirjheel from Moghbazar to Rampura, then roam across Tejgaon, Niketan, Gulshan, and Badda.</p>
           <button onClick={beginFlight} className="primary-button"><span>BEGIN FLIGHT</span><b>→</b></button>
           <div className="quick-controls"><span><kbd>WASD</kbd> STEER</span><span><kbd>SPACE</kbd> FLAP</span><span><kbd>C</kbd> CAMERA</span></div>
         </section>
