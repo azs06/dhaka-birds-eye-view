@@ -457,11 +457,11 @@ function createWeatherVfx(
     const isNight = !weather.isDay;
     const background = isNight
       ? mode === "storm" ? 0x07131b : mode === "rain" ? 0x0b1b22 : 0x081824
-      : mode === "fog" ? 0x8a9995
-        : mode === "storm" ? 0x344b52
-          : mode === "rain" ? 0x5f7c80
-            : mode === "cloudy" ? 0x89a6a5
-              : 0xa9c9ca;
+      : mode === "fog" ? 0xa4ad91
+        : mode === "storm" ? 0x49656b
+          : mode === "rain" ? 0x6f9695
+            : mode === "cloudy" ? 0x86aaa0
+              : 0x91c7c0;
     scene.background = new THREE.Color(background);
     if (scene.fog instanceof THREE.FogExp2) {
       scene.fog.color.set(background);
@@ -485,9 +485,9 @@ function createWeatherVfx(
 
     renderer.toneMappingExposure = isNight
       ? 0.7
-      : mode === "clear" ? 0.84
-        : mode === "cloudy" ? 0.68
-          : 0.56;
+      : mode === "clear" ? 1.02
+        : mode === "cloudy" ? 0.9
+          : 0.76;
     hemisphere.intensity = isNight ? 1.08 : 1.8 - cloudAmount * 0.82;
     hemisphere.color.set(isNight ? 0x6f8eaa : mode === "rain" || mode === "storm" ? 0xb8d0d4 : 0xe8f3ee);
     hemisphere.groundColor.set(isNight ? 0x26342d : 0x5d6c58);
@@ -604,10 +604,10 @@ async function addProceduralDistrictTiles(
   const roofBox = new THREE.BoxGeometry(1, 1, 1);
   const treeGeometry = new THREE.IcosahedronGeometry(1, 1);
   const materials = [0xb7aa90, 0xa8b2aa, 0xbb8069].map(
-    (color) => new THREE.MeshStandardMaterial({ color, roughness: 0.86, metalness: 0.015 }),
+    (color) => new THREE.MeshToonMaterial({ color }),
   );
-  const roofMaterial = new THREE.MeshStandardMaterial({ color: 0x66706a, roughness: 0.88 });
-  const treeMaterial = new THREE.MeshStandardMaterial({ color: 0x47694b, roughness: 0.96, flatShading: true });
+  const roofMaterial = new THREE.MeshToonMaterial({ color: 0x4e6257 });
+  const treeMaterial = new THREE.MeshToonMaterial({ color: 0x416f49 });
   const majorRoads = new Set(["motorway", "trunk", "primary", "secondary"]);
   type AvoidanceSegment = { x1: number; z1: number; x2: number; z2: number; radius: number };
   const spatialCellSize = 180;
@@ -1303,13 +1303,29 @@ function addCity(scene: THREE.Scene) {
     canvas.width = canvas.height = 192;
     const context = canvas.getContext("2d");
     if (!context) return null;
-    context.fillStyle = "#77866e";
+    context.fillStyle = "#8c9d72";
     context.fillRect(0, 0, canvas.width, canvas.height);
     for (let i = 0; i < 3600; i++) {
       const lightness = 34 + Math.floor(random() * 18);
       context.fillStyle = `hsla(${82 + random() * 20}, 15%, ${lightness}%, ${0.06 + random() * 0.1})`;
       const size = 1 + random() * 3.5;
       context.fillRect(random() * canvas.width, random() * canvas.height, size, size);
+    }
+    context.lineWidth = 1;
+    for (let contour = 0; contour < 14; contour++) {
+      const baseY = 8 + contour * 14;
+      context.beginPath();
+      for (let x = 0; x <= canvas.width; x += 4) {
+        const y = baseY + Math.sin(x * 0.055 + contour * 0.9) * 3.2 + Math.sin(x * 0.13) * 1.2;
+        if (x === 0) context.moveTo(x, y);
+        else context.lineTo(x, y);
+      }
+      context.strokeStyle = contour % 3 === 0 ? "rgba(123, 62, 48, .16)" : "rgba(29, 66, 55, .12)";
+      context.stroke();
+    }
+    for (let field = 0; field < 18; field++) {
+      context.fillStyle = field % 2 === 0 ? "rgba(232, 167, 71, .07)" : "rgba(196, 71, 85, .055)";
+      context.fillRect(random() * canvas.width, random() * canvas.height, 7 + random() * 17, 4 + random() * 10);
     }
     const texture = new THREE.CanvasTexture(canvas);
     texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
@@ -1321,7 +1337,7 @@ function addCity(scene: THREE.Scene) {
 
   const ground = new THREE.Mesh(
     new THREE.PlaneGeometry(26_000, 26_000),
-    new THREE.MeshStandardMaterial({ color: 0x87937a, map: makeGroundTexture(), roughness: 1 }),
+    new THREE.MeshToonMaterial({ color: 0x9bab78, map: makeGroundTexture() }),
   );
   ground.rotation.x = -Math.PI / 2;
   ground.receiveShadow = true;
@@ -1342,14 +1358,7 @@ function addCity(scene: THREE.Scene) {
   waterShape.closePath();
   const water = new THREE.Mesh(
     new THREE.ShapeGeometry(waterShape),
-    new THREE.MeshPhysicalMaterial({
-      color: 0x397f88,
-      roughness: 0.2,
-      metalness: 0.05,
-      clearcoat: 0.72,
-      clearcoatRoughness: 0.24,
-      reflectivity: 0.64,
-    }),
+    new THREE.MeshToonMaterial({ color: 0x3b9fac }),
   );
   water.rotation.x = -Math.PI / 2;
   water.position.y = 0.45;
@@ -1376,9 +1385,9 @@ function addCity(scene: THREE.Scene) {
   }
   scene.userData.waterRibbons = waterRibbons;
 
-  const roadMaterial = new THREE.MeshStandardMaterial({ color: 0x3f4746, roughness: 0.92 });
-  const lineMaterial = new THREE.MeshStandardMaterial({ color: 0xd6c879, roughness: 0.74 });
-  const concreteMaterial = new THREE.MeshStandardMaterial({ color: 0xa6a696, roughness: 0.95 });
+  const roadMaterial = new THREE.MeshToonMaterial({ color: 0x283f3a });
+  const lineMaterial = new THREE.MeshToonMaterial({ color: 0xf3d15f });
+  const concreteMaterial = new THREE.MeshToonMaterial({ color: 0xc9b98f });
   const curbGeometry = new THREE.BoxGeometry(2200, 1.4, 3.2);
   for (const z of [-285, 285]) {
     const road = new THREE.Mesh(new THREE.BoxGeometry(2200, 1.1, 38), roadMaterial);
@@ -1467,11 +1476,11 @@ function addCity(scene: THREE.Scene) {
     fallbackWorld.add(bridge);
   }
 
-  const buildingColors = [0xd6c49f, 0xb8c0b7, 0xc99072, 0x9cad9d, 0xd0d0c1, 0xa77f68];
-  const buildingMaterials = buildingColors.map((color) => new THREE.MeshStandardMaterial({ color, roughness: 0.78 }));
-  const facadeMaterials = buildingColors.map((color) => new THREE.MeshStandardMaterial({ color: new THREE.Color(color).multiplyScalar(0.82), roughness: 0.84 }));
-  const rooftopMaterial = new THREE.MeshStandardMaterial({ color: 0x777f74, roughness: 0.86 });
-  const tankMaterials = [0x4c5b55, 0x947f68, 0x325d62].map((color) => new THREE.MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.08 }));
+  const buildingColors = [0xe5c986, 0xd99a73, 0xc95d57, 0x89a67c, 0xf0ddae, 0xa97062];
+  const buildingMaterials = buildingColors.map((color) => new THREE.MeshToonMaterial({ color }));
+  const facadeMaterials = buildingColors.map((color) => new THREE.MeshToonMaterial({ color: new THREE.Color(color).multiplyScalar(0.78) }));
+  const rooftopMaterial = new THREE.MeshToonMaterial({ color: 0x53675d });
+  const tankMaterials = [0x355c53, 0xb37a55, 0x327f86].map((color) => new THREE.MeshToonMaterial({ color }));
   const windows: Array<{ position: THREE.Vector3; quaternion: THREE.Quaternion; scale: THREE.Vector3; color: THREE.Color }> = [];
   const local = new THREE.Vector3();
   const world = new THREE.Vector3();
@@ -1583,8 +1592,8 @@ function addCity(scene: THREE.Scene) {
 
   const treeTrunk = new THREE.CylinderGeometry(1.1, 1.65, 7.5, 6);
   const treeTop = new THREE.IcosahedronGeometry(1, 1);
-  const trunkMaterial = new THREE.MeshStandardMaterial({ color: 0x665244, roughness: 1 });
-  const leafMaterials = [0x355f44, 0x4d744c, 0x70834d].map((color) => new THREE.MeshStandardMaterial({ color, roughness: 0.92, flatShading: true }));
+  const trunkMaterial = new THREE.MeshToonMaterial({ color: 0x6f4c3f });
+  const leafMaterials = [0x315f43, 0x4b784a, 0x7b8c4b].map((color) => new THREE.MeshToonMaterial({ color }));
   const trunkMatrices: THREE.Matrix4[] = [];
   const foliageMatrices: THREE.Matrix4[][] = [[], [], []];
   const treeQuaternion = new THREE.Quaternion();
@@ -1640,12 +1649,12 @@ function addCity(scene: THREE.Scene) {
     canvas.height = 80;
     const context = canvas.getContext("2d");
     if (!context) continue;
-    context.fillStyle = "rgba(9, 27, 22, 0.82)";
+    context.fillStyle = "rgba(247, 222, 171, 0.92)";
     context.fillRect(2, 2, 380, 76);
-    context.strokeStyle = "rgba(216, 255, 98, 0.72)";
+    context.strokeStyle = "rgba(196, 71, 85, 0.9)";
     context.lineWidth = 3;
     context.strokeRect(3.5, 3.5, 377, 73);
-    context.fillStyle = "#d8ff62";
+    context.fillStyle = "#243b35";
     context.font = "600 29px monospace";
     context.textAlign = "center";
     context.textBaseline = "middle";
@@ -1667,12 +1676,12 @@ function addCity(scene: THREE.Scene) {
     canvas.height = 80;
     const context = canvas.getContext("2d");
     if (!context) continue;
-    context.fillStyle = "rgba(8, 38, 43, 0.82)";
+    context.fillStyle = "rgba(43, 139, 151, 0.9)";
     context.fillRect(2, 2, 444, 76);
-    context.strokeStyle = "rgba(132, 232, 239, 0.8)";
+    context.strokeStyle = "rgba(255, 224, 135, 0.92)";
     context.lineWidth = 3;
     context.strokeRect(3.5, 3.5, 441, 73);
-    context.fillStyle = "#a7f2f4";
+    context.fillStyle = "#fff0c4";
     context.font = "600 27px monospace";
     context.textAlign = "center";
     context.textBaseline = "middle";
@@ -1860,7 +1869,7 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
     }
     await yieldIfNeeded(isCancelled);
   }
-  const waterMaterial = new THREE.MeshPhysicalMaterial({ color: 0x377f88, roughness: 0.23, clearcoat: 0.68, clearcoatRoughness: 0.28 });
+  const waterMaterial = new THREE.MeshToonMaterial({ color: 0x2f9eaa });
   await mergeIntoMeshBatches(root, waterAreas, waterMaterial, "OSM water areas", isCancelled);
   await mergeIntoMeshBatches(root, waterLines, waterMaterial, "OSM waterways", isCancelled);
 
@@ -1882,7 +1891,7 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
     }
     await yieldIfNeeded(isCancelled);
   }
-  const roadMaterials = [0x3c4444, 0x4a514e, 0x5b615b].map((color) => new THREE.MeshStandardMaterial({ color, roughness: 0.94 }));
+  const roadMaterials = [0x293f3b, 0x3d5148, 0x60705b].map((color) => new THREE.MeshToonMaterial({ color }));
   for (let index = 0; index < roadBuckets.length; index++) {
     await mergeIntoMeshBatches(root, roadBuckets[index], roadMaterials[index], `OSM roads ${index}`, isCancelled);
   }
@@ -1914,8 +1923,8 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
     });
     await yieldIfNeeded(isCancelled);
   }
-  const buildingMaterials = [0xcdbd9f, 0xb5beb5, 0xc58e72, 0x99aa9d].map(
-    (color) => new THREE.MeshStandardMaterial({ color, roughness: 0.8, metalness: 0.02 }),
+  const buildingMaterials = [0xe3c982, 0xd38a68, 0xc75858, 0x83a17a].map(
+    (color) => new THREE.MeshToonMaterial({ color }),
   );
   // Nearby procedural towers and landmarks provide local shadows. Keeping the
   // four citywide merged meshes out of the shadow pass avoids redrawing the
@@ -2038,8 +2047,8 @@ export function BirdFlight() {
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0xa9c9ca);
-    scene.fog = new THREE.FogExp2(0xa9c3bf, 0.0003);
+    scene.background = new THREE.Color(0x91c7c0);
+    scene.fog = new THREE.FogExp2(0x91b8a8, 0.00028);
     const camera = new THREE.PerspectiveCamera(58, mount.clientWidth / mount.clientHeight, 0.5, 8000);
     const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
     renderer.setSize(mount.clientWidth, mount.clientHeight);
@@ -2047,8 +2056,8 @@ export function BirdFlight() {
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFShadowMap;
     renderer.outputColorSpace = THREE.SRGBColorSpace;
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 0.82;
+    renderer.toneMapping = THREE.NeutralToneMapping;
+    renderer.toneMappingExposure = 1.02;
     mount.appendChild(renderer.domElement);
 
     const sky = new Sky();
@@ -2176,6 +2185,12 @@ export function BirdFlight() {
         if (object instanceof THREE.Mesh) {
           object.castShadow = true;
           object.receiveShadow = true;
+          const sourceMaterials = Array.isArray(object.material) ? object.material : [object.material];
+          const toonMaterials = sourceMaterials.map((material) => new THREE.MeshToonMaterial({
+            color: material.color?.clone() ?? new THREE.Color(0x1b2b2a),
+            map: material.map ?? null,
+          }));
+          object.material = Array.isArray(object.material) ? toonMaterials : toonMaterials[0];
         }
       });
       crow.add(model);
@@ -2580,6 +2595,16 @@ export function BirdFlight() {
       <div ref={mountRef} className="world" aria-label="Interactive hybrid flight map of central Dhaka" />
       <div className="atmosphere" data-weather={weather.mode} data-daylight={weather.isDay ? "day" : "night"} />
       <div ref={flightEffectRef} className="flight-dynamics" aria-hidden="true" />
+      <div className={`folk-poster-frame${flying ? " compact" : ""}`} aria-hidden="true">
+        <i className="folk-corner top-left" /><i className="folk-corner top-right" />
+        <i className="folk-corner bottom-left" /><i className="folk-corner bottom-right" />
+      </div>
+      {!flying && <div className="folk-river-seal" aria-hidden="true">
+        <span className="folk-sun" />
+        <strong lang="bn">নদীর শহর</strong>
+        <small>CITY OF RIVERS</small>
+        <i className="folk-wave one" /><i className="folk-wave two" /><i className="folk-wave three" />
+      </div>}
 
       <header className={`topbar${flying ? " in-flight" : ""}`}>
         {!flying && <div className="brand">
@@ -2745,7 +2770,7 @@ export function BirdFlight() {
 
       {!flying && (
         <section className="welcome-panel">
-          <span className="eyebrow">A CITY FROM ANOTHER POINT OF VIEW</span>
+          <span className="eyebrow">AN ILLUSTRATED FLIGHT THROUGH THE RIVER CITY</span>
           <h1>The sky<br />belongs to you.</h1>
           <p>Cross Greater Dhaka from Uttara and Mirpur to Old Dhaka, Keraniganj, Demra, and Purbachal—following the Buriganga, Turag, Balu, Shitalakshya, and the lakes between them.</p>
           <button onClick={beginFlight} className="primary-button"><span>BEGIN FLIGHT</span><b>→</b></button>

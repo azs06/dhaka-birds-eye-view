@@ -45,6 +45,9 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(component, /Hatirjheel Lake/);
   assert.match(component, /fetch\("\/api\/osm"\)/);
   assert.match(component, /addOpenStreetMapWorld/);
+  assert.match(component, /MeshToonMaterial/);
+  assert.match(component, /folk-poster-frame/);
+  assert.match(component, /নদীর শহর/);
   assert.match(component, /GREATER DHAKA &amp; ITS RIVERS/);
   for (const area of ["Moghbazar", "Tejgaon I\/A", "Niketan", "Gulshan 1", "Badda Link Road", "Rampura Bridge"]) {
     assert.match(component, new RegExp(area));
@@ -108,6 +111,8 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.doesNotMatch(component, /className="mission-card"/);
   assert.match(css, /\.flight-shell/);
   assert.match(css, /\.topbar\.in-flight/);
+  assert.match(css, /\.folk-river-seal/);
+  assert.match(css, /--vermillion:/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
   await assert.rejects(access(new URL("../app/_sites-preview", import.meta.url)));
 });
