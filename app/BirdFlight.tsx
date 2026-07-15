@@ -1062,6 +1062,94 @@ async function addRoadNetworkMeshes(
   );
 }
 
+function addImmediateCityMass(scene: THREE.Scene, roads: OsmMapData["roads"]) {
+  const group = new THREE.Group();
+  group.name = "Immediate Greater Dhaka city mass";
+  const geometry = new THREE.BoxGeometry(1, 1, 1);
+  const materials = [0xc4b99f, 0xa9b3aa, 0xb47e69].map(
+    (color) => new THREE.MeshStandardMaterial({ color, roughness: 0.94, metalness: 0.01 }),
+  );
+  const transforms: THREE.Matrix4[][] = [[], [], []];
+  const districtCenters = AREA_LANDMARKS.map((landmark) => {
+    const world = coordinatesToWorld(landmark.lat, landmark.lon);
+    return { x: world.x, z: world.y, intensity: clamp(landmark.altitude / 88, 0.42, 1.08) };
+  });
+  const landmarkClearings = DHAKA_LANDMARKS.map((landmark) => {
+    const world = coordinatesToWorld(landmark.lat, landmark.lon);
+    return { x: world.x, z: world.y, radius: landmark.kind === "airport" ? 1_350 : 105 };
+  });
+  const roadCellSize = 180;
+  const roadGrid = new Map<string, Array<{ x1: number; z1: number; x2: number; z2: number; radius: number }>>();
+  const roadKey = (cellX: number, cellZ: number) => `${cellX}:${cellZ}`;
+  for (const road of roads) {
+    const radius = ["motorway", "trunk", "primary", "secondary"].includes(road.kind) ? 28 : 15;
+    for (let index = 1; index < road.points.length; index++) {
+      const [x1, z1] = road.points[index - 1];
+      const [x2, z2] = road.points[index];
+      const segment = { x1, z1, x2, z2, radius };
+      for (let cellX = Math.floor((Math.min(x1, x2) - radius) / roadCellSize); cellX <= Math.floor((Math.max(x1, x2) + radius) / roadCellSize); cellX++) {
+        for (let cellZ = Math.floor((Math.min(z1, z2) - radius) / roadCellSize); cellZ <= Math.floor((Math.max(z1, z2) + radius) / roadCellSize); cellZ++) {
+          const key = roadKey(cellX, cellZ);
+          const entries = roadGrid.get(key);
+          if (entries) entries.push(segment);
+          else roadGrid.set(key, [segment]);
+        }
+      }
+    }
+  }
+
+  const random = seededRandom(24_071);
+  const matrix = new THREE.Matrix4();
+  const position = new THREE.Vector3();
+  const quaternion = new THREE.Quaternion();
+  const scale = new THREE.Vector3();
+  const spacing = 116;
+  for (let x = -FLIGHT_EXTENT.x + 70; x < FLIGHT_EXTENT.x - 70; x += spacing) {
+    for (let z = -FLIGHT_EXTENT.z + 70; z < FLIGHT_EXTENT.z - 70; z += spacing) {
+      const buildingX = x + (random() - 0.5) * 48;
+      const buildingZ = z + (random() - 0.5) * 48;
+      let intensity = 0.22;
+      for (const district of districtCenters) {
+        const proximity = clamp(1 - Math.hypot(buildingX - district.x, buildingZ - district.z) / 1_700, 0, 1);
+        intensity = Math.max(intensity, proximity * district.intensity);
+      }
+      if (random() > 0.36 + intensity * 0.42) continue;
+      if (landmarkClearings.some((landmark) => Math.hypot(buildingX - landmark.x, buildingZ - landmark.z) < landmark.radius)) continue;
+      const nearbyRoads = roadGrid.get(roadKey(Math.floor(buildingX / roadCellSize), Math.floor(buildingZ / roadCellSize))) ?? [];
+      if (nearbyRoads.some((segment) => distanceToSegmentSquared(
+        buildingX,
+        buildingZ,
+        segment.x1,
+        segment.z1,
+        segment.x2,
+        segment.z2,
+      ) < segment.radius ** 2)) continue;
+
+      const width = 22 + random() * 30;
+      const depth = 20 + random() * 32;
+      const height = 10 + random() * 30 + intensity * (24 + random() * 44);
+      const bucket = height > 52 ? 2 : height > 30 ? 1 : 0;
+      position.set(buildingX, height / 2 + 0.9, buildingZ);
+      quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), (random() - 0.5) * 0.16);
+      scale.set(width, height, depth);
+      transforms[bucket].push(matrix.compose(position, quaternion, scale).clone());
+    }
+  }
+
+  transforms.forEach((bucketTransforms, bucket) => {
+    const mesh = new THREE.InstancedMesh(geometry, materials[bucket], bucketTransforms.length);
+    mesh.name = `Immediate city buildings ${bucket}`;
+    bucketTransforms.forEach((transform, index) => mesh.setMatrixAt(index, transform));
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.castShadow = false;
+    mesh.receiveShadow = true;
+    group.add(mesh);
+  });
+  scene.add(group);
+  scene.userData.immediateCityMass = group;
+  return group;
+}
+
 async function addProceduralDistrictTiles(
   scene: THREE.Scene,
   data: OsmMapData,
@@ -1191,8 +1279,19 @@ async function addProceduralDistrictTiles(
   const minTileZ = Math.floor(-FLIGHT_EXTENT.z / tileSize);
   const maxTileZ = Math.ceil(FLIGHT_EXTENT.z / tileSize);
 
+  const tileCoordinates: Array<{ tileX: number; tileZ: number }> = [];
   for (let tileX = minTileX; tileX <= maxTileX; tileX++) {
     for (let tileZ = minTileZ; tileZ <= maxTileZ; tileZ++) {
+      tileCoordinates.push({ tileX, tileZ });
+    }
+  }
+  tileCoordinates.sort((a, b) => (
+    Math.hypot(a.tileX * tileSize - initialPosition.x, a.tileZ * tileSize - initialPosition.z) -
+    Math.hypot(b.tileX * tileSize - initialPosition.x, b.tileZ * tileSize - initialPosition.z)
+  ));
+  scene.userData.proceduralDistrictTiles = tiles;
+
+  for (const { tileX, tileZ } of tileCoordinates) {
       const random = coordinateRandom(tileX, tileZ);
       const centerX = tileX * tileSize;
       const centerZ = tileZ * tileSize;
@@ -1293,10 +1392,12 @@ async function addProceduralDistrictTiles(
       scene.add(group);
       tiles.push({ group, centerX, centerZ, colliders: tileColliders });
       await yieldIfNeeded(isCancelled);
-    }
   }
-  scene.userData.proceduralDistrictTiles = tiles;
   scene.userData.proceduralTileVisibilityRadius = visibilityRadius;
+  const immediateCityMass = scene.userData.immediateCityMass as THREE.Group | undefined;
+  if (immediateCityMass) immediateCityMass.visible = false;
+  const roadFallback = scene.userData.proceduralRoadFallback as THREE.Group | undefined;
+  if (roadFallback && data.roads.length > 0) roadFallback.visible = false;
   return colliders;
 }
 
@@ -2877,8 +2978,16 @@ export function BirdFlight() {
     skyFill.position.set(500, 260, -600);
     scene.add(skyFill);
 
+    let disposed = false;
     const buildingColliders = addCity(scene);
     let buildingColliderGrid = buildColliderGrid(buildingColliders);
+    const fallbackRoads = proceduralFallbackRoads();
+    addImmediateCityMass(scene, fallbackRoads);
+    const immediateRoadFallback = new THREE.Group();
+    immediateRoadFallback.name = "Immediate Greater Dhaka road network";
+    scene.add(immediateRoadFallback);
+    scene.userData.proceduralRoadFallback = immediateRoadFallback;
+    void addRoadNetworkMeshes(immediateRoadFallback, fallbackRoads, "Immediate fallback", () => disposed);
     const mapRequestStartedAt = performance.now();
     void fetch("/api/osm")
       .then(async (response) => {
@@ -2964,7 +3073,6 @@ export function BirdFlight() {
     let flapAction: THREE.AnimationAction | null = null;
     let glideAction: THREE.AnimationAction | null = null;
     let restAction: THREE.AnimationAction | null = null;
-    let disposed = false;
     new GLTFLoader().load("/models/dhaka-house-crow.glb", (gltf) => {
       if (disposed) return;
       const model = gltf.scene;
