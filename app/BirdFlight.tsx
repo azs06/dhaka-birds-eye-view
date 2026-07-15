@@ -89,6 +89,7 @@ const COLLISION_CELL_SIZE = 180;
 const BRAKE_SPEED = 18;
 const CRUISE_SPEED = 44;
 const BOOST_SPEED = 78;
+const DEFAULT_FLIGHT_ALTITUDE = 130;
 const DEFAULT_WEATHER: WeatherSnapshot = {
   source: "Open-Meteo",
   fetchedAt: "",
@@ -1782,7 +1783,7 @@ export function BirdFlight() {
     const crow = new THREE.Group();
     crow.name = "PlayerCrow";
     const spawnWorld = coordinatesToWorld(23.7595, 90.4105);
-    crow.position.set(spawnWorld.x, 92, spawnWorld.y);
+    crow.position.set(spawnWorld.x, DEFAULT_FLIGHT_ALTITUDE, spawnWorld.y);
     scene.add(crow);
     const airflowVfx = createAirflowVfx(crow);
     const weatherVfx = createWeatherVfx(scene, renderer, sky, hemisphere, sun, skyFill, reducedMotion);
@@ -2258,7 +2259,7 @@ export function BirdFlight() {
           <section className="telemetry" aria-label="Flight telemetry">
             <div><span ref={speedRef}>48</span><small>KM/H</small></div>
             <i />
-            <div><span ref={altitudeRef}>92</span><small>METRES</small></div>
+            <div><span ref={altitudeRef}>{DEFAULT_FLIGHT_ALTITUDE}</span><small>METRES</small></div>
             <i />
             <div><span ref={verticalSpeedRef}>+0.0</span><small>VERT M/S</small></div>
             <i />

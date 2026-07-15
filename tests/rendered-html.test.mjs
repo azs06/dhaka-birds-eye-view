@@ -69,6 +69,8 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(weatherRoute, /wind_direction_10m/);
   assert.match(weatherRoute, /stale-while-revalidate=600/);
   assert.match(component, /const BRAKE_SPEED = 18/);
+  assert.match(component, /const DEFAULT_FLIGHT_ALTITUDE = 130/);
+  assert.match(component, /crow\.position\.set\(spawnWorld\.x, DEFAULT_FLIGHT_ALTITUDE, spawnWorld\.y\)/);
   assert.match(component, /verticalSpeed = Math\.min\(22, verticalSpeed \+ 8\.5\)/);
   assert.match(component, /Ctrl \/ Q/);
   assert.match(component, /VERT M\/S/);
