@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
@@ -77,6 +77,24 @@ type FlightAudio = {
   resume: () => void;
   flap: () => void;
   setFlight: (speed: number, altitude: number) => void;
+  setRadioDucking: (active: boolean) => void;
+  dispose: () => void;
+};
+type RadioStatus = "off" | "buffering" | "playing" | "paused" | "error";
+type RadioStation = {
+  id: string;
+  name: string;
+  frequency: string;
+  tagline: string;
+  homepage?: string;
+  stream?: string;
+};
+type FlightRadio = {
+  tune: (station: RadioStation) => Promise<void>;
+  stop: () => void;
+  pause: () => void;
+  resume: () => Promise<void>;
+  setVolume: (volume: number) => void;
   dispose: () => void;
 };
 type AirflowVfx = {
@@ -113,6 +131,38 @@ const DEFAULT_WEATHER: WeatherSnapshot = {
   windDirection: 180,
   windGusts: 11,
 };
+const RADIO_STATIONS: RadioStation[] = [
+  {
+    id: "monsoon",
+    name: "Monsoon Drift",
+    frequency: "BEV 00.1",
+    tagline: "Slow rain · warm air · no interruptions",
+  },
+  {
+    id: "foorti",
+    name: "Radio Foorti",
+    frequency: "88.0 FM",
+    tagline: "Live from Bangladesh",
+    homepage: "https://radiofoorti.fm/",
+    stream: "/api/radio?station=foorti",
+  },
+  {
+    id: "dhaka-fm",
+    name: "Dhaka FM",
+    frequency: "90.4 FM",
+    tagline: "Live from Gulshan, Dhaka",
+    homepage: "https://www.dhakafm904.com/",
+    stream: "https://play.dhakafm904.com/;",
+  },
+  {
+    id: "jago",
+    name: "Jago FM",
+    frequency: "94.4 FM",
+    tagline: "Live from Dhaka",
+    homepage: "https://www.jago.fm/",
+    stream: "/api/radio?station=jago",
+  },
+];
 const AREA_LANDMARKS: AreaLandmark[] = [
   { label: "Moghbazar", shortLabel: "MOG", lat: 23.75096, lon: 90.40489, altitude: 44, heading: Math.PI },
   { label: "Tejgaon I/A", shortLabel: "TEJ", lat: 23.76535, lon: 90.40062, altitude: 58, heading: Math.PI / 2 },
@@ -778,6 +828,9 @@ function createFlightAudio(): FlightAudio {
   let cityGain: GainNode | null = null;
   let flapBuffer: AudioBuffer | null = null;
   let enabled = false;
+  let radioDucking = false;
+
+  const activeGain = () => radioDucking ? 0.14 : 0.28;
 
   const makeNoise = (audioContext: AudioContext, duration: number, softness = 0.76) => {
     const buffer = audioContext.createBuffer(1, audioContext.sampleRate * duration, audioContext.sampleRate);
@@ -847,7 +900,7 @@ function createFlightAudio(): FlightAudio {
     await context.resume();
     enabled = true;
     master.gain.cancelScheduledValues(context.currentTime);
-    master.gain.setTargetAtTime(0.28, context.currentTime, 0.45);
+    master.gain.setTargetAtTime(activeGain(), context.currentTime, 0.45);
     return true;
   };
 
@@ -858,7 +911,7 @@ function createFlightAudio(): FlightAudio {
       if (context.state === "suspended") await context.resume();
       enabled = !enabled;
       master.gain.cancelScheduledValues(context.currentTime);
-      master.gain.setTargetAtTime(enabled ? 0.28 : 0, context.currentTime, 0.18);
+      master.gain.setTargetAtTime(enabled ? activeGain() : 0, context.currentTime, 0.18);
       return enabled;
     },
     pause() {
@@ -870,7 +923,7 @@ function createFlightAudio(): FlightAudio {
       if (!enabled || !context || !master) return;
       void context.resume();
       master.gain.cancelScheduledValues(context.currentTime);
-      master.gain.setTargetAtTime(0.28, context.currentTime, 0.35);
+      master.gain.setTargetAtTime(activeGain(), context.currentTime, 0.35);
     },
     flap() {
       if (!enabled || !context || !master || !flapBuffer) return;
@@ -896,10 +949,187 @@ function createFlightAudio(): FlightAudio {
       waterGain.gain.setTargetAtTime(0.004 + nearness * 0.021, now, 0.7);
       cityGain.gain.setTargetAtTime(0.004 + nearness * 0.008, now, 0.8);
     },
+    setRadioDucking(active) {
+      radioDucking = active;
+      if (!enabled || !context || !master) return;
+      master.gain.cancelScheduledValues(context.currentTime);
+      master.gain.setTargetAtTime(activeGain(), context.currentTime, 0.28);
+    },
     dispose() {
       enabled = false;
       context?.close();
       context = null;
+    },
+  };
+}
+
+function createFlightRadio(onStatus: (status: RadioStatus) => void): FlightRadio {
+  const liveAudio = new Audio();
+  liveAudio.preload = "none";
+  let currentStation: RadioStation | null = null;
+  let enabled = false;
+  let volume = 0.58;
+  let context: AudioContext | null = null;
+  let synthMaster: GainNode | null = null;
+  let chordOscillators: OscillatorNode[] = [];
+  let chordTimer = 0;
+
+  const stopChordTimer = () => {
+    if (chordTimer) window.clearInterval(chordTimer);
+    chordTimer = 0;
+  };
+
+  const fadeSynth = (target: number) => {
+    if (!context || !synthMaster) return;
+    const now = context.currentTime;
+    synthMaster.gain.cancelScheduledValues(now);
+    synthMaster.gain.setTargetAtTime(target, now, target > 0 ? 1.6 : 0.22);
+  };
+
+  const tuneChord = (root: number) => {
+    if (!context) return;
+    const ratios = [1, 1.25, 1.5];
+    chordOscillators.forEach((oscillator, index) => {
+      oscillator.frequency.setTargetAtTime(root * ratios[index], context!.currentTime, 3.8);
+    });
+  };
+
+  const initializeRelaxingStation = () => {
+    if (context) return;
+    context = new AudioContext();
+    synthMaster = context.createGain();
+    synthMaster.gain.value = 0;
+    synthMaster.connect(context.destination);
+
+    const noiseBuffer = context.createBuffer(2, context.sampleRate * 6, context.sampleRate);
+    for (let channel = 0; channel < noiseBuffer.numberOfChannels; channel++) {
+      const data = noiseBuffer.getChannelData(channel);
+      let previous = 0;
+      for (let index = 0; index < data.length; index++) {
+        const white = Math.random() * 2 - 1;
+        previous = previous * 0.965 + white * 0.035;
+        data[index] = previous;
+      }
+    }
+    const rain = context.createBufferSource();
+    rain.buffer = noiseBuffer;
+    rain.loop = true;
+    const rainFilter = context.createBiquadFilter();
+    rainFilter.type = "bandpass";
+    rainFilter.frequency.value = 950;
+    rainFilter.Q.value = 0.42;
+    const rainGain = context.createGain();
+    rainGain.gain.value = 0.085;
+    rain.connect(rainFilter).connect(rainGain).connect(synthMaster);
+    rain.start();
+
+    chordOscillators = [0, 1, 2].map((index) => {
+      const oscillator = context!.createOscillator();
+      oscillator.type = index === 0 ? "sine" : "triangle";
+      oscillator.frequency.value = [110, 137.5, 165][index];
+      const gain = context!.createGain();
+      gain.gain.value = [0.055, 0.024, 0.018][index];
+      oscillator.connect(gain).connect(synthMaster!);
+      oscillator.start();
+      return oscillator;
+    });
+
+  };
+
+  const beginChordDrift = () => {
+    stopChordTimer();
+    const roots = [110, 98, 123.47, 103.83];
+    let chordIndex = 0;
+    tuneChord(roots[chordIndex]);
+    chordTimer = window.setInterval(() => {
+      chordIndex = (chordIndex + 1) % roots.length;
+      tuneChord(roots[chordIndex]);
+    }, 12_000);
+  };
+
+  const clearLiveAudio = () => {
+    liveAudio.pause();
+    liveAudio.removeAttribute("src");
+    liveAudio.load();
+  };
+
+  liveAudio.addEventListener("playing", () => {
+    if (enabled && currentStation?.stream) onStatus("playing");
+  });
+  liveAudio.addEventListener("waiting", () => {
+    if (enabled && currentStation?.stream) onStatus("buffering");
+  });
+  liveAudio.addEventListener("stalled", () => {
+    if (enabled && currentStation?.stream) onStatus("buffering");
+  });
+  liveAudio.addEventListener("error", () => {
+    if (enabled && currentStation?.stream) onStatus("error");
+  });
+
+  return {
+    async tune(station) {
+      enabled = true;
+      currentStation = station;
+      clearLiveAudio();
+      fadeSynth(0);
+      stopChordTimer();
+      onStatus("buffering");
+      if (!station.stream) {
+        initializeRelaxingStation();
+        void context?.resume();
+        beginChordDrift();
+        fadeSynth(volume * 0.72);
+        onStatus("playing");
+        return;
+      }
+      liveAudio.src = `${station.stream}${station.stream.includes("?") ? "&" : "?"}t=${Date.now()}`;
+      liveAudio.volume = volume;
+      try {
+        await liveAudio.play();
+      } catch {
+        if (enabled && currentStation?.id === station.id) onStatus("error");
+      }
+    },
+    stop() {
+      enabled = false;
+      clearLiveAudio();
+      fadeSynth(0);
+      stopChordTimer();
+      onStatus("off");
+    },
+    pause() {
+      if (!enabled) return;
+      liveAudio.pause();
+      fadeSynth(0);
+      stopChordTimer();
+      onStatus("paused");
+    },
+    async resume() {
+      if (!enabled || !currentStation) return;
+      if (!currentStation.stream) {
+        void context?.resume();
+        beginChordDrift();
+        fadeSynth(volume * 0.72);
+        onStatus("playing");
+        return;
+      }
+      onStatus("buffering");
+      try {
+        await liveAudio.play();
+      } catch {
+        onStatus("error");
+      }
+    },
+    setVolume(nextVolume) {
+      volume = clamp(nextVolume, 0, 1);
+      liveAudio.volume = volume;
+      if (enabled && currentStation && !currentStation.stream) fadeSynth(volume * 0.72);
+    },
+    dispose() {
+      enabled = false;
+      clearLiveAudio();
+      stopChordTimer();
+      if (context) void context.close();
     },
   };
 }
@@ -1725,15 +1955,80 @@ export function BirdFlight() {
   const restingRef = useRef(false);
   const cameraModeRef = useRef<CameraMode>("CHASE");
   const audioRef = useRef<FlightAudio | null>(null);
+  const radioRef = useRef<FlightRadio | null>(null);
   const [flying, setFlying] = useState(false);
   const [paused, setPaused] = useState(false);
   const [resting, setResting] = useState(false);
   const [cameraMode, setCameraMode] = useState<CameraMode>("CHASE");
   const [controlsOpen, setControlsOpen] = useState(false);
   const [soundOn, setSoundOn] = useState(false);
+  const [radioOpen, setRadioOpen] = useState(false);
+  const [radioStatus, setRadioStatus] = useState<RadioStatus>("off");
+  const [radioStationIndex, setRadioStationIndex] = useState(0);
+  const [radioVolume, setRadioVolume] = useState(0.58);
   const [mapStatus, setMapStatus] = useState<MapStatus>("loading");
   const [weatherStatus, setWeatherStatus] = useState<WeatherStatus>("loading");
   const [weather, setWeather] = useState<WeatherSnapshot>(DEFAULT_WEATHER);
+  const selectedRadioStation = RADIO_STATIONS[radioStationIndex];
+
+  const tuneRadio = useCallback((stationIndex: number) => {
+    const nextIndex = (stationIndex + RADIO_STATIONS.length) % RADIO_STATIONS.length;
+    setRadioStationIndex(nextIndex);
+    void radioRef.current?.tune(RADIO_STATIONS[nextIndex]);
+  }, []);
+
+  const toggleRadio = useCallback(() => {
+    if (["playing", "buffering", "paused"].includes(radioStatus)) {
+      radioRef.current?.stop();
+      return;
+    }
+    void radioRef.current?.tune(RADIO_STATIONS[radioStationIndex]);
+  }, [radioStationIndex, radioStatus]);
+
+  const cycleRadio = useCallback((direction: number) => {
+    tuneRadio(radioStationIndex + direction);
+  }, [radioStationIndex, tuneRadio]);
+
+  useEffect(() => {
+    const radio = createFlightRadio(setRadioStatus);
+    radio.setVolume(0.58);
+    radioRef.current = radio;
+    return () => {
+      radio.dispose();
+      radioRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    audioRef.current?.setRadioDucking(radioStatus === "playing" || radioStatus === "buffering");
+  }, [radioStatus]);
+
+  useEffect(() => {
+    if (!flying) return;
+    if (paused) radioRef.current?.pause();
+    else void radioRef.current?.resume();
+  }, [flying, paused]);
+
+  useEffect(() => {
+    const onRadioKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.matches("input, textarea, select, [contenteditable='true']")) return;
+      if (event.code === "KeyR" && !event.repeat) {
+        event.preventDefault();
+        toggleRadio();
+      }
+      if (event.code === "BracketLeft" && !event.repeat) {
+        event.preventDefault();
+        cycleRadio(-1);
+      }
+      if (event.code === "BracketRight" && !event.repeat) {
+        event.preventDefault();
+        cycleRadio(1);
+      }
+    };
+    window.addEventListener("keydown", onRadioKey);
+    return () => window.removeEventListener("keydown", onRadioKey);
+  }, [cycleRadio, toggleRadio]);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -2302,10 +2597,83 @@ export function BirdFlight() {
         </div>}
         <div className="top-actions">
           <button className={`icon-button sound-button${soundOn ? " active" : ""}`} onClick={toggleSound} aria-label={soundOn ? "Mute ambient sound" : "Enable ambient sound"}>♫</button>
+          <button
+            className={`icon-button radio-toggle${radioStatus === "playing" || radioStatus === "buffering" ? " active" : ""}`}
+            onClick={() => setRadioOpen((value) => !value)}
+            aria-label="Open sky radio"
+            aria-expanded={radioOpen}
+          >◉</button>
           {flying && <button className={`icon-button pause-button${paused ? " active" : ""}`} onClick={togglePause} aria-label={paused ? "Resume flight" : "Pause flight"}>{paused ? "▶" : "Ⅱ"}</button>}
           <button className="icon-button" onClick={() => setControlsOpen((value) => !value)} aria-label="Show flight controls">?</button>
         </div>
       </header>
+
+      {radioOpen && (
+        <section className={`radio-panel${flying ? " in-flight" : ""}`} aria-label="Sky radio player">
+          <button className="radio-close" onClick={() => setRadioOpen(false)} aria-label="Close radio">×</button>
+          <div className="radio-heading">
+            <span className="eyebrow">SKY RADIO</span>
+            <span className={`radio-status ${radioStatus}`}>
+              {radioStatus === "playing" ? "ON AIR" : radioStatus === "buffering" ? "TUNING" : radioStatus === "paused" ? "PAUSED" : radioStatus === "error" ? "SIGNAL LOST" : "OFF"}
+            </span>
+          </div>
+          <div className="radio-display" aria-live="polite">
+            <span>{selectedRadioStation.frequency}</span>
+            <h2>{selectedRadioStation.name}</h2>
+            <p>{radioStatus === "error" ? "This station is unavailable right now. Try again or switch frequencies." : selectedRadioStation.tagline}</p>
+          </div>
+          <div className="radio-transport">
+            <button onClick={() => cycleRadio(-1)} aria-label="Previous station">‹</button>
+            <button className="radio-power" onClick={toggleRadio} aria-label={radioStatus === "off" || radioStatus === "error" ? "Play station" : "Turn radio off"}>
+              {radioStatus === "off" || radioStatus === "error" ? "PLAY" : "OFF"}
+            </button>
+            <button onClick={() => cycleRadio(1)} aria-label="Next station">›</button>
+          </div>
+          <label className="radio-volume">
+            <span>VOL</span>
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.05"
+              value={radioVolume}
+              onChange={(event) => {
+                const volume = Number(event.target.value);
+                setRadioVolume(volume);
+                radioRef.current?.setVolume(volume);
+              }}
+              aria-label="Radio volume"
+            />
+          </label>
+          <div className="radio-stations" role="group" aria-label="Available stations">
+            {RADIO_STATIONS.map((station, index) => (
+              <button
+                key={station.id}
+                className={index === radioStationIndex ? "selected" : ""}
+                onClick={() => tuneRadio(index)}
+                aria-label={`Tune ${station.name}`}
+              >
+                <span>{station.frequency}</span>
+                <b>{station.name}</b>
+                <i>{station.stream ? "LIVE" : "BEV"}</i>
+              </button>
+            ))}
+          </div>
+          <div className="radio-meta">
+            <span><kbd>R</kbd> POWER</span><span><kbd>[ ]</kbd> TUNE</span>
+            {selectedRadioStation.homepage && <a href={selectedRadioStation.homepage} target="_blank" rel="noreferrer">OFFICIAL STATION ↗</a>}
+          </div>
+          <small>LIVE INTERNET RADIO · SIGNAL AVAILABILITY MAY VARY</small>
+        </section>
+      )}
+
+      {!radioOpen && radioStatus !== "off" && (
+        <button className={`radio-now-playing ${radioStatus}${flying ? " in-flight" : ""}`} onClick={() => setRadioOpen(true)} aria-label="Show now playing station">
+          <i />
+          <span>{radioStatus === "error" ? "SIGNAL LOST" : selectedRadioStation.frequency}</span>
+          <b>{selectedRadioStation.name}</b>
+        </button>
+      )}
 
       {flying && <div className={`weather-chip weather-flight ${weatherStatus}`} title={`Feels like ${Math.round(weather.apparentTemperature)}°C · Wind ${Math.round(weather.windSpeed)} km/h`}>
         <strong>{weatherIcon(weather.mode, weather.isDay)}</strong>
@@ -2399,6 +2767,7 @@ export function BirdFlight() {
             <div><dt>C</dt><dd>Switch camera</dd></div>
             <div><dt>P / Esc</dt><dd>Pause / resume flight</dd></div>
             <div><dt>E</dt><dd>Land / take off at a perch</dd></div>
+            <div><dt>R / [ ]</dt><dd>Radio power / tune station</dd></div>
           </dl>
         </section>
       )}

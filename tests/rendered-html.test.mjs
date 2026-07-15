@@ -65,6 +65,14 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(component, /proceduralDistrictTiles/);
   assert.match(component, /createAirflowVfx/);
   assert.match(component, /createWeatherVfx/);
+  assert.match(component, /createFlightRadio/);
+  assert.match(component, /Monsoon Drift/);
+  for (const station of ["Radio Foorti", "Dhaka FM", "Jago FM"]) {
+    assert.match(component, new RegExp(station));
+  }
+  assert.match(component, /\/api\/radio\?station=foorti/);
+  assert.match(component, /\/api\/radio\?station=jago/);
+  assert.match(component, /R \/ \[ \]/);
   assert.match(component, /fetch\("\/api\/weather"/);
   assert.match(component, /weatherVfx\.update/);
   for (const weatherMode of ["cloudy", "fog", "drizzle", "rain", "storm"]) {
