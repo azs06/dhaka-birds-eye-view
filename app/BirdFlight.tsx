@@ -6,6 +6,8 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
 import { Sky } from "three/examples/jsm/objects/Sky.js";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
+import { resolveBuildingCollision } from "./flight-collision.mjs";
+import { DHAKA_LANDMARK_FOOTPRINTS, type LandmarkFootprintPart } from "./dhaka-landmark-footprints";
 
 type CameraMode = "CHASE" | "BIRD'S EYE";
 type BuildingCollider = { x: number; z: number; halfWidth: number; halfDepth: number; top: number };
@@ -269,14 +271,14 @@ const DHAKA_LANDMARKS: DhakaLandmark[] = [
   { label: "Bashundhara City", shortLabel: "BSC", lat: 23.751142, lon: 90.3906411, altitude: 135, heading: Math.PI / 2, kind: "bashundhara-city" },
   { label: "Hatirjheel Amphitheatre", shortLabel: "HJA", lat: 23.771125, lon: 90.4133385, altitude: 28, heading: Math.PI, kind: "amphitheatre" },
   { label: "Police Plaza Concord", shortLabel: "PPC", lat: 23.772911, lon: 90.4161391, altitude: 86, heading: 0, kind: "police-plaza" },
-  { label: "BRAC Centre", shortLabel: "BRC", lat: 23.78065, lon: 90.40715, altitude: 78, heading: Math.PI / 2, kind: "brac" },
-  { label: "Four Points by Sheraton", shortLabel: "SHD", lat: 23.7920829, lon: 90.4137283, altitude: 95, heading: 0, kind: "hotel" },
-  { label: "Jatiya Sangsad Bhaban", shortLabel: "JSB", lat: 23.76252, lon: 90.37836, altitude: 72, heading: Math.PI, kind: "parliament", minimap: true },
-  { label: "Lalbagh Fort", shortLabel: "LBF", lat: 23.71885, lon: 90.38818, altitude: 31, heading: Math.PI, kind: "lalbagh-fort", minimap: true },
-  { label: "Ahsan Manzil", shortLabel: "AHM", lat: 23.70863, lon: 90.40603, altitude: 43, heading: 0, kind: "ahsan-manzil", minimap: true },
-  { label: "Central Shaheed Minar", shortLabel: "CSM", lat: 23.72767, lon: 90.39604, altitude: 31, heading: Math.PI, kind: "shaheed-minar" },
-  { label: "Curzon Hall", shortLabel: "CRZ", lat: 23.72631, lon: 90.40248, altitude: 38, heading: Math.PI, kind: "curzon-hall" },
-  { label: "Baitul Mukarram", shortLabel: "BTM", lat: 23.72914, lon: 90.41268, altitude: 47, heading: Math.PI, kind: "baitul-mukarram", minimap: true },
+  { label: "BRAC Centre", shortLabel: "BRC", lat: 23.7799167, lon: 90.4101944, altitude: 64, heading: Math.PI / 2, kind: "brac" },
+  { label: "Four Points by Sheraton", shortLabel: "SHD", lat: 23.7943691, lon: 90.413838, altitude: 112, heading: 0, kind: "hotel" },
+  { label: "Jatiya Sangsad Bhaban", shortLabel: "JSB", lat: 23.7622884, lon: 90.3785482, altitude: 46, heading: Math.PI, kind: "parliament", minimap: true },
+  { label: "Lalbagh Fort", shortLabel: "LBF", lat: 23.718843, lon: 90.3881528, altitude: 18, heading: Math.PI, kind: "lalbagh-fort", minimap: true },
+  { label: "Ahsan Manzil", shortLabel: "AHM", lat: 23.7084768, lon: 90.4055988, altitude: 34, heading: 0, kind: "ahsan-manzil", minimap: true },
+  { label: "Central Shaheed Minar", shortLabel: "CSM", lat: 23.7272114, lon: 90.3966368, altitude: 16, heading: Math.PI, kind: "shaheed-minar" },
+  { label: "Curzon Hall", shortLabel: "CRZ", lat: 23.7273259, lon: 90.4019331, altitude: 28, heading: Math.PI, kind: "curzon-hall" },
+  { label: "Baitul Mukarram", shortLabel: "BTM", lat: 23.7294725, lon: 90.412617, altitude: 72, heading: Math.PI, kind: "baitul-mukarram", minimap: true },
 ];
 
 function coordinatesToWorld(lat: number, lon: number) {
@@ -1504,25 +1506,27 @@ function createFlightRadio(onStatus: (status: RadioStatus) => void): FlightRadio
 
 function addPersistentDhakaLandmarks(scene: THREE.Scene) {
   const root = new THREE.Group();
-  root.name = "Persistent Dhaka landmarks";
+  root.name = "OpenStreetMap-accurate Dhaka landmarks";
   const colliders: BuildingCollider[] = [];
   const perches: Perch[] = [];
+  const footprintByKind = new Map(DHAKA_LANDMARK_FOOTPRINTS.map((footprint) => [footprint.kind, footprint]));
+  const landmarkOsmIds = new Set(DHAKA_LANDMARK_FOOTPRINTS.flatMap((footprint) => footprint.parts.map((part) => part.osmId)));
+
+  const concrete = new THREE.MeshStandardMaterial({ color: 0xc8c1ad, roughness: 0.88 });
+  const paleConcrete = new THREE.MeshStandardMaterial({ color: 0xe2dece, roughness: 0.82 });
+  const whiteStone = new THREE.MeshStandardMaterial({ color: 0xf0eee6, roughness: 0.76 });
+  const brick = new THREE.MeshStandardMaterial({ color: 0x9f5946, roughness: 0.87 });
+  const redBrick = new THREE.MeshStandardMaterial({ color: 0xa34c39, roughness: 0.9 });
+  const pinkPlaster = new THREE.MeshStandardMaterial({ color: 0xd47a88, roughness: 0.8 });
+  const glass = new THREE.MeshPhysicalMaterial({ color: 0x537f88, roughness: 0.2, metalness: 0.16, clearcoat: 0.45 });
+  const darkGlass = new THREE.MeshStandardMaterial({ color: 0x294b54, roughness: 0.2, metalness: 0.26 });
+  const roof = new THREE.MeshStandardMaterial({ color: 0x596462, roughness: 0.78, metalness: 0.12 });
+  const recess = new THREE.MeshStandardMaterial({ color: 0x202625, roughness: 0.98 });
+  const accent = new THREE.MeshStandardMaterial({ color: 0xcaa24c, roughness: 0.56, metalness: 0.22 });
+  const lawn = new THREE.MeshStandardMaterial({ color: 0x688652, roughness: 1 });
+  const water = new THREE.MeshPhysicalMaterial({ color: 0x407e8a, roughness: 0.2, metalness: 0.04, clearcoat: 0.7 });
+  const monumentRed = new THREE.MeshStandardMaterial({ color: 0xb92d32, roughness: 0.76 });
   const unitBox = new THREE.BoxGeometry(1, 1, 1);
-  const concrete = new THREE.MeshStandardMaterial({ color: 0xc9c2ad, roughness: 0.86 });
-  const paleConcrete = new THREE.MeshStandardMaterial({ color: 0xe0d9c3, roughness: 0.8 });
-  const brick = new THREE.MeshStandardMaterial({ color: 0x9b5e49, roughness: 0.84 });
-  const redBrick = new THREE.MeshStandardMaterial({ color: 0x9f4938, roughness: 0.88 });
-  const pinkPlaster = new THREE.MeshStandardMaterial({ color: 0xd47f88, roughness: 0.8 });
-  const whiteStone = new THREE.MeshStandardMaterial({ color: 0xeee9dc, roughness: 0.78 });
-  const glass = new THREE.MeshStandardMaterial({ color: 0x497b82, roughness: 0.22, metalness: 0.16 });
-  const darkGlass = new THREE.MeshStandardMaterial({ color: 0x294e56, roughness: 0.18, metalness: 0.22 });
-  const roof = new THREE.MeshStandardMaterial({ color: 0x5d6866, roughness: 0.72, metalness: 0.12 });
-  const accent = new THREE.MeshStandardMaterial({ color: 0xc89c44, roughness: 0.6, metalness: 0.18 });
-  const blueAccent = new THREE.MeshStandardMaterial({ color: 0x4d78a8, emissive: 0x183d66, emissiveIntensity: 0.42, roughness: 0.35, metalness: 0.22 });
-  const recess = new THREE.MeshStandardMaterial({ color: 0x202826, roughness: 0.96 });
-  const lawn = new THREE.MeshStandardMaterial({ color: 0x718a55, roughness: 1 });
-  const water = new THREE.MeshStandardMaterial({ color: 0x477f8c, roughness: 0.2, metalness: 0.08 });
-  const monumentRed = new THREE.MeshStandardMaterial({ color: 0xb72f2f, roughness: 0.78 });
 
   const addBox = (
     parent: THREE.Object3D,
@@ -1562,47 +1566,11 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
     position: [number, number, number],
     material: THREE.Material,
   ) => {
-    const mesh = new THREE.Mesh(new THREE.SphereGeometry(radius, 20, 10, 0, Math.PI * 2, 0, Math.PI / 2), material);
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(radius, 24, 12, 0, Math.PI * 2, 0, Math.PI / 2), material);
     mesh.position.set(...position);
     mesh.castShadow = true;
     parent.add(mesh);
     return mesh;
-  };
-
-  const addRoundInset = (
-    parent: THREE.Object3D,
-    radius: number,
-    position: [number, number, number],
-    facing: "front" | "back" | "left" | "right" = "front",
-  ) => {
-    const mesh = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius, 1.1, 28), recess);
-    mesh.position.set(...position);
-    if (facing === "front" || facing === "back") mesh.rotation.x = Math.PI / 2;
-    else mesh.rotation.z = Math.PI / 2;
-    parent.add(mesh);
-    return mesh;
-  };
-
-  const addWindowGrid = (
-    parent: THREE.Object3D,
-    columns: number,
-    rows: number,
-    spacingX: number,
-    spacingY: number,
-    yStart: number,
-    z: number,
-    material: THREE.Material = darkGlass,
-  ) => {
-    for (let row = 0; row < rows; row++) {
-      for (let column = 0; column < columns; column++) {
-        addBox(
-          parent,
-          [spacingX * 0.58, spacingY * 0.42, 0.8],
-          [(column - (columns - 1) / 2) * spacingX, yStart + row * spacingY, z],
-          material,
-        );
-      }
-    }
   };
 
   const addLabel = (position: THREE.Vector3, text: string) => {
@@ -1630,208 +1598,219 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
     root.add(label);
   };
 
-  for (const landmark of DHAKA_LANDMARKS) {
-    const world = coordinatesToWorld(landmark.lat, landmark.lon);
-    const model = new THREE.Group();
-    model.name = landmark.label;
-    model.position.set(world.x, 0.9, world.y);
-    model.rotation.y = landmark.heading;
-    root.add(model);
-    let halfWidth = 28;
-    let halfDepth = 24;
+  const partMaterial = (kind: DhakaLandmark["kind"], part: LandmarkFootprintPart) => {
+    if (part.role === "water") return water;
+    if (part.role === "ground") {
+      if (kind === "amphitheatre" || kind === "shaheed-minar") return paleConcrete;
+      return lawn;
+    }
+    if (kind === "church") return part.role === "tower" ? paleConcrete : whiteStone;
+    if (kind === "bashundhara-city") return part.role === "tower" ? glass : paleConcrete;
+    if (kind === "police-plaza") return glass;
+    if (kind === "brac") return brick;
+    if (kind === "hotel") return darkGlass;
+    if (kind === "parliament") return concrete;
+    if (kind === "lalbagh-fort") return part.role === "tomb" ? whiteStone : redBrick;
+    if (kind === "ahsan-manzil") return pinkPlaster;
+    if (kind === "curzon-hall") return redBrick;
+    if (kind === "baitul-mukarram") return paleConcrete;
+    return whiteStone;
+  };
 
-    if (landmark.kind === "church") {
-      halfWidth = 38;
-      halfDepth = 25;
-      addBox(model, [72, 10, 44], [0, 5, 0], paleConcrete);
-      addBox(model, [54, 22, 34], [0, 19, 0], paleConcrete);
-      for (const side of [-1, 1]) {
-        addBox(model, [12, 35, 13], [side * 23, 27.5, -12], concrete);
-        const spire = new THREE.Mesh(new THREE.ConeGeometry(7, 17, 8), roof);
-        spire.position.set(side * 23, 53.5, -12);
-        spire.castShadow = true;
-        model.add(spire);
-        addBox(model, [1.1, 8, 1.1], [side * 23, 64, -12], accent);
-        addBox(model, [5, 1.1, 1.1], [side * 23, 65.5, -12], accent);
+  const partCenters = new Map<number, THREE.Vector2>();
+  const allBounds = new Map<DhakaLandmark["kind"], { minX: number; maxX: number; minZ: number; maxZ: number; top: number }>();
+
+  for (const landmark of DHAKA_LANDMARKS) {
+    const footprint = footprintByKind.get(landmark.kind);
+    if (!footprint) continue;
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minZ = Infinity;
+    let maxZ = -Infinity;
+    let top = 0;
+
+    for (const part of footprint.parts) {
+      const points = part.points.map(([lat, lon]) => {
+        const world = coordinatesToWorld(lat, lon);
+        return [world.x, world.y] as MapPoint;
+      });
+      const xs = points.map(([x]) => x);
+      const zs = points.map(([, z]) => z);
+      const partMinX = Math.min(...xs);
+      const partMaxX = Math.max(...xs);
+      const partMinZ = Math.min(...zs);
+      const partMaxZ = Math.max(...zs);
+      partCenters.set(part.osmId, new THREE.Vector2((partMinX + partMaxX) / 2, (partMinZ + partMaxZ) / 2));
+      if (part.role !== "ground" && part.role !== "water") {
+        minX = Math.min(minX, partMinX);
+        maxX = Math.max(maxX, partMaxX);
+        minZ = Math.min(minZ, partMinZ);
+        maxZ = Math.max(maxZ, partMaxZ);
+        top = Math.max(top, part.height);
       }
-      const rose = new THREE.Mesh(new THREE.TorusGeometry(5.5, 1.1, 8, 24), darkGlass);
-      rose.position.set(0, 25, -17.4);
-      model.add(rose);
-    } else if (landmark.kind === "bashundhara-city") {
-      halfWidth = 57;
-      halfDepth = 40;
-      addBox(model, [114, 22, 80], [0, 11, 0], paleConcrete);
-      addBox(model, [108, 4, 76], [0, 24, 0], accent);
-      addBox(model, [34, 17, 4], [0, 11, -42], darkGlass);
-      addCylinder(model, 29, 35, 86, [0, 68, 0], concrete, 18);
-      addCylinder(model, 25.5, 31.5, 80, [0, 68, 0], glass, 18);
-      addBox(model, [16, 82, 3], [0, 68, -32.2], darkGlass);
-      for (let y = 31; y <= 108; y += 10.5) {
-        addCylinder(model, 32.5, 32.5, 1.5, [0, y, 0], accent, 18);
-      }
-      addCylinder(model, 17, 21, 19, [0, 121.5, 0], darkGlass, 18);
-      for (let y = 114; y <= 132; y += 6) {
-        const crownRing = new THREE.Mesh(new THREE.TorusGeometry(19, 0.9, 8, 32), blueAccent);
-        crownRing.position.y = y;
-        crownRing.rotation.x = Math.PI / 2;
-        model.add(crownRing);
-      }
-      addCylinder(model, 0.75, 1.2, 7, [0, 137, 0], blueAccent, 8);
-    } else if (landmark.kind === "amphitheatre") {
-      halfWidth = 52;
-      halfDepth = 38;
-      addBox(model, [74, 3, 46], [0, 1.5, 3], concrete);
-      for (let tier = 0; tier < 6; tier++) {
-        const seating = new THREE.Mesh(new THREE.TorusGeometry(17 + tier * 4.6, 1.25, 5, 32, Math.PI), paleConcrete);
-        seating.rotation.x = Math.PI / 2;
-        seating.rotation.z = Math.PI;
-        seating.position.set(0, 3 + tier * 1.7, 16 - tier * 2.3);
-        model.add(seating);
-      }
-      const shell = new THREE.Mesh(new THREE.TorusGeometry(20, 2.4, 7, 36, Math.PI), accent);
-      shell.position.set(0, 17, -15);
-      model.add(shell);
-      addBox(model, [39, 2, 15], [0, 3, -12], darkGlass);
-    } else if (landmark.kind === "police-plaza") {
-      halfWidth = 42;
-      halfDepth = 31;
-      addBox(model, [84, 15, 62], [0, 7.5, 0], paleConcrete);
-      addBox(model, [78, 3, 58], [0, 16.5, 0], accent);
-      for (const side of [-1, 1]) {
-        const wing = addBox(model, [31, 62, 35], [side * 20, 47, 2], glass);
-        wing.rotation.z = side * -0.035;
-        addBox(model, [4, 64, 38], [side * 20, 48, -0.5], paleConcrete);
-      }
-      addBox(model, [24, 70, 30], [0, 52, 0], darkGlass);
-      addBox(model, [82, 2.2, 62], [0, 80, 0], roof);
-    } else if (landmark.kind === "brac") {
-      halfWidth = 27;
-      halfDepth = 24;
-      addBox(model, [54, 12, 48], [0, 6, 0], concrete);
-      addBox(model, [47, 63, 39], [0, 43.5, 0], brick);
-      addBox(model, [9, 65, 41], [7, 44.5, -0.5], darkGlass);
-      addBox(model, [51, 2.5, 43], [0, 76, 0], roof);
-      addWindowGrid(model, 5, 6, 7.2, 8.5, 20, -20.1);
-    } else if (landmark.kind === "hotel") {
-      halfWidth = 34;
-      halfDepth = 27;
-      addBox(model, [68, 10, 54], [0, 5, 0], paleConcrete);
-      addBox(model, [51, 81, 34], [-5, 50.5, 0], paleConcrete);
-      addBox(model, [6, 79, 36], [-5, 51, -18.5], glass);
-      addBox(model, [22, 57, 23], [25, 38.5, 6], concrete);
-      addBox(model, [55, 3, 38], [-5, 92.5, 0], roof);
-      for (let y = 18; y < 88; y += 9) addBox(model, [53, 1, 36], [-5, y, 0], concrete);
-    } else if (landmark.kind === "parliament") {
-      halfWidth = 78;
-      halfDepth = 70;
-      addBox(model, [180, 1.2, 154], [0, 0.6, 0], lawn);
-      addBox(model, [34, 0.8, 118], [-66, 1.3, 0], water);
-      addBox(model, [34, 0.8, 118], [66, 1.3, 0], water);
-      addCylinder(model, 39, 43, 50, [0, 27, 0], concrete, 8);
-      addCylinder(model, 31, 36, 11, [0, 57.5, 0], concrete, 8);
-      addCylinder(model, 25, 30, 6, [0, 66, 0], roof, 8);
-      for (let index = 0; index < 8; index++) {
-        const angle = index * Math.PI / 4;
-        const x = Math.sin(angle) * 54;
-        const z = Math.cos(angle) * 48;
-        const block = addBox(model, [27, 42, 29], [x, 23, z], concrete);
-        block.rotation.y = angle;
-      }
-      addRoundInset(model, 12, [0, 31, -43.2]);
-      addRoundInset(model, 9, [0, 30, 43.2], "back");
-      addRoundInset(model, 9, [-43.2, 28, 0], "left");
-      addRoundInset(model, 9, [43.2, 28, 0], "right");
-      addBox(model, [13, 28, 1.2], [-24, 27, -43.1], recess);
-      addBox(model, [13, 28, 1.2], [24, 27, -43.1], recess);
-      addBox(model, [70, 2, 24], [0, 2.2, -72], brick);
-    } else if (landmark.kind === "lalbagh-fort") {
-      halfWidth = 88;
-      halfDepth = 58;
-      addBox(model, [176, 1, 116], [0, 0.5, 0], lawn);
-      addBox(model, [176, 5, 3], [0, 3, -57], redBrick);
-      addBox(model, [176, 5, 3], [0, 3, 57], redBrick);
-      addBox(model, [3, 5, 116], [-87, 3, 0], redBrick);
-      addBox(model, [3, 5, 116], [87, 3, 0], redBrick);
-      addBox(model, [7, 0.8, 100], [0, 1.1, 0], water);
-      addBox(model, [142, 0.8, 7], [0, 1.1, 0], water);
-      addBox(model, [37, 12, 29], [0, 7, 0], whiteStone);
-      addBox(model, [27, 7, 20], [0, 16.5, 0], paleConcrete);
-      addDome(model, 10, [0, 20, 0], whiteStone);
-      for (const x of [-13, 13]) for (const z of [-9, 9]) addDome(model, 3.4, [x, 14, z], whiteStone);
-      addBox(model, [50, 10, 27], [-57, 6, 0], redBrick);
-      for (const x of [-69, -57, -45]) addDome(model, 6, [x, 11, 0], whiteStone);
-      addBox(model, [47, 13, 29], [58, 7.5, 0], redBrick);
-      addBox(model, [18, 7, 5], [58, 8, -17], recess);
-      for (const x of [-73, 73]) addCylinder(model, 3.2, 4.2, 10, [x, 6, -43], redBrick, 8);
-    } else if (landmark.kind === "ahsan-manzil") {
-      halfWidth = 54;
-      halfDepth = 33;
-      addBox(model, [106, 3, 66], [0, 1.5, 0], lawn);
-      addBox(model, [94, 18, 34], [0, 11, 3], pinkPlaster);
-      addBox(model, [37, 23, 42], [0, 18.5, 0], pinkPlaster);
-      addBox(model, [58, 3, 9], [0, 3.5, -26], paleConcrete);
-      addBox(model, [49, 3, 8], [0, 6.5, -21.5], paleConcrete);
-      addBox(model, [40, 3, 7], [0, 9.5, -17], paleConcrete);
-      for (const x of [-38, -25, -12, 12, 25, 38]) addBox(model, [2.3, 15, 2.3], [x, 13, -15], whiteStone);
-      addCylinder(model, 10, 12, 7, [0, 32.5, 0], whiteStone, 16);
-      addDome(model, 10, [0, 36, 0], pinkPlaster);
-      addCylinder(model, 0.6, 1.1, 5, [0, 47, 0], accent, 8);
-      addWindowGrid(model, 7, 2, 12.5, 8.5, 10, -14.5, recess);
-    } else if (landmark.kind === "shaheed-minar") {
-      halfWidth = 42;
-      halfDepth = 26;
-      addBox(model, [86, 2.5, 50], [0, 1.25, 0], paleConcrete);
-      addBox(model, [76, 1.5, 8], [0, 3.25, -18], whiteStone);
-      addRoundInset(model, 11, [0, 20, 4]);
-      const sun = model.children.at(-1);
-      if (sun instanceof THREE.Mesh) sun.material = monumentRed;
-      for (const index of [-2, -1, 0, 1, 2]) {
-        const pillar = addBox(model, [5.2, index === 0 ? 30 : 25, 4], [index * 12, index === 0 ? 18 : 15.5, -2], whiteStone);
-        pillar.rotation.z = index * -0.045;
-        addBox(model, [9, 2.2, 4.5], [index * 12, index === 0 ? 31 : 26, -2], whiteStone).rotation.z = index * -0.045;
-      }
-    } else if (landmark.kind === "curzon-hall") {
-      halfWidth = 57;
-      halfDepth = 32;
-      addBox(model, [114, 2, 62], [0, 1, 0], lawn);
-      addBox(model, [104, 18, 32], [0, 11, 0], redBrick);
-      addBox(model, [38, 26, 38], [0, 16, -1], redBrick);
-      for (const x of [-43, 43]) {
-        addCylinder(model, 7, 8.5, 24, [x, 14, -2], redBrick, 12);
-        addDome(model, 7, [x, 26, -2], whiteStone);
-      }
-      addCylinder(model, 10, 12, 8, [0, 31, -1], whiteStone, 12);
-      addDome(model, 10, [0, 35, -1], redBrick);
-      for (const x of [-36, -24, -12, 0, 12, 24, 36]) addBox(model, [6, 9, 1], [x, 12, -16.5], recess);
-      addBox(model, [108, 2, 36], [0, 21, 0], whiteStone);
-    } else if (landmark.kind === "baitul-mukarram") {
-      halfWidth = 45;
-      halfDepth = 39;
-      addBox(model, [96, 2, 84], [0, 1, 0], paleConcrete);
-      addBox(model, [78, 44, 68], [0, 24, 0], whiteStone);
-      addBox(model, [48, 36, 2], [0, 21, -34.5], paleConcrete);
-      addBox(model, [16, 27, 1], [0, 19, -35.8], recess);
-      for (const x of [-27, -18, -9, 9, 18, 27]) {
-        addBox(model, [5.5, 12, 1], [x, 13, -35.8], recess);
-        addBox(model, [7.5, 2, 1.2], [x, 20, -35.9], recess);
-      }
-      addBox(model, [82, 3, 72], [0, 47.5, 0], paleConcrete);
-      for (const x of [-33, 33]) for (const z of [-28, 28]) addCylinder(model, 2.2, 3, 8, [x, 53, z], whiteStone, 8);
+
+      const geometry = new THREE.ExtrudeGeometry(polygonShape(points), {
+        depth: part.height,
+        bevelEnabled: false,
+        curveSegments: 1,
+      });
+      geometry.rotateX(-Math.PI / 2);
+      const mesh = new THREE.Mesh(geometry, partMaterial(landmark.kind, part));
+      mesh.name = `${landmark.label} · OSM ${part.osmId} · ${part.role}`;
+      mesh.position.y = part.role === "water" ? 0.72 : 0.9;
+      mesh.castShadow = part.role !== "ground" && part.role !== "water";
+      mesh.receiveShadow = true;
+      mesh.userData.osmId = part.osmId;
+      root.add(mesh);
     }
 
-    colliders.push({ x: world.x, z: world.y, halfWidth, halfDepth, top: landmark.altitude + 2 });
+    if (!Number.isFinite(minX)) {
+      const center = coordinatesToWorld(landmark.lat, landmark.lon);
+      minX = center.x - 30;
+      maxX = center.x + 30;
+      minZ = center.y - 20;
+      maxZ = center.y + 20;
+      top = landmark.altitude;
+    }
+    allBounds.set(landmark.kind, { minX, maxX, minZ, maxZ, top });
+  }
+
+  const detailGroup = (landmark: DhakaLandmark) => {
+    const bounds = allBounds.get(landmark.kind)!;
+    const group = new THREE.Group();
+    group.name = `${landmark.label} signature architecture`;
+    group.position.set((bounds.minX + bounds.maxX) / 2, 0.9, (bounds.minZ + bounds.maxZ) / 2);
+    group.rotation.y = landmark.heading;
+    root.add(group);
+    return {
+      group,
+      width: Math.max(8, bounds.maxX - bounds.minX),
+      depth: Math.max(8, bounds.maxZ - bounds.minZ),
+      top: Math.max(bounds.top, landmark.altitude),
+    };
+  };
+
+  for (const landmark of DHAKA_LANDMARKS) {
+    const { group, width, depth, top } = detailGroup(landmark);
+
+    if (landmark.kind === "church") {
+      for (const side of [-1, 1]) {
+        const spire = new THREE.Mesh(new THREE.ConeGeometry(3.8, 15, 8), roof);
+        spire.position.set(side * width * 0.22, 28, -depth * 0.3);
+        spire.castShadow = true;
+        group.add(spire);
+        addBox(group, [0.7, 7, 0.7], [side * width * 0.22, 39, -depth * 0.3], accent);
+        addBox(group, [3.8, 0.7, 0.7], [side * width * 0.22, 40.4, -depth * 0.3], accent);
+      }
+    } else if (landmark.kind === "bashundhara-city") {
+      for (let y = 33; y < top; y += 8.5) addCylinder(group, width * 0.18, width * 0.18, 0.9, [0, y, 0], accent, 24);
+      addCylinder(group, width * 0.11, width * 0.14, 10, [0, top + 5, 0], darkGlass, 20);
+    } else if (landmark.kind === "amphitheatre") {
+      for (let tier = 0; tier < 7; tier++) {
+        const seating = new THREE.Mesh(
+          new THREE.TorusGeometry(Math.min(width, depth) * (0.18 + tier * 0.045), 0.75, 5, 40, Math.PI),
+          tier % 2 ? concrete : paleConcrete,
+        );
+        seating.rotation.x = Math.PI / 2;
+        seating.rotation.z = Math.PI;
+        seating.position.set(0, 1.5 + tier * 1.25, depth * 0.08 - tier * 0.7);
+        seating.castShadow = true;
+        group.add(seating);
+      }
+    } else if (landmark.kind === "police-plaza") {
+      addBox(group, [Math.max(5, width * 0.09), top * 0.94, depth * 1.01], [0, top * 0.47, 0], paleConcrete);
+      addBox(group, [width * 0.92, 2.2, depth * 1.02], [0, top + 1.1, 0], roof);
+    } else if (landmark.kind === "brac") {
+      addBox(group, [width * 0.16, top * 0.88, depth * 1.01], [width * 0.12, top * 0.48, 0], darkGlass);
+      addBox(group, [width * 1.02, 2, depth * 1.02], [0, top + 1, 0], roof);
+    } else if (landmark.kind === "hotel") {
+      addBox(group, [width * 0.16, top * 0.9, depth * 1.01], [-width * 0.12, top * 0.46, 0], glass);
+      for (let y = 12; y < top; y += 9) addBox(group, [width * 1.02, 0.7, depth * 1.02], [0, y, 0], paleConcrete);
+      addBox(group, [width * 0.72, 4, depth * 0.72], [0, top + 2, 0], roof);
+    } else if (landmark.kind === "parliament") {
+      addCylinder(group, Math.min(width, depth) * 0.17, Math.min(width, depth) * 0.2, 11, [0, top + 5.5, 0], concrete, 8);
+      const circle = (x: number, y: number, z: number, rotateY: number) => {
+        const disk = new THREE.Mesh(new THREE.CylinderGeometry(9, 9, 1.2, 32), recess);
+        disk.position.set(x, y, z);
+        disk.rotation.x = Math.PI / 2;
+        disk.rotation.y = rotateY;
+        group.add(disk);
+      };
+      circle(0, 25, -depth * 0.5 - 0.4, 0);
+      circle(0, 24, depth * 0.5 + 0.4, 0);
+    } else if (landmark.kind === "lalbagh-fort") {
+      const tomb = partCenters.get(624024857);
+      const mosque = partCenters.get(624024874);
+      const origin = group.position;
+      if (tomb) addDome(group, 8.5, [tomb.x - origin.x, 15, tomb.y - origin.z], whiteStone);
+      if (mosque) {
+        for (const offset of [-9, 0, 9]) addDome(group, 4.7, [mosque.x - origin.x + offset, 11, mosque.y - origin.z], whiteStone);
+      }
+    } else if (landmark.kind === "ahsan-manzil") {
+      const palace = partCenters.get(624025793);
+      const origin = group.position;
+      if (palace) {
+        const x = palace.x - origin.x;
+        const z = palace.y - origin.z;
+        addCylinder(group, 9.5, 11.5, 6, [x, 27, z], whiteStone, 18);
+        addDome(group, 9.5, [x, 30, z], pinkPlaster);
+        addCylinder(group, 0.55, 0.9, 5, [x, 41.5, z], accent, 8);
+      }
+    } else if (landmark.kind === "shaheed-minar") {
+      const redSun = new THREE.Mesh(new THREE.CylinderGeometry(10, 10, 1.4, 40), monumentRed);
+      redSun.position.set(0, 12, 3.5);
+      redSun.rotation.x = Math.PI / 2;
+      group.add(redSun);
+      for (const index of [-2, -1, 0, 1, 2]) {
+        const height = index === 0 ? 15 : 12.5 - Math.abs(index) * 0.4;
+        const x = index * 8.4;
+        const pillar = addBox(group, [3.8, height, 3.2], [x, height / 2 + 1.5, 0], whiteStone);
+        pillar.rotation.z = index * -0.045;
+        const crossbar = addBox(group, [7.2, 1.8, 3.5], [x, height + 1.1, 0], whiteStone);
+        crossbar.rotation.z = index * -0.045;
+      }
+    } else if (landmark.kind === "curzon-hall") {
+      addCylinder(group, 8, 10, 6, [0, 21, 0], whiteStone, 16);
+      addDome(group, 8, [0, 24, 0], redBrick);
+      for (const side of [-1, 1]) addDome(group, 5.5, [side * width * 0.32, 19, -depth * 0.08], whiteStone);
+    } else if (landmark.kind === "baitul-mukarram") {
+      addBox(group, [width * 0.62, 2.4, depth * 0.62], [0, 33.2, 0], whiteStone);
+      for (const y of [20, 25, 30]) addBox(group, [width * 0.6, 1.1, 0.7], [0, y, -depth * 0.5 - 0.35], recess);
+      const minaretX = width * 0.43;
+      const minaretZ = depth * 0.36;
+      addBox(group, [8.5, 58, 8.5], [minaretX, 29, minaretZ], concrete);
+      addBox(group, [12, 2.4, 12], [minaretX, 59, minaretZ], whiteStone);
+      addBox(group, [6.2, 12, 6.2], [minaretX, 66, minaretZ], concrete);
+      const cap = new THREE.Mesh(new THREE.ConeGeometry(5.2, 8, 4), whiteStone);
+      cap.position.set(minaretX, 76, minaretZ);
+      cap.rotation.y = Math.PI / 4;
+      cap.castShadow = true;
+      group.add(cap);
+      addCylinder(group, 0.45, 0.8, 5, [minaretX, 82.5, minaretZ], accent, 8);
+    }
+
+    const bounds = allBounds.get(landmark.kind)!;
+    colliders.push({
+      x: (bounds.minX + bounds.maxX) / 2,
+      z: (bounds.minZ + bounds.maxZ) / 2,
+      halfWidth: Math.max(3, (bounds.maxX - bounds.minX) / 2),
+      halfDepth: Math.max(3, (bounds.maxZ - bounds.minZ) / 2),
+      top: landmark.altitude,
+    });
+    const world = coordinatesToWorld(landmark.lat, landmark.lon);
     const perch = {
       position: new THREE.Vector3(world.x, landmark.altitude, world.y),
       label: landmark.label,
       heading: landmark.heading,
     };
     perches.push(perch);
-    addLabel(perch.position.clone().add(new THREE.Vector3(0, 28, 0)), landmark.label);
+    addLabel(perch.position.clone().add(new THREE.Vector3(0, 24, 0)), landmark.label);
   }
 
   scene.add(root);
   scene.userData.landmarkColliders = colliders;
   scene.userData.landmarkRoot = root;
+  scene.userData.landmarkOsmIds = landmarkOsmIds;
   return { colliders, perches };
 }
 
@@ -2009,6 +1988,7 @@ function addCity(scene: THREE.Scene) {
   const local = new THREE.Vector3();
   const world = new THREE.Vector3();
   const buildingQuaternion = new THREE.Quaternion();
+  const landmarkClearings = DHAKA_LANDMARKS.map((landmark) => coordinatesToWorld(landmark.lat, landmark.lon));
 
   for (let gx = -1050; gx <= 1050; gx += 126) {
     for (let gz = -980; gz <= 980; gz += 126) {
@@ -2017,6 +1997,7 @@ function addCity(scene: THREE.Scene) {
         Math.abs(gz - lakeCenter) < 205 ||
         Math.abs(Math.abs(gz) - 285) < 46 ||
         Math.abs(gx - 180) < 220 ||
+        landmarkClearings.some((landmark) => Math.hypot(gx - landmark.x, gz - landmark.y) < 145) ||
         random() < 0.12
       ) continue;
       const width = 42 + random() * 35;
@@ -2421,10 +2402,11 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
   }
 
   const buildingBuckets: THREE.BufferGeometry[][] = [[], [], [], []];
+  const landmarkOsmIds = scene.userData.landmarkOsmIds as Set<number> | undefined;
   // The full Dhaka payload can contain tens of thousands of footprints. Keep the
   // live mesh deterministic and geographically even; procedural tiles fill the gaps.
   for (const building of await selectSpatiallyEvenBuildings(data.buildings, isCancelled)) {
-    if (building.points.length < 3) continue;
+    if (building.points.length < 3 || landmarkOsmIds?.has(building.id)) continue;
     const geometry = new THREE.ExtrudeGeometry(polygonShape(building.points), {
       depth: building.height,
       bevelEnabled: false,
@@ -2495,6 +2477,7 @@ export function BirdFlight() {
   const cameraModeRef = useRef<CameraMode>("CHASE");
   const audioRef = useRef<FlightAudio | null>(null);
   const radioRef = useRef<FlightRadio | null>(null);
+  const focusLandmarkRef = useRef<(kind: DhakaLandmark["kind"] | null) => boolean>(() => false);
   const [flying, setFlying] = useState(false);
   const [paused, setPaused] = useState(false);
   const [resting, setResting] = useState(false);
@@ -2776,15 +2759,36 @@ export function BirdFlight() {
     const targetQuat = new THREE.Quaternion();
     const euler = new THREE.Euler(0, 0, 0, "YXZ");
     const cameraTarget = new THREE.Vector3();
+    let inspectionTarget: THREE.Vector3 | null = null;
+    let inspectionCameraOffset = 120;
+    let inspectionIndex = -1;
+    const focusLandmark = (kind: DhakaLandmark["kind"] | null) => {
+      if (!kind) {
+        inspectionTarget = null;
+        return true;
+      }
+      const landmark = DHAKA_LANDMARKS.find((entry) => entry.kind === kind);
+      if (!landmark) return false;
+      const world = coordinatesToWorld(landmark.lat, landmark.lon);
+      inspectionTarget = new THREE.Vector3(world.x, Math.max(6, landmark.altitude * 0.42), world.y);
+      inspectionCameraOffset = ["parliament", "lalbagh-fort", "ahsan-manzil"].includes(kind) ? 190 : Math.max(105, landmark.altitude * 1.45);
+      return true;
+    };
+    focusLandmarkRef.current = focusLandmark;
     let nearestPerch: Perch | null = null;
 
     const onKeyDown = (event: KeyboardEvent) => {
       keys.add(event.code);
       if (["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.code)) event.preventDefault();
       if (event.code === "KeyC" && !event.repeat) {
+        focusLandmark(null);
         const next: CameraMode = cameraModeRef.current === "CHASE" ? "BIRD'S EYE" : "CHASE";
         cameraModeRef.current = next;
         setCameraMode(next);
+      }
+      if (event.code === "KeyL" && !event.repeat) {
+        inspectionIndex = (inspectionIndex + 1) % DHAKA_LANDMARKS.length;
+        focusLandmark(DHAKA_LANDMARKS[inspectionIndex].kind);
       }
       if ((event.code === "KeyP" || event.code === "Escape") && !event.repeat && flyingRef.current) {
         event.preventDefault();
@@ -2930,7 +2934,10 @@ export function BirdFlight() {
         }
       }
       if (collided) {
-        crow.position.copy(previousPosition);
+        // Preserve any upward movement while rejecting the horizontal impact.
+        // This lets takeoff clear a perch collider instead of restoring the
+        // same below-roof position every frame and soft-locking the crow.
+        resolveBuildingCollision(crow.position, previousPosition);
         pitch = Math.max(pitch, 0.15);
         verticalSpeed = Math.max(5, verticalSpeed);
         cameraKick = 0.7;
@@ -3021,7 +3028,14 @@ export function BirdFlight() {
         }
       }
 
-      if (cameraModeRef.current === "CHASE") {
+      if (inspectionTarget) {
+        desiredCamera.copy(inspectionTarget).add(new THREE.Vector3(
+          inspectionCameraOffset,
+          Math.max(52, inspectionCameraOffset * 0.52),
+          inspectionCameraOffset,
+        ));
+        desiredTarget.copy(inspectionTarget);
+      } else if (cameraModeRef.current === "CHASE") {
         const speedAmount = clamp((speed - BRAKE_SPEED) / (BOOST_SPEED - BRAKE_SPEED), 0, 1);
         const chaseDistance = 14.5 + speedAmount * 9;
         desiredCamera.copy(crow.position).addScaledVector(forward, -chaseDistance).add(new THREE.Vector3(0, 6.4 - cameraKick * 1.5, 0));
@@ -3102,6 +3116,7 @@ export function BirdFlight() {
     return () => {
       disposed = true;
       delete (window as BirdFlightWindow).__birdFlightDiagnostics;
+      focusLandmarkRef.current = () => false;
       flightAudio.dispose();
       airflowVfx.dispose();
       weatherVfx.dispose();
@@ -3302,15 +3317,18 @@ export function BirdFlight() {
             {DHAKA_LANDMARKS.filter((landmark) => landmark.minimap).map((landmark) => {
               const world = coordinatesToWorld(landmark.lat, landmark.lon);
               return (
-                <span
+                <button
+                  type="button"
                   key={landmark.label}
                   className="map-landmark"
                   title={landmark.label}
+                  aria-label={`Inspect ${landmark.label}`}
+                  onClick={() => focusLandmarkRef.current(landmark.kind)}
                   style={{
                     left: `${50 + clamp(world.x / FLIGHT_EXTENT.x, -1, 1) * 43}%`,
                     top: `${50 + clamp(world.y / FLIGHT_EXTENT.z, -1, 1) * 43}%`,
                   }}
-                >{landmark.shortLabel}</span>
+                >{landmark.shortLabel}</button>
               );
             })}
             {WATER_LANDMARKS.filter((landmark) => landmark.minimap).map((landmark) => {
@@ -3364,7 +3382,8 @@ export function BirdFlight() {
             <div><dt>Space</dt><dd>Flap for a burst of lift</dd></div>
             <div><dt>Ctrl / Q</dt><dd>Air-brake into a slow glide</dd></div>
             <div><dt>Shift</dt><dd>Accelerate into a high-speed surge</dd></div>
-            <div><dt>C</dt><dd>Switch camera</dd></div>
+              <div><dt>C</dt><dd>Switch camera</dd></div>
+              <div><dt>L</dt><dd>Inspect next landmark</dd></div>
             <div><dt>P / Esc</dt><dd>Pause / resume flight</dd></div>
             <div><dt>E</dt><dd>Land / take off at a perch</dd></div>
             <div><dt>♫</dt><dd>Nature ambience: birds, leaves, water, and insects</dd></div>

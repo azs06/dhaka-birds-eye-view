@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { access, readFile } from "node:fs/promises";
 import test from "node:test";
+import { resolveBuildingCollision } from "../app/flight-collision.mjs";
 
 async function render() {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
@@ -27,10 +28,11 @@ test("server-renders the Bird's Eye View application shell", async () => {
 });
 
 test("keeps the finished flight experience free of starter preview code", async () => {
-  const [page, layout, component, mapRoute, weatherRoute, css, packageJson] = await Promise.all([
+  const [page, layout, component, landmarkFootprints, mapRoute, weatherRoute, css, packageJson] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/BirdFlight.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/dhaka-landmark-footprints.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/api/osm/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/api/weather/route.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
@@ -67,6 +69,15 @@ test("keeps the finished flight experience free of starter preview code", async 
     assert.match(component, new RegExp(`landmark\\.kind === "${landmarkKind}"`));
   }
   assert.match(component, /label: "Baitul Mukarram"[^\n]+minimap: true/);
+  assert.match(component, /DHAKA_LANDMARK_FOOTPRINTS/);
+  assert.match(component, /OpenStreetMap-accurate Dhaka landmarks/);
+  assert.match(component, /landmarkOsmIds/);
+  assert.match(component, /new THREE\.ExtrudeGeometry\(polygonShape\(points\)/);
+  for (const osmId of [717625483, 24448713, 366560370, 229029081, 498432169, 24448328, 624024881, 624025791, 941979151, 264272612, 186664126]) {
+    assert.match(landmarkFootprints, new RegExp(`"osmId": ${osmId}`));
+  }
+  assert.match(landmarkFootprints, /Snapshot of real landmark footprints from OpenStreetMap/);
+  assert.doesNotMatch(component, /const addPointedArchInset/);
   assert.doesNotMatch(component, /addFolkBuildingPosters/);
   assert.match(component, /DHAKA_LANDMARKS\.filter\(\(landmark\) => landmark\.minimap\)/);
   for (const waterway of ["Buriganga River", "Turag River", "Tongi Khal", "Balu River", "Shitalakshya River"]) {
@@ -102,6 +113,7 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(component, /const DEFAULT_FLIGHT_ALTITUDE = 130/);
   assert.match(component, /const MAX_FLIGHT_ALTITUDE = 650/);
   assert.match(component, /const CEILING_EASE_DEPTH = 90/);
+  assert.match(component, /Inspect next landmark/);
   assert.match(component, /const MIN_CEILING_CLIMB_SPEED = 1\.8/);
   assert.match(component, /crow\.position\.set\(spawnWorld\.x, DEFAULT_FLIGHT_ALTITUDE, spawnWorld\.y\)/);
   assert.match(component, /verticalSpeed = Math\.min\(22, verticalSpeed \+ 8\.5 \* flapLiftScale\)/);
@@ -110,6 +122,7 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(component, /climb > 0 && crow\.position\.y >= MAX_FLIGHT_ALTITUDE - 1/);
   assert.match(component, /verticalSpeed = Math\.min\(verticalSpeed, 0\)/);
   assert.doesNotMatch(component, /verticalSpeed = Math\.min\(verticalSpeed, -3\)/);
+  assert.match(component, /resolveBuildingCollision\(crow\.position, previousPosition\)/);
   assert.match(component, /Ctrl \/ Q/);
   assert.match(component, /VERT M\/S/);
   assert.match(mapRoute, /south: 23\.668/);
@@ -144,4 +157,29 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(css, /--vermillion:/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
   await assert.rejects(access(new URL("../app/_sites-preview", import.meta.url)));
+});
+
+test("building collision recovery lets a perched crow climb clear on takeoff", () => {
+  const position = {
+    x: 0,
+    y: 78.28,
+    z: 0,
+    copy(source) {
+      this.x = source.x;
+      this.y = source.y;
+      this.z = source.z;
+    },
+  };
+  let verticalSpeed = 5;
+
+  for (let frame = 0; frame < 20; frame++) {
+    const previousPosition = { x: position.x, y: position.y, z: position.z };
+    position.x += 0.5;
+    position.y += verticalSpeed / 60;
+    resolveBuildingCollision(position, previousPosition);
+    verticalSpeed = Math.max(5, verticalSpeed);
+  }
+
+  assert.equal(position.x, 0);
+  assert.ok(position.y > 79.5, `expected takeoff to clear the roof collider, got ${position.y}`);
 });
