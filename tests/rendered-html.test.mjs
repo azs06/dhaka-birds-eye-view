@@ -47,14 +47,7 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(component, /addOpenStreetMapWorld/);
   assert.match(component, /MeshToonMaterial/);
   assert.doesNotMatch(component, /folk-poster-frame/);
-  assert.match(component, /addFolkBuildingPosters/);
-  assert.match(component, /poster\.name = `\$\{site\.building\} folk poster`/);
-  assert.match(component, /dhaka-river-folk-poster\.webp/);
-  assert.match(component, /dhaka-rickshaw-folk-poster\.webp/);
-  assert.match(component, /নদীর শহর/);
   assert.match(component, /GREATER DHAKA &amp; ITS RIVERS/);
-  await access(new URL("../public/assets/dhaka-river-folk-poster.webp", import.meta.url));
-  await access(new URL("../public/assets/dhaka-rickshaw-folk-poster.webp", import.meta.url));
   for (const area of ["Moghbazar", "Tejgaon I\/A", "Niketan", "Gulshan 1", "Badda Link Road", "Rampura Bridge"]) {
     assert.match(component, new RegExp(area));
   }
@@ -67,6 +60,15 @@ test("keeps the finished flight experience free of starter preview code", async 
   for (const area of ["Mohammadpur", "Mirpur 10", "Uttara", "Purbachal", "Demra", "Old Dhaka", "Lalbagh", "Keraniganj"]) {
     assert.match(component, new RegExp(area));
   }
+  for (const landmark of ["Jatiya Sangsad Bhaban", "Lalbagh Fort", "Ahsan Manzil", "Central Shaheed Minar", "Curzon Hall", "Baitul Mukarram"]) {
+    assert.match(component, new RegExp(landmark));
+  }
+  for (const landmarkKind of ["parliament", "lalbagh-fort", "ahsan-manzil", "shaheed-minar", "curzon-hall", "baitul-mukarram"]) {
+    assert.match(component, new RegExp(`landmark\\.kind === "${landmarkKind}"`));
+  }
+  assert.match(component, /label: "Baitul Mukarram"[^\n]+minimap: true/);
+  assert.doesNotMatch(component, /addFolkBuildingPosters/);
+  assert.match(component, /DHAKA_LANDMARKS\.filter\(\(landmark\) => landmark\.minimap\)/);
   for (const waterway of ["Buriganga River", "Turag River", "Tongi Khal", "Balu River", "Shitalakshya River"]) {
     assert.match(component, new RegExp(waterway));
   }
@@ -98,8 +100,16 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(weatherRoute, /stale-while-revalidate=600/);
   assert.match(component, /const BRAKE_SPEED = 18/);
   assert.match(component, /const DEFAULT_FLIGHT_ALTITUDE = 130/);
+  assert.match(component, /const MAX_FLIGHT_ALTITUDE = 650/);
+  assert.match(component, /const CEILING_EASE_DEPTH = 90/);
+  assert.match(component, /const MIN_CEILING_CLIMB_SPEED = 1\.8/);
   assert.match(component, /crow\.position\.set\(spawnWorld\.x, DEFAULT_FLIGHT_ALTITUDE, spawnWorld\.y\)/);
-  assert.match(component, /verticalSpeed = Math\.min\(22, verticalSpeed \+ 8\.5\)/);
+  assert.match(component, /verticalSpeed = Math\.min\(22, verticalSpeed \+ 8\.5 \* flapLiftScale\)/);
+  assert.match(component, /const ceilingClimbScale = THREE\.MathUtils\.smoothstep/);
+  assert.match(component, /Math\.max\(\s*MIN_CEILING_CLIMB_SPEED,/);
+  assert.match(component, /climb > 0 && crow\.position\.y >= MAX_FLIGHT_ALTITUDE - 1/);
+  assert.match(component, /verticalSpeed = Math\.min\(verticalSpeed, 0\)/);
+  assert.doesNotMatch(component, /verticalSpeed = Math\.min\(verticalSpeed, -3\)/);
   assert.match(component, /Ctrl \/ Q/);
   assert.match(component, /VERT M\/S/);
   assert.match(mapRoute, /south: 23\.668/);
@@ -110,6 +120,14 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(mapRoute, /MAX_BUILDINGS = 3_600/);
   assert.match(mapRoute, /spatiallySampleBuildings/);
   assert.match(mapRoute, /spatiallySampleRoads/);
+  assert.match(component, /TRAFFIC_ROUTE_SAMPLE_RATIO = 0\.35/);
+  assert.match(component, /TRAFFIC_MAX_VEHICLES = 84/);
+  assert.match(component, /TRAFFIC_BASE_TICK_HZ = 10/);
+  assert.match(component, /TRAFFIC_THROTTLED_TICK_HZ = 5/);
+  assert.match(component, /createTrafficSimulation/);
+  assert.match(component, /Sampled real-time traffic/);
+  assert.match(component, /trafficSimulation\?\.update\(dt, frameMs\)/);
+  assert.match(component, /SAMPLED SIM TRAFFIC/);
   assert.match(mapRoute, /way\["building"\]/);
   assert.match(mapRoute, /relation\["building"\]\["type"="multipolygon"\]/);
   assert.match(mapRoute, /relation\["natural"="water"\]\["type"="multipolygon"\]/);

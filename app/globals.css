@@ -112,6 +112,8 @@ kbd { display: inline-grid; min-width: 23px; height: 22px; padding: 0 5px; place
 .map-road { position: absolute; width: 180px; height: 3px; left: -15px; top: 48px; background: rgba(29,53,48,.68); transform: rotate(-9deg); }
 .map-area { position: absolute; z-index: 2; transform: translate(-50%, -50%); color: var(--ink); font: 700 5px/1 var(--font-mono); letter-spacing: .05em; text-shadow: 0 1px rgba(255,240,196,.7); }
 .map-area::before { content: ""; display: block; width: 3px; height: 3px; margin: 0 auto 2px; border-radius: 50%; background: var(--acid); box-shadow: 0 0 4px rgba(216,255,98,.8); }
+.map-landmark { position: absolute; z-index: 4; transform: translate(-50%, -50%); color: var(--ink); font: 800 5px/1 var(--font-mono); letter-spacing: .04em; text-shadow: 0 1px rgba(255,240,196,.8); }
+.map-landmark::before { content: ""; display: block; width: 5px; height: 5px; margin: 0 auto 2px; transform: rotate(45deg); background: var(--magenta); box-shadow: 0 0 0 1px var(--cream), 0 0 5px rgba(210,25,102,.65); }
 .map-river { position: absolute; z-index: 3; transform: translate(-50%, -50%); color: #a7f2f4; font: 700 5px/1 var(--font-mono); letter-spacing: .06em; text-shadow: 0 1px 4px rgba(3,22,27,.95); }
 .map-river::before { content: ""; display: block; width: 8px; height: 2px; margin: 0 auto 2px; border-radius: 999px; background: #62cbd0; box-shadow: 0 0 5px rgba(98,203,208,.8); }
 .map-bird { position: absolute; z-index: 4; left: 50%; top: 50%; width: 16px; height: 16px; color: var(--magenta); font-size: 12px; filter: drop-shadow(1px 1px 0 var(--cream)); transform-origin: center; }

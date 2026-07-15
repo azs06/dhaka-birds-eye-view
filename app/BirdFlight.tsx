@@ -26,7 +26,21 @@ type WaterLandmark = {
   lon: number;
   minimap?: boolean;
 };
-type DhakaLandmark = AreaLandmark & { kind: "church" | "mall" | "amphitheatre" | "twin-tower" | "brac" | "hotel" };
+type DhakaLandmark = AreaLandmark & {
+  kind:
+    | "church"
+    | "bashundhara-city"
+    | "amphitheatre"
+    | "police-plaza"
+    | "brac"
+    | "hotel"
+    | "parliament"
+    | "lalbagh-fort"
+    | "ahsan-manzil"
+    | "shaheed-minar"
+    | "curzon-hall"
+    | "baitul-mukarram";
+};
 type ProceduralDistrictTile = { group: THREE.Group; centerX: number; centerZ: number; colliders: BuildingCollider[] };
 type WaterRibbon = THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
 type MapStatus = "loading" | "live" | "fallback";
@@ -68,6 +82,8 @@ type BirdFlightWindow = Window & {
     maxFrameMs: number;
     longFrames: number;
     mapBuildMs: number | null;
+    trafficVehicles: number;
+    trafficTickHz: number;
   };
 };
 type FlightAudio = {
@@ -106,6 +122,26 @@ type WeatherVfx = {
   update: (dt: number, anchor: THREE.Vector3, paused: boolean) => void;
   dispose: () => void;
 };
+type TrafficSimulation = {
+  update: (dt: number, frameMs: number) => void;
+  dispose: () => void;
+  readonly vehicleCount: number;
+  readonly tickHz: number;
+};
+type TrafficVehicle = {
+  route: MapPoint[];
+  segmentIndex: number;
+  segmentProgress: number;
+  direction: 1 | -1;
+  laneOffset: number;
+  speed: number;
+  baseSpeed: number;
+  phase: number;
+  position: THREE.Vector3;
+  previousPosition: THREE.Vector3;
+  heading: number;
+  previousHeading: number;
+};
 
 const clamp = THREE.MathUtils.clamp;
 const MAP_CENTER = { lat: 23.7715, lon: 90.4165 };
@@ -115,6 +151,17 @@ const BRAKE_SPEED = 18;
 const CRUISE_SPEED = 44;
 const BOOST_SPEED = 78;
 const DEFAULT_FLIGHT_ALTITUDE = 130;
+const MIN_FLIGHT_ALTITUDE = 10;
+const MAX_FLIGHT_ALTITUDE = 650;
+const CEILING_EASE_DEPTH = 90;
+const MIN_CEILING_CLIMB_SPEED = 1.8;
+const TRAFFIC_ROUTE_SAMPLE_RATIO = 0.35;
+const TRAFFIC_ROUTE_BUDGET = 72;
+const TRAFFIC_MAX_VEHICLES = 84;
+const TRAFFIC_BASE_TICK_HZ = 10;
+const TRAFFIC_THROTTLED_TICK_HZ = 5;
+const TRAFFIC_LONG_FRAME_MS = 34;
+const TRAFFIC_MAX_CATCH_UP_STEPS = 2;
 const FLIGHT_AMBIENCE_GAIN = 0.28;
 const RADIO_DUCKED_AMBIENCE_GAIN = 0.24;
 const DEFAULT_WEATHER: WeatherSnapshot = {
@@ -219,11 +266,17 @@ const WATER_LANDMARKS: WaterLandmark[] = [
 ];
 const DHAKA_LANDMARKS: DhakaLandmark[] = [
   { label: "Holy Rosary Church", shortLabel: "HRC", lat: 23.759151, lon: 90.392216, altitude: 61, heading: Math.PI / 2, kind: "church" },
-  { label: "Bashundhara City", shortLabel: "BSC", lat: 23.751142, lon: 90.3906411, altitude: 135, heading: Math.PI / 2, kind: "mall" },
+  { label: "Bashundhara City", shortLabel: "BSC", lat: 23.751142, lon: 90.3906411, altitude: 135, heading: Math.PI / 2, kind: "bashundhara-city" },
   { label: "Hatirjheel Amphitheatre", shortLabel: "HJA", lat: 23.771125, lon: 90.4133385, altitude: 28, heading: Math.PI, kind: "amphitheatre" },
-  { label: "Police Plaza Concord", shortLabel: "PPC", lat: 23.772911, lon: 90.4161391, altitude: 86, heading: 0, kind: "twin-tower" },
+  { label: "Police Plaza Concord", shortLabel: "PPC", lat: 23.772911, lon: 90.4161391, altitude: 86, heading: 0, kind: "police-plaza" },
   { label: "BRAC Centre", shortLabel: "BRC", lat: 23.78065, lon: 90.40715, altitude: 78, heading: Math.PI / 2, kind: "brac" },
   { label: "Four Points by Sheraton", shortLabel: "SHD", lat: 23.7920829, lon: 90.4137283, altitude: 95, heading: 0, kind: "hotel" },
+  { label: "Jatiya Sangsad Bhaban", shortLabel: "JSB", lat: 23.76252, lon: 90.37836, altitude: 72, heading: Math.PI, kind: "parliament", minimap: true },
+  { label: "Lalbagh Fort", shortLabel: "LBF", lat: 23.71885, lon: 90.38818, altitude: 31, heading: Math.PI, kind: "lalbagh-fort", minimap: true },
+  { label: "Ahsan Manzil", shortLabel: "AHM", lat: 23.70863, lon: 90.40603, altitude: 43, heading: 0, kind: "ahsan-manzil", minimap: true },
+  { label: "Central Shaheed Minar", shortLabel: "CSM", lat: 23.72767, lon: 90.39604, altitude: 31, heading: Math.PI, kind: "shaheed-minar" },
+  { label: "Curzon Hall", shortLabel: "CRZ", lat: 23.72631, lon: 90.40248, altitude: 38, heading: Math.PI, kind: "curzon-hall" },
+  { label: "Baitul Mukarram", shortLabel: "BTM", lat: 23.72914, lon: 90.41268, altitude: 47, heading: Math.PI, kind: "baitul-mukarram", minimap: true },
 ];
 
 function coordinatesToWorld(lat: number, lon: number) {
@@ -302,6 +355,232 @@ function seededRandom(seed = 713) {
   return () => {
     value = (value * 16807) % 2147483647;
     return (value - 1) / 2147483646;
+  };
+}
+
+function trafficRoadLength(points: MapPoint[]) {
+  let length = 0;
+  for (let index = 1; index < points.length; index++) {
+    length += Math.hypot(points[index][0] - points[index - 1][0], points[index][1] - points[index - 1][1]);
+  }
+  return length;
+}
+
+function selectTrafficRoads(roads: OsmMapData["roads"]) {
+  const supportedKinds = new Set(["motorway", "trunk", "primary", "secondary", "tertiary", "residential", "unclassified", "service"]);
+  const candidates = roads.flatMap((road, index) => {
+    const points = road.points.filter(([x, z]) => Number.isFinite(x) && Number.isFinite(z));
+    if (!supportedKinds.has(road.kind) || points.length < 2 || trafficRoadLength(points) < 70) return [];
+    const hash = Math.imul(road.id || index + 1, 2_654_435_761) >>> 0;
+    const score = hash / 4_294_967_295;
+    if (roads.length > 4 && score > TRAFFIC_ROUTE_SAMPLE_RATIO) return [];
+    const center = points[Math.floor(points.length / 2)];
+    return [{ ...road, points, score, cell: `${Math.floor(center[0] / 1_200)}:${Math.floor(center[1] / 1_200)}` }];
+  });
+
+  candidates.sort((a, b) => a.score - b.score);
+  const selected: typeof candidates = [];
+  const selectedIds = new Set<number>();
+  const occupiedCells = new Set<string>();
+  for (const road of candidates) {
+    if (occupiedCells.has(road.cell)) continue;
+    selected.push(road);
+    selectedIds.add(road.id);
+    occupiedCells.add(road.cell);
+    if (selected.length >= TRAFFIC_ROUTE_BUDGET) return selected;
+  }
+  for (const road of candidates) {
+    if (selectedIds.has(road.id)) continue;
+    selected.push(road);
+    if (selected.length >= TRAFFIC_ROUTE_BUDGET) break;
+  }
+  return selected;
+}
+
+function createTrafficSimulation(
+  parent: THREE.Object3D,
+  roads: OsmMapData["roads"],
+  maxVehicles = TRAFFIC_MAX_VEHICLES,
+): TrafficSimulation | null {
+  const routes = selectTrafficRoads(roads);
+  if (routes.length === 0) return null;
+
+  const random = seededRandom(9_047);
+  const vehicleTotal = routes.length <= 4
+    ? maxVehicles
+    : Math.min(maxVehicles, Math.max(24, Math.round(routes.length * 1.15)));
+  const trafficRoot = new THREE.Group();
+  trafficRoot.name = "Sampled real-time traffic";
+  parent.add(trafficRoot);
+
+  const bodyGeometry = new THREE.BoxGeometry(6.2, 1.55, 3);
+  const cabinGeometry = new THREE.BoxGeometry(3.15, 1.15, 2.55);
+  const bodyMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.42, metalness: 0.18 });
+  const cabinMaterial = new THREE.MeshStandardMaterial({ color: 0x6f898b, roughness: 0.23, metalness: 0.16 });
+  const bodies = new THREE.InstancedMesh(bodyGeometry, bodyMaterial, vehicleTotal);
+  const cabins = new THREE.InstancedMesh(cabinGeometry, cabinMaterial, vehicleTotal);
+  bodies.name = "Traffic vehicle bodies";
+  cabins.name = "Traffic vehicle cabins";
+  bodies.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  cabins.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  bodies.frustumCulled = false;
+  cabins.frustumCulled = false;
+  trafficRoot.add(bodies, cabins);
+
+  const palette = [0xe0b653, 0xb54f46, 0x4e7380, 0xd8d2ba, 0x45604f, 0xc8c5b7, 0x8d5d72];
+  const vehicles: TrafficVehicle[] = [];
+  for (let index = 0; index < vehicleTotal; index++) {
+    const road = routes[index % routes.length];
+    const direction: 1 | -1 = random() > 0.5 ? 1 : -1;
+    const segmentIndex = direction === 1
+      ? Math.floor(random() * (road.points.length - 1))
+      : 1 + Math.floor(random() * (road.points.length - 1));
+    const nextIndex = segmentIndex + direction;
+    const start = road.points[segmentIndex];
+    const end = road.points[nextIndex];
+    const segmentLength = Math.max(1, Math.hypot(end[0] - start[0], end[1] - start[1]));
+    const segmentProgress = random() * segmentLength;
+    const ratio = segmentProgress / segmentLength;
+    const dx = end[0] - start[0];
+    const dz = end[1] - start[1];
+    const heading = Math.atan2(dz, dx);
+    const laneOffset = 0.75 + random() * 0.85;
+    const position = new THREE.Vector3(
+      THREE.MathUtils.lerp(start[0], end[0], ratio) - Math.sin(heading) * laneOffset * direction,
+      2.25,
+      THREE.MathUtils.lerp(start[1], end[1], ratio) + Math.cos(heading) * laneOffset * direction,
+    );
+    const major = ["motorway", "trunk", "primary", "secondary"].includes(road.kind);
+    const baseSpeed = major ? 11 + random() * 8 : 6 + random() * 6;
+    vehicles.push({
+      route: road.points,
+      segmentIndex,
+      segmentProgress,
+      direction,
+      laneOffset,
+      speed: baseSpeed,
+      baseSpeed,
+      phase: random() * Math.PI * 2,
+      position,
+      previousPosition: position.clone(),
+      heading,
+      previousHeading: heading,
+    });
+    bodies.setColorAt(index, new THREE.Color(palette[index % palette.length]));
+  }
+  if (bodies.instanceColor) bodies.instanceColor.needsUpdate = true;
+
+  let simulationTime = 0;
+  let accumulator = 0;
+  let overloadCooldown = 0;
+  let currentTickHz = TRAFFIC_BASE_TICK_HZ;
+  let visibleVehicles = Math.min(vehicleTotal, Math.max(8, Math.floor(vehicleTotal * 0.18)));
+  const matrix = new THREE.Matrix4();
+  const quaternion = new THREE.Quaternion();
+  const scale = new THREE.Vector3(1, 1, 1);
+  const renderPosition = new THREE.Vector3();
+  const up = new THREE.Vector3(0, 1, 0);
+
+  const stepVehicle = (vehicle: TrafficVehicle, step: number) => {
+    vehicle.previousPosition.copy(vehicle.position);
+    vehicle.previousHeading = vehicle.heading;
+    const flow = 0.82 + Math.sin(simulationTime * 0.42 + vehicle.phase) * 0.18;
+    vehicle.speed = THREE.MathUtils.lerp(vehicle.speed, vehicle.baseSpeed * flow, 1 - Math.exp(-1.2 * step));
+    let remaining = vehicle.speed * step;
+    let guard = 0;
+    while (remaining > 0 && guard++ < 8) {
+      let nextIndex = vehicle.segmentIndex + vehicle.direction;
+      if (nextIndex < 0 || nextIndex >= vehicle.route.length) {
+        vehicle.direction = vehicle.direction === 1 ? -1 : 1;
+        nextIndex = vehicle.segmentIndex + vehicle.direction;
+        vehicle.segmentProgress = 0;
+      }
+      const start = vehicle.route[vehicle.segmentIndex];
+      const end = vehicle.route[nextIndex];
+      const dx = end[0] - start[0];
+      const dz = end[1] - start[1];
+      const segmentLength = Math.max(0.01, Math.hypot(dx, dz));
+      const available = segmentLength - vehicle.segmentProgress;
+      if (remaining < available) {
+        vehicle.segmentProgress += remaining;
+        remaining = 0;
+      } else {
+        remaining -= available;
+        vehicle.segmentIndex = nextIndex;
+        vehicle.segmentProgress = 0;
+      }
+    }
+    let nextIndex = vehicle.segmentIndex + vehicle.direction;
+    if (nextIndex < 0 || nextIndex >= vehicle.route.length) {
+      vehicle.direction = vehicle.direction === 1 ? -1 : 1;
+      nextIndex = vehicle.segmentIndex + vehicle.direction;
+      vehicle.segmentProgress = 0;
+    }
+    const start = vehicle.route[vehicle.segmentIndex];
+    const end = vehicle.route[nextIndex];
+    const dx = end[0] - start[0];
+    const dz = end[1] - start[1];
+    const segmentLength = Math.max(0.01, Math.hypot(dx, dz));
+    const ratio = clamp(vehicle.segmentProgress / segmentLength, 0, 1);
+    vehicle.heading = Math.atan2(dz, dx);
+    vehicle.position.set(
+      THREE.MathUtils.lerp(start[0], end[0], ratio) - Math.sin(vehicle.heading) * vehicle.laneOffset * vehicle.direction,
+      2.25,
+      THREE.MathUtils.lerp(start[1], end[1], ratio) + Math.cos(vehicle.heading) * vehicle.laneOffset * vehicle.direction,
+    );
+  };
+
+  const renderVehicles = (alpha: number) => {
+    visibleVehicles = Math.min(vehicleTotal, Math.max(visibleVehicles, Math.floor(8 + simulationTime * 9)));
+    bodies.count = visibleVehicles;
+    cabins.count = visibleVehicles;
+    for (let index = 0; index < visibleVehicles; index++) {
+      const vehicle = vehicles[index];
+      renderPosition.lerpVectors(vehicle.previousPosition, vehicle.position, alpha);
+      const headingDelta = Math.atan2(
+        Math.sin(vehicle.heading - vehicle.previousHeading),
+        Math.cos(vehicle.heading - vehicle.previousHeading),
+      );
+      quaternion.setFromAxisAngle(up, -(vehicle.previousHeading + headingDelta * alpha));
+      matrix.compose(renderPosition, quaternion, scale);
+      bodies.setMatrixAt(index, matrix);
+      renderPosition.y += 1.12;
+      matrix.compose(renderPosition, quaternion, scale);
+      cabins.setMatrixAt(index, matrix);
+    }
+    bodies.instanceMatrix.needsUpdate = true;
+    cabins.instanceMatrix.needsUpdate = true;
+  };
+
+  renderVehicles(1);
+  return {
+    update(dt, frameMs) {
+      overloadCooldown = frameMs > TRAFFIC_LONG_FRAME_MS ? 2.5 : Math.max(0, overloadCooldown - dt);
+      currentTickHz = overloadCooldown > 0 ? TRAFFIC_THROTTLED_TICK_HZ : TRAFFIC_BASE_TICK_HZ;
+      const step = 1 / currentTickHz;
+      accumulator = Math.min(accumulator + dt, step * TRAFFIC_MAX_CATCH_UP_STEPS);
+      let steps = 0;
+      while (accumulator >= step && steps < TRAFFIC_MAX_CATCH_UP_STEPS) {
+        simulationTime += step;
+        for (const vehicle of vehicles) stepVehicle(vehicle, step);
+        accumulator -= step;
+        steps++;
+      }
+      renderVehicles(clamp(accumulator / step, 0, 1));
+    },
+    dispose() {
+      parent.remove(trafficRoot);
+      bodyGeometry.dispose();
+      cabinGeometry.dispose();
+      bodyMaterial.dispose();
+      cabinMaterial.dispose();
+    },
+    get vehicleCount() {
+      return visibleVehicles;
+    },
+    get tickHz() {
+      return currentTickHz;
+    },
   };
 }
 
@@ -1232,10 +1511,18 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
   const concrete = new THREE.MeshStandardMaterial({ color: 0xc9c2ad, roughness: 0.86 });
   const paleConcrete = new THREE.MeshStandardMaterial({ color: 0xe0d9c3, roughness: 0.8 });
   const brick = new THREE.MeshStandardMaterial({ color: 0x9b5e49, roughness: 0.84 });
+  const redBrick = new THREE.MeshStandardMaterial({ color: 0x9f4938, roughness: 0.88 });
+  const pinkPlaster = new THREE.MeshStandardMaterial({ color: 0xd47f88, roughness: 0.8 });
+  const whiteStone = new THREE.MeshStandardMaterial({ color: 0xeee9dc, roughness: 0.78 });
   const glass = new THREE.MeshStandardMaterial({ color: 0x497b82, roughness: 0.22, metalness: 0.16 });
   const darkGlass = new THREE.MeshStandardMaterial({ color: 0x294e56, roughness: 0.18, metalness: 0.22 });
   const roof = new THREE.MeshStandardMaterial({ color: 0x5d6866, roughness: 0.72, metalness: 0.12 });
   const accent = new THREE.MeshStandardMaterial({ color: 0xc89c44, roughness: 0.6, metalness: 0.18 });
+  const blueAccent = new THREE.MeshStandardMaterial({ color: 0x4d78a8, emissive: 0x183d66, emissiveIntensity: 0.42, roughness: 0.35, metalness: 0.22 });
+  const recess = new THREE.MeshStandardMaterial({ color: 0x202826, roughness: 0.96 });
+  const lawn = new THREE.MeshStandardMaterial({ color: 0x718a55, roughness: 1 });
+  const water = new THREE.MeshStandardMaterial({ color: 0x477f8c, roughness: 0.2, metalness: 0.08 });
+  const monumentRed = new THREE.MeshStandardMaterial({ color: 0xb72f2f, roughness: 0.78 });
 
   const addBox = (
     parent: THREE.Object3D,
@@ -1250,6 +1537,72 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
     mesh.receiveShadow = true;
     parent.add(mesh);
     return mesh;
+  };
+
+  const addCylinder = (
+    parent: THREE.Object3D,
+    radiusTop: number,
+    radiusBottom: number,
+    height: number,
+    position: [number, number, number],
+    material: THREE.Material,
+    segments = 20,
+  ) => {
+    const mesh = new THREE.Mesh(new THREE.CylinderGeometry(radiusTop, radiusBottom, height, segments), material);
+    mesh.position.set(...position);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    parent.add(mesh);
+    return mesh;
+  };
+
+  const addDome = (
+    parent: THREE.Object3D,
+    radius: number,
+    position: [number, number, number],
+    material: THREE.Material,
+  ) => {
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(radius, 20, 10, 0, Math.PI * 2, 0, Math.PI / 2), material);
+    mesh.position.set(...position);
+    mesh.castShadow = true;
+    parent.add(mesh);
+    return mesh;
+  };
+
+  const addRoundInset = (
+    parent: THREE.Object3D,
+    radius: number,
+    position: [number, number, number],
+    facing: "front" | "back" | "left" | "right" = "front",
+  ) => {
+    const mesh = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius, 1.1, 28), recess);
+    mesh.position.set(...position);
+    if (facing === "front" || facing === "back") mesh.rotation.x = Math.PI / 2;
+    else mesh.rotation.z = Math.PI / 2;
+    parent.add(mesh);
+    return mesh;
+  };
+
+  const addWindowGrid = (
+    parent: THREE.Object3D,
+    columns: number,
+    rows: number,
+    spacingX: number,
+    spacingY: number,
+    yStart: number,
+    z: number,
+    material: THREE.Material = darkGlass,
+  ) => {
+    for (let row = 0; row < rows; row++) {
+      for (let column = 0; column < columns; column++) {
+        addBox(
+          parent,
+          [spacingX * 0.58, spacingY * 0.42, 0.8],
+          [(column - (columns - 1) / 2) * spacingX, yStart + row * spacingY, z],
+          material,
+        );
+      }
+    }
   };
 
   const addLabel = (position: THREE.Vector3, text: string) => {
@@ -1298,24 +1651,32 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
         spire.position.set(side * 23, 53.5, -12);
         spire.castShadow = true;
         model.add(spire);
+        addBox(model, [1.1, 8, 1.1], [side * 23, 64, -12], accent);
+        addBox(model, [5, 1.1, 1.1], [side * 23, 65.5, -12], accent);
       }
       const rose = new THREE.Mesh(new THREE.TorusGeometry(5.5, 1.1, 8, 24), darkGlass);
       rose.position.set(0, 25, -17.4);
       model.add(rose);
-    } else if (landmark.kind === "mall") {
-      halfWidth = 44;
-      halfDepth = 34;
-      addBox(model, [88, 19, 68], [0, 9.5, 0], paleConcrete);
-      addBox(model, [38, 91, 36], [0, 64.5, 0], concrete);
-      addBox(model, [40, 78, 5], [0, 65, -20.2], glass);
-      for (let y = 31; y < 108; y += 13) addBox(model, [42, 1.5, 39], [0, y, 0], accent);
-      const crown = new THREE.Mesh(new THREE.CylinderGeometry(19, 23, 10, 14), roof);
-      crown.position.y = 115;
-      crown.castShadow = true;
-      model.add(crown);
-      const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.9, 1.7, 17, 8), accent);
-      mast.position.y = 128;
-      model.add(mast);
+    } else if (landmark.kind === "bashundhara-city") {
+      halfWidth = 57;
+      halfDepth = 40;
+      addBox(model, [114, 22, 80], [0, 11, 0], paleConcrete);
+      addBox(model, [108, 4, 76], [0, 24, 0], accent);
+      addBox(model, [34, 17, 4], [0, 11, -42], darkGlass);
+      addCylinder(model, 29, 35, 86, [0, 68, 0], concrete, 18);
+      addCylinder(model, 25.5, 31.5, 80, [0, 68, 0], glass, 18);
+      addBox(model, [16, 82, 3], [0, 68, -32.2], darkGlass);
+      for (let y = 31; y <= 108; y += 10.5) {
+        addCylinder(model, 32.5, 32.5, 1.5, [0, y, 0], accent, 18);
+      }
+      addCylinder(model, 17, 21, 19, [0, 121.5, 0], darkGlass, 18);
+      for (let y = 114; y <= 132; y += 6) {
+        const crownRing = new THREE.Mesh(new THREE.TorusGeometry(19, 0.9, 8, 32), blueAccent);
+        crownRing.position.y = y;
+        crownRing.rotation.x = Math.PI / 2;
+        model.add(crownRing);
+      }
+      addCylinder(model, 0.75, 1.2, 7, [0, 137, 0], blueAccent, 8);
     } else if (landmark.kind === "amphitheatre") {
       halfWidth = 52;
       halfDepth = 38;
@@ -1331,15 +1692,18 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
       shell.position.set(0, 17, -15);
       model.add(shell);
       addBox(model, [39, 2, 15], [0, 3, -12], darkGlass);
-    } else if (landmark.kind === "twin-tower") {
-      halfWidth = 39;
-      halfDepth = 29;
-      addBox(model, [78, 12, 56], [0, 6, 0], paleConcrete);
+    } else if (landmark.kind === "police-plaza") {
+      halfWidth = 42;
+      halfDepth = 31;
+      addBox(model, [84, 15, 62], [0, 7.5, 0], paleConcrete);
+      addBox(model, [78, 3, 58], [0, 16.5, 0], accent);
       for (const side of [-1, 1]) {
-        addBox(model, [27, 72, 32], [side * 21, 48, 0], glass);
-        addBox(model, [29, 2, 34], [side * 21, 85, 0], accent);
+        const wing = addBox(model, [31, 62, 35], [side * 20, 47, 2], glass);
+        wing.rotation.z = side * -0.035;
+        addBox(model, [4, 64, 38], [side * 20, 48, -0.5], paleConcrete);
       }
-      addBox(model, [24, 12, 18], [0, 59, 0], darkGlass);
+      addBox(model, [24, 70, 30], [0, 52, 0], darkGlass);
+      addBox(model, [82, 2.2, 62], [0, 80, 0], roof);
     } else if (landmark.kind === "brac") {
       halfWidth = 27;
       halfDepth = 24;
@@ -1347,7 +1711,8 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
       addBox(model, [47, 63, 39], [0, 43.5, 0], brick);
       addBox(model, [9, 65, 41], [7, 44.5, -0.5], darkGlass);
       addBox(model, [51, 2.5, 43], [0, 76, 0], roof);
-    } else {
+      addWindowGrid(model, 5, 6, 7.2, 8.5, 20, -20.1);
+    } else if (landmark.kind === "hotel") {
       halfWidth = 34;
       halfDepth = 27;
       addBox(model, [68, 10, 54], [0, 5, 0], paleConcrete);
@@ -1355,6 +1720,103 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
       addBox(model, [6, 79, 36], [-5, 51, -18.5], glass);
       addBox(model, [22, 57, 23], [25, 38.5, 6], concrete);
       addBox(model, [55, 3, 38], [-5, 92.5, 0], roof);
+      for (let y = 18; y < 88; y += 9) addBox(model, [53, 1, 36], [-5, y, 0], concrete);
+    } else if (landmark.kind === "parliament") {
+      halfWidth = 78;
+      halfDepth = 70;
+      addBox(model, [180, 1.2, 154], [0, 0.6, 0], lawn);
+      addBox(model, [34, 0.8, 118], [-66, 1.3, 0], water);
+      addBox(model, [34, 0.8, 118], [66, 1.3, 0], water);
+      addCylinder(model, 39, 43, 50, [0, 27, 0], concrete, 8);
+      addCylinder(model, 31, 36, 11, [0, 57.5, 0], concrete, 8);
+      addCylinder(model, 25, 30, 6, [0, 66, 0], roof, 8);
+      for (let index = 0; index < 8; index++) {
+        const angle = index * Math.PI / 4;
+        const x = Math.sin(angle) * 54;
+        const z = Math.cos(angle) * 48;
+        const block = addBox(model, [27, 42, 29], [x, 23, z], concrete);
+        block.rotation.y = angle;
+      }
+      addRoundInset(model, 12, [0, 31, -43.2]);
+      addRoundInset(model, 9, [0, 30, 43.2], "back");
+      addRoundInset(model, 9, [-43.2, 28, 0], "left");
+      addRoundInset(model, 9, [43.2, 28, 0], "right");
+      addBox(model, [13, 28, 1.2], [-24, 27, -43.1], recess);
+      addBox(model, [13, 28, 1.2], [24, 27, -43.1], recess);
+      addBox(model, [70, 2, 24], [0, 2.2, -72], brick);
+    } else if (landmark.kind === "lalbagh-fort") {
+      halfWidth = 88;
+      halfDepth = 58;
+      addBox(model, [176, 1, 116], [0, 0.5, 0], lawn);
+      addBox(model, [176, 5, 3], [0, 3, -57], redBrick);
+      addBox(model, [176, 5, 3], [0, 3, 57], redBrick);
+      addBox(model, [3, 5, 116], [-87, 3, 0], redBrick);
+      addBox(model, [3, 5, 116], [87, 3, 0], redBrick);
+      addBox(model, [7, 0.8, 100], [0, 1.1, 0], water);
+      addBox(model, [142, 0.8, 7], [0, 1.1, 0], water);
+      addBox(model, [37, 12, 29], [0, 7, 0], whiteStone);
+      addBox(model, [27, 7, 20], [0, 16.5, 0], paleConcrete);
+      addDome(model, 10, [0, 20, 0], whiteStone);
+      for (const x of [-13, 13]) for (const z of [-9, 9]) addDome(model, 3.4, [x, 14, z], whiteStone);
+      addBox(model, [50, 10, 27], [-57, 6, 0], redBrick);
+      for (const x of [-69, -57, -45]) addDome(model, 6, [x, 11, 0], whiteStone);
+      addBox(model, [47, 13, 29], [58, 7.5, 0], redBrick);
+      addBox(model, [18, 7, 5], [58, 8, -17], recess);
+      for (const x of [-73, 73]) addCylinder(model, 3.2, 4.2, 10, [x, 6, -43], redBrick, 8);
+    } else if (landmark.kind === "ahsan-manzil") {
+      halfWidth = 54;
+      halfDepth = 33;
+      addBox(model, [106, 3, 66], [0, 1.5, 0], lawn);
+      addBox(model, [94, 18, 34], [0, 11, 3], pinkPlaster);
+      addBox(model, [37, 23, 42], [0, 18.5, 0], pinkPlaster);
+      addBox(model, [58, 3, 9], [0, 3.5, -26], paleConcrete);
+      addBox(model, [49, 3, 8], [0, 6.5, -21.5], paleConcrete);
+      addBox(model, [40, 3, 7], [0, 9.5, -17], paleConcrete);
+      for (const x of [-38, -25, -12, 12, 25, 38]) addBox(model, [2.3, 15, 2.3], [x, 13, -15], whiteStone);
+      addCylinder(model, 10, 12, 7, [0, 32.5, 0], whiteStone, 16);
+      addDome(model, 10, [0, 36, 0], pinkPlaster);
+      addCylinder(model, 0.6, 1.1, 5, [0, 47, 0], accent, 8);
+      addWindowGrid(model, 7, 2, 12.5, 8.5, 10, -14.5, recess);
+    } else if (landmark.kind === "shaheed-minar") {
+      halfWidth = 42;
+      halfDepth = 26;
+      addBox(model, [86, 2.5, 50], [0, 1.25, 0], paleConcrete);
+      addBox(model, [76, 1.5, 8], [0, 3.25, -18], whiteStone);
+      addRoundInset(model, 11, [0, 20, 4]);
+      const sun = model.children.at(-1);
+      if (sun instanceof THREE.Mesh) sun.material = monumentRed;
+      for (const index of [-2, -1, 0, 1, 2]) {
+        const pillar = addBox(model, [5.2, index === 0 ? 30 : 25, 4], [index * 12, index === 0 ? 18 : 15.5, -2], whiteStone);
+        pillar.rotation.z = index * -0.045;
+        addBox(model, [9, 2.2, 4.5], [index * 12, index === 0 ? 31 : 26, -2], whiteStone).rotation.z = index * -0.045;
+      }
+    } else if (landmark.kind === "curzon-hall") {
+      halfWidth = 57;
+      halfDepth = 32;
+      addBox(model, [114, 2, 62], [0, 1, 0], lawn);
+      addBox(model, [104, 18, 32], [0, 11, 0], redBrick);
+      addBox(model, [38, 26, 38], [0, 16, -1], redBrick);
+      for (const x of [-43, 43]) {
+        addCylinder(model, 7, 8.5, 24, [x, 14, -2], redBrick, 12);
+        addDome(model, 7, [x, 26, -2], whiteStone);
+      }
+      addCylinder(model, 10, 12, 8, [0, 31, -1], whiteStone, 12);
+      addDome(model, 10, [0, 35, -1], redBrick);
+      for (const x of [-36, -24, -12, 0, 12, 24, 36]) addBox(model, [6, 9, 1], [x, 12, -16.5], recess);
+      addBox(model, [108, 2, 36], [0, 21, 0], whiteStone);
+    } else if (landmark.kind === "baitul-mukarram") {
+      halfWidth = 45;
+      halfDepth = 39;
+      addBox(model, [96, 2, 84], [0, 1, 0], paleConcrete);
+      addBox(model, [78, 44, 68], [0, 24, 0], whiteStone);
+      addBox(model, [48, 36, 2], [0, 21, -34.5], paleConcrete);
+      addBox(model, [16, 27, 1], [0, 19, -35.8], recess);
+      for (const x of [-27, -18, -9, 9, 18, 27]) {
+        addBox(model, [5.5, 12, 1], [x, 13, -35.8], recess);
+        addBox(model, [7.5, 2, 1.2], [x, 20, -35.9], recess);
+      }
+      addBox(model, [82, 3, 72], [0, 47.5, 0], paleConcrete);
+      for (const x of [-33, 33]) for (const z of [-28, 28]) addCylinder(model, 2.2, 3, 8, [x, 53, z], whiteStone, 8);
     }
 
     colliders.push({ x: world.x, z: world.y, halfWidth, halfDepth, top: landmark.altitude + 2 });
@@ -1496,37 +1958,10 @@ function addCity(scene: THREE.Scene) {
     }
   }
 
-  const traffic: THREE.Group[] = [];
-  const carColors = [0xe0b653, 0xb54f46, 0x4e7380, 0xd8d2ba, 0x45604f];
-  for (let i = 0; i < 24; i++) {
-    const car = new THREE.Group();
-    const paint = new THREE.MeshStandardMaterial({ color: carColors[i % carColors.length], roughness: 0.38, metalness: 0.22 });
-    const chassis = new THREE.Mesh(sharedBox, paint);
-    chassis.scale.set(6.6, 1.8, 3.2);
-    chassis.position.y = 1.15;
-    chassis.castShadow = true;
-    car.add(chassis);
-    const cabin = new THREE.Mesh(sharedBox, new THREE.MeshStandardMaterial({ color: 0x7f9998, roughness: 0.2, metalness: 0.18 }));
-    cabin.scale.set(3.2, 1.35, 2.75);
-    cabin.position.set(-0.25, 2.35, 0);
-    cabin.castShadow = true;
-    car.add(cabin);
-    for (const side of [-1, 1]) {
-      for (const axle of [-2.1, 2.15]) {
-        const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.66, 0.66, 0.38, 10), new THREE.MeshStandardMaterial({ color: 0x171b1b, roughness: 0.95 }));
-        wheel.rotation.x = Math.PI / 2;
-        wheel.position.set(axle, 0.68, side * 1.7);
-        car.add(wheel);
-      }
-    }
-    car.position.set(-1050 + random() * 2100, 3.1, i % 2 === 0 ? -281 : 281);
-    car.userData.direction = i % 4 < 2 ? 1 : -1;
-    car.userData.speed = 13 + random() * 12;
-    car.castShadow = true;
-    fallbackWorld.add(car);
-    traffic.push(car);
-  }
-  scene.userData.traffic = traffic;
+  scene.userData.trafficSimulation = createTrafficSimulation(fallbackWorld, [
+    { id: -1, points: [[-1_100, -281], [1_100, -281]], kind: "primary", name: "Hatirjheel north road" },
+    { id: -2, points: [[1_100, 281], [-1_100, 281]], kind: "primary", name: "Hatirjheel south road" },
+  ], 24);
 
   const lampPosts = new THREE.Group();
   const lampMetal = new THREE.MeshStandardMaterial({ color: 0x454f4e, roughness: 0.64, metalness: 0.5 });
@@ -1856,57 +2291,6 @@ function polygonShape(points: MapPoint[]) {
   return shape;
 }
 
-function addFolkBuildingPosters(scene: THREE.Scene) {
-  const sites = [
-    { building: "Bashundhara City", label: "ঢাকা", depth: 34, y: 61, asset: "/assets/dhaka-river-folk-poster.webp" },
-    { building: "BRAC Centre", label: "নদীর শহর", depth: 24, y: 43, asset: "/assets/dhaka-rickshaw-folk-poster.webp" },
-    { building: "Four Points by Sheraton", label: "ঢাকা", depth: 27, y: 52, asset: "/assets/dhaka-river-folk-poster.webp" },
-    { building: "Police Plaza Concord", label: "নদীর শহর", depth: 29, y: 45, asset: "/assets/dhaka-rickshaw-folk-poster.webp" },
-  ];
-  const landmarkRoot = scene.userData.landmarkRoot as THREE.Group | undefined;
-  if (!landmarkRoot) return;
-  const backingGeometry = new THREE.BoxGeometry(20, 30, 0.8);
-  const backingMaterial = new THREE.MeshStandardMaterial({ color: 0x273934, roughness: 0.78, metalness: 0.08 });
-
-  const loader = new THREE.TextureLoader();
-  for (const site of sites) {
-    const building = landmarkRoot.getObjectByName(site.building);
-    if (!building) continue;
-    const backing = new THREE.Mesh(backingGeometry, backingMaterial);
-    backing.position.set(0, site.y, -site.depth - 0.35);
-    backing.castShadow = true;
-    building.add(backing);
-    loader.load(site.asset, (source) => {
-      source.colorSpace = THREE.SRGBColorSpace;
-      const canvas = document.createElement("canvas");
-      canvas.width = 512;
-      canvas.height = 768;
-      const context = canvas.getContext("2d");
-      if (!context) return;
-      context.drawImage(source.image, 0, 0, canvas.width, canvas.height);
-      context.fillStyle = "#203a35";
-      context.textAlign = "center";
-      context.textBaseline = "middle";
-      context.font = "700 48px sans-serif";
-      context.fillText(site.label, canvas.width / 2, 663);
-      const texture = new THREE.CanvasTexture(canvas);
-      texture.colorSpace = THREE.SRGBColorSpace;
-      texture.minFilter = THREE.LinearMipmapLinearFilter;
-      texture.anisotropy = 4;
-      const poster = new THREE.Mesh(
-        new THREE.PlaneGeometry(18.5, 28),
-        new THREE.MeshBasicMaterial({ map: texture, toneMapped: false }),
-      );
-      poster.name = `${site.building} folk poster`;
-      poster.position.set(0, site.y, -site.depth - 0.78);
-      poster.rotation.y = Math.PI;
-      poster.renderOrder = 2;
-      building.add(poster);
-      source.dispose();
-    });
-  }
-}
-
 async function mergeIntoMeshBatches(
   group: THREE.Group,
   geometries: THREE.BufferGeometry[],
@@ -2083,6 +2467,12 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
     scene.remove(root);
     return null;
   }
+  const trafficSimulation = createTrafficSimulation(root, data.roads);
+  if (trafficSimulation) {
+    const fallbackTraffic = scene.userData.trafficSimulation as TrafficSimulation | null | undefined;
+    fallbackTraffic?.dispose();
+    scene.userData.trafficSimulation = trafficSimulation;
+  }
   const fallback = scene.userData.fallbackWorld as THREE.Group | undefined;
   if (fallback) fallback.visible = false;
   return colliders;
@@ -2230,7 +2620,6 @@ export function BirdFlight() {
     scene.add(skyFill);
 
     const buildingColliders = addCity(scene);
-    addFolkBuildingPosters(scene);
     let buildingColliderGrid = buildColliderGrid(buildingColliders);
     const mapRequestStartedAt = performance.now();
     void fetch("/api/osm")
@@ -2349,18 +2738,23 @@ export function BirdFlight() {
 
     let maxFrameMs = 0;
     let longFrames = 0;
-    (window as BirdFlightWindow).__birdFlightDiagnostics = () => ({
-      calls: renderer.info.render.calls,
-      triangles: renderer.info.render.triangles,
-      geometries: renderer.info.memory.geometries,
-      textures: renderer.info.memory.textures,
-      objects: scene.children.reduce((count, child) => count + 1 + child.children.length, 0),
-      proceduralTiles: (scene.userData.proceduralDistrictTiles as ProceduralDistrictTile[] | undefined)?.length ?? 0,
-      visibleTiles: (scene.userData.proceduralDistrictTiles as ProceduralDistrictTile[] | undefined)?.filter((tile) => tile.group.visible).length ?? 0,
-      maxFrameMs,
-      longFrames,
-      mapBuildMs: Number.parseFloat(renderer.domElement.dataset.mapBuildMs ?? "") || null,
-    });
+    (window as BirdFlightWindow).__birdFlightDiagnostics = () => {
+      const trafficSimulation = scene.userData.trafficSimulation as TrafficSimulation | null | undefined;
+      return {
+        calls: renderer.info.render.calls,
+        triangles: renderer.info.render.triangles,
+        geometries: renderer.info.memory.geometries,
+        textures: renderer.info.memory.textures,
+        objects: scene.children.reduce((count, child) => count + 1 + child.children.length, 0),
+        proceduralTiles: (scene.userData.proceduralDistrictTiles as ProceduralDistrictTile[] | undefined)?.length ?? 0,
+        visibleTiles: (scene.userData.proceduralDistrictTiles as ProceduralDistrictTile[] | undefined)?.filter((tile) => tile.group.visible).length ?? 0,
+        maxFrameMs,
+        longFrames,
+        mapBuildMs: Number.parseFloat(renderer.domElement.dataset.mapBuildMs ?? "") || null,
+        trafficVehicles: trafficSimulation?.vehicleCount ?? 0,
+        trafficTickHz: trafficSimulation?.tickHz ?? 0,
+      };
+    };
 
     const keys = new Set<string>();
     let yaw = 0.15;
@@ -2403,7 +2797,12 @@ export function BirdFlight() {
       if (event.code === "Space" && !event.repeat && flyingRef.current && !pausedRef.current) {
         flapKick = 1;
         cameraKick = 1;
-        verticalSpeed = Math.min(22, verticalSpeed + 8.5);
+        const flapLiftScale = THREE.MathUtils.smoothstep(
+          MAX_FLIGHT_ALTITUDE - crow.position.y,
+          0,
+          CEILING_EASE_DEPTH,
+        );
+        verticalSpeed = Math.min(22, verticalSpeed + 8.5 * flapLiftScale);
         speed = Math.max(BRAKE_SPEED, speed - 1.6);
         flightAudio.flap();
       }
@@ -2469,18 +2868,34 @@ export function BirdFlight() {
       cameraKick = Math.max(0, cameraKick - dt * 3.3);
 
       const speedAmountBeforeThrottle = clamp((speed - BRAKE_SPEED) / (BOOST_SPEED - BRAKE_SPEED), 0, 1);
+      const ceilingClimbScale = THREE.MathUtils.smoothstep(
+        MAX_FLIGHT_ALTITUDE - crow.position.y,
+        0,
+        CEILING_EASE_DEPTH,
+      );
+      const altitudeHeadroom = MAX_FLIGHT_ALTITUDE - crow.position.y;
+      const effectiveClimb = climb > 0 ? climb * ceilingClimbScale : climb;
       const targetVerticalSpeed = !active
         ? (restingRef.current ? 0 : verticalSpeed)
         : climb > 0
-          ? 16 + speedAmountBeforeThrottle * 7
+          ? altitudeHeadroom <= 1
+            ? 0
+            : Math.max(
+                MIN_CEILING_CLIMB_SPEED,
+                (16 + speedAmountBeforeThrottle * 7) * ceilingClimbScale,
+              )
           : climb < 0
             ? -19
             : -0.65;
-      const verticalResponse = climb === 0 ? 0.72 : 2.25;
+      const verticalResponse = climb === 0
+        ? 0.72
+        : climb > 0 && ceilingClimbScale < 1
+          ? THREE.MathUtils.lerp(4.6, 2.25, ceilingClimbScale)
+          : 2.25;
       verticalSpeed = THREE.MathUtils.lerp(verticalSpeed, targetVerticalSpeed, 1 - Math.exp(-verticalResponse * dt));
 
       const trajectoryPitch = Math.atan2(verticalSpeed, Math.max(speed, 1));
-      const targetPitch = clamp(trajectoryPitch * 0.78 + climb * 0.11 + flapKick * 0.1, -0.42, 0.44);
+      const targetPitch = clamp(trajectoryPitch * 0.78 + effectiveClimb * 0.11 + flapKick * 0.1, -0.42, 0.44);
       pitch = THREE.MathUtils.lerp(pitch, targetPitch, 1 - Math.pow(0.88, dt * 60));
       const targetRoll = turn * 0.48;
       roll = THREE.MathUtils.lerp(roll, targetRoll, 1 - Math.pow(0.8, dt * 60));
@@ -2521,12 +2936,15 @@ export function BirdFlight() {
         cameraKick = 0.7;
         speed = Math.max(28, speed * 0.82);
       }
-      crow.position.y = clamp(crow.position.y, 10, 390);
-      if (crow.position.y <= 10.2) {
+      crow.position.y = Math.max(crow.position.y, MIN_FLIGHT_ALTITUDE);
+      if (crow.position.y >= MAX_FLIGHT_ALTITUDE || (climb > 0 && crow.position.y >= MAX_FLIGHT_ALTITUDE - 1)) {
+        crow.position.y = MAX_FLIGHT_ALTITUDE;
+        verticalSpeed = Math.min(verticalSpeed, 0);
+      }
+      if (crow.position.y <= MIN_FLIGHT_ALTITUDE + 0.2) {
         pitch = Math.max(pitch, 0.16);
         verticalSpeed = Math.max(verticalSpeed, 7);
       }
-      if (crow.position.y >= 389.8) verticalSpeed = Math.min(verticalSpeed, -3);
       if (Math.abs(crow.position.x) > FLIGHT_EXTENT.x || Math.abs(crow.position.z) > FLIGHT_EXTENT.z) {
         const homeYaw = Math.atan2(crow.position.x, crow.position.z);
         const angleDifference = Math.atan2(Math.sin(homeYaw - yaw), Math.cos(homeYaw - yaw));
@@ -2574,11 +2992,8 @@ export function BirdFlight() {
       }
 
       if (!pausedRef.current) {
-        for (const car of scene.userData.traffic as THREE.Group[]) {
-          car.position.x += car.userData.direction * car.userData.speed * dt;
-          if (car.position.x > 1100) car.position.x = -1100;
-          if (car.position.x < -1100) car.position.x = 1100;
-        }
+        const trafficSimulation = scene.userData.trafficSimulation as TrafficSimulation | null | undefined;
+        trafficSimulation?.update(dt, frameMs);
         for (const cloud of scene.userData.clouds as THREE.Group[]) {
           cloud.position.x += (cloud.userData.weatherSpeed ?? cloud.userData.speed) * dt;
           if (cloud.position.x > 1250) cloud.position.x = -1250;
@@ -2677,6 +3092,9 @@ export function BirdFlight() {
         renderer.domElement.dataset.textures = renderer.info.memory.textures.toString();
         renderer.domElement.dataset.maxFrameMs = maxFrameMs.toFixed(1);
         renderer.domElement.dataset.longFrames = longFrames.toString();
+        const trafficSimulation = scene.userData.trafficSimulation as TrafficSimulation | null | undefined;
+        renderer.domElement.dataset.trafficVehicles = (trafficSimulation?.vehicleCount ?? 0).toString();
+        renderer.domElement.dataset.trafficTickHz = (trafficSimulation?.tickHz ?? 0).toString();
       }
     };
     animate();
@@ -2881,6 +3299,20 @@ export function BirdFlight() {
                 >{landmark.shortLabel}</span>
               );
             })}
+            {DHAKA_LANDMARKS.filter((landmark) => landmark.minimap).map((landmark) => {
+              const world = coordinatesToWorld(landmark.lat, landmark.lon);
+              return (
+                <span
+                  key={landmark.label}
+                  className="map-landmark"
+                  title={landmark.label}
+                  style={{
+                    left: `${50 + clamp(world.x / FLIGHT_EXTENT.x, -1, 1) * 43}%`,
+                    top: `${50 + clamp(world.y / FLIGHT_EXTENT.z, -1, 1) * 43}%`,
+                  }}
+                >{landmark.shortLabel}</span>
+              );
+            })}
             {WATER_LANDMARKS.filter((landmark) => landmark.minimap).map((landmark) => {
               const world = coordinatesToWorld(landmark.lat, landmark.lon);
               return (
@@ -2905,7 +3337,7 @@ export function BirdFlight() {
           <div ref={perchPromptRef} className="perch-prompt" data-visible="false"><kbd>E</kbd><span ref={perchLabelRef}>LAND</span></div>
           {resting && <div className="resting-chip"><i /> RESTING · WATCHING DHAKA</div>}
           <div className={`map-source ${mapStatus}`}>
-            <i /> {mapStatus === "live" ? "OSM + PROCEDURAL · " : mapStatus === "loading" ? "LOADING MAP · " : "MAP FALLBACK · "}
+            <i /> {mapStatus === "live" ? "OSM + PROCEDURAL + SAMPLED SIM TRAFFIC · " : mapStatus === "loading" ? "LOADING MAP + SIM TRAFFIC · " : "MAP + SIM TRAFFIC FALLBACK · "}
             <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">© OpenStreetMap contributors</a>
           </div>
         </>
