@@ -889,6 +889,29 @@ function distanceToSegmentSquared(x: number, z: number, x1: number, z1: number, 
   return (x - closestX) ** 2 + (z - closestZ) ** 2;
 }
 
+function proceduralFallbackRoads(): OsmMapData["roads"] {
+  const roads: OsmMapData["roads"] = [];
+  const spacing = 460;
+  let id = -10_000;
+  for (let z = -FLIGHT_EXTENT.z; z <= FLIGHT_EXTENT.z; z += spacing) {
+    roads.push({
+      id: id--,
+      points: [[-FLIGHT_EXTENT.x, z], [FLIGHT_EXTENT.x, z]],
+      kind: Math.abs(Math.round(z / spacing)) % 4 === 0 ? "primary" : "residential",
+      name: null,
+    });
+  }
+  for (let x = -FLIGHT_EXTENT.x; x <= FLIGHT_EXTENT.x; x += spacing) {
+    roads.push({
+      id: id--,
+      points: [[x, -FLIGHT_EXTENT.z], [x, FLIGHT_EXTENT.z]],
+      kind: Math.abs(Math.round(x / spacing)) % 4 === 0 ? "primary" : "residential",
+      name: null,
+    });
+  }
+  return roads;
+}
+
 async function addProceduralDistrictTiles(
   scene: THREE.Scene,
   data: OsmMapData,
@@ -916,6 +939,7 @@ async function addProceduralDistrictTiles(
   const waterAreaGrid = new Map<string, MapPoint[][]>();
   const colliderGrid = new Map<string, BuildingCollider[]>();
   const yieldIfNeeded = createMainThreadYielder();
+  const roads = data.roads.length > 0 ? data.roads : proceduralFallbackRoads();
   const spatialKey = (cellX: number, cellZ: number) => `${cellX}:${cellZ}`;
   const addToGrid = <T,>(grid: Map<string, T[]>, item: T, minX: number, maxX: number, minZ: number, maxZ: number) => {
     for (let cellX = Math.floor(minX / spatialCellSize); cellX <= Math.floor(maxX / spatialCellSize); cellX++) {
@@ -927,7 +951,7 @@ async function addProceduralDistrictTiles(
       }
     }
   };
-  for (const road of data.roads) {
+  for (const road of roads) {
     const radius = majorRoads.has(road.kind) ? 15 : road.kind === "service" ? 6 : 9;
     for (let index = 1; index < road.points.length; index++) {
       const [x1, z1] = road.points[index - 1];
@@ -936,6 +960,33 @@ async function addProceduralDistrictTiles(
       addToGrid(roadGrid, segment, Math.min(x1, x2) - 42, Math.max(x1, x2) + 42, Math.min(z1, z2) - 42, Math.max(z1, z2) + 42);
     }
     await yieldIfNeeded(isCancelled);
+  }
+  if (data.roads.length === 0 && !scene.userData.proceduralRoadFallback) {
+    const roadGeometries: THREE.BufferGeometry[] = [];
+    for (const road of roads) {
+      const width = majorRoads.has(road.kind) ? 13 : 6.5;
+      for (let index = 1; index < road.points.length; index++) {
+        const [x1, z1] = road.points[index - 1];
+        const [x2, z2] = road.points[index];
+        const length = Math.hypot(x2 - x1, z2 - z1);
+        const geometry = new THREE.BoxGeometry(length, 0.32, width);
+        geometry.rotateY(-Math.atan2(z2 - z1, x2 - x1));
+        geometry.translate((x1 + x2) / 2, 0.92, (z1 + z2) / 2);
+        roadGeometries.push(geometry);
+      }
+    }
+    const mergedRoads = mergeGeometries(roadGeometries, false);
+    roadGeometries.forEach((geometry) => geometry.dispose());
+    if (mergedRoads) {
+      const roadFallback = new THREE.Mesh(
+        mergedRoads,
+        new THREE.MeshStandardMaterial({ color: 0x46514d, roughness: 0.97 }),
+      );
+      roadFallback.name = "Greater Dhaka procedural road fallback";
+      roadFallback.receiveShadow = true;
+      scene.add(roadFallback);
+      scene.userData.proceduralRoadFallback = roadFallback;
+    }
   }
   for (const feature of data.water) {
     if (feature.area && feature.points.length >= 3) {
@@ -3211,9 +3262,10 @@ export function BirdFlight() {
         const tileVisibilityRadius = scene.userData.proceduralTileVisibilityRadius as number | undefined;
         if (districtTiles && tileVisibilityRadius) {
           const visibilitySquared = tileVisibilityRadius ** 2;
+          const visibilityAnchor = inspectionTarget ?? crow.position;
           for (const tile of districtTiles) {
-            const dx = tile.centerX - crow.position.x;
-            const dz = tile.centerZ - crow.position.z;
+            const dx = tile.centerX - visibilityAnchor.x;
+            const dz = tile.centerZ - visibilityAnchor.z;
             tile.group.visible = dx * dx + dz * dz < visibilitySquared;
           }
         }
