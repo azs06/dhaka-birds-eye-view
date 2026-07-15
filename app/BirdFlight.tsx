@@ -41,7 +41,9 @@ type DhakaLandmark = AreaLandmark & {
     | "ahsan-manzil"
     | "shaheed-minar"
     | "curzon-hall"
-    | "baitul-mukarram";
+    | "baitul-mukarram"
+    | "bangladesh-bank"
+    | "airport";
 };
 type ProceduralDistrictTile = { group: THREE.Group; centerX: number; centerZ: number; colliders: BuildingCollider[] };
 type WaterRibbon = THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
@@ -245,7 +247,6 @@ const AREA_LANDMARKS: AreaLandmark[] = [
   { label: "Mirpur 10", shortLabel: "MR10", lat: 23.80673, lon: 90.36856, altitude: 64, heading: Math.PI / 2, minimap: true },
   { label: "Pallabi", shortLabel: "PLB", lat: 23.82535, lon: 90.36631, altitude: 56, heading: 0 },
   { label: "Dhaka Cantonment", shortLabel: "CAN", lat: 23.82191, lon: 90.39112, altitude: 62, heading: 0 },
-  { label: "Hazrat Shahjalal Airport", shortLabel: "DAC", lat: 23.84343, lon: 90.39784, altitude: 42, heading: 0, minimap: true },
   { label: "Uttara", shortLabel: "UTR", lat: 23.87532, lon: 90.39679, altitude: 68, heading: 0, minimap: true },
   { label: "Purbachal", shortLabel: "PUR", lat: 23.83611, lon: 90.49069, altitude: 48, heading: -Math.PI / 2, minimap: true },
   { label: "Demra", shortLabel: "DEM", lat: 23.72432, lon: 90.49338, altitude: 48, heading: -Math.PI / 2, minimap: true },
@@ -279,6 +280,22 @@ const DHAKA_LANDMARKS: DhakaLandmark[] = [
   { label: "Central Shaheed Minar", shortLabel: "CSM", lat: 23.7272114, lon: 90.3966368, altitude: 16, heading: Math.PI, kind: "shaheed-minar" },
   { label: "Curzon Hall", shortLabel: "CRZ", lat: 23.7273259, lon: 90.4019331, altitude: 28, heading: Math.PI, kind: "curzon-hall" },
   { label: "Baitul Mukarram", shortLabel: "BTM", lat: 23.7294725, lon: 90.412617, altitude: 72, heading: Math.PI, kind: "baitul-mukarram", minimap: true },
+  { label: "Bangladesh Bank Tower", shortLabel: "BBT", lat: 23.72596, lon: 90.42228, altitude: 108, heading: -Math.PI / 2, kind: "bangladesh-bank", minimap: true },
+  { label: "Hazrat Shahjalal Airport", shortLabel: "DAC", lat: 23.84343, lon: 90.39784, altitude: 48, heading: -0.56, kind: "airport", minimap: true },
+];
+
+const MRT_LINE_6_STATIONS = [
+  { label: "Uttara North", lat: 23.87125, lon: 90.39818 },
+  { label: "Pallabi", lat: 23.82556, lon: 90.36681 },
+  { label: "Mirpur 10", lat: 23.80674, lon: 90.36863 },
+  { label: "Agargaon", lat: 23.77824, lon: 90.38018 },
+  { label: "Bijoy Sarani", lat: 23.76486, lon: 90.38508 },
+  { label: "Farmgate", lat: 23.75875, lon: 90.38776 },
+  { label: "Karwan Bazar", lat: 23.75135, lon: 90.39364 },
+  { label: "Shahbagh", lat: 23.73838, lon: 90.39594 },
+  { label: "Dhaka University", lat: 23.7324, lon: 90.39811 },
+  { label: "Secretariat", lat: 23.73124, lon: 90.40873 },
+  { label: "Motijheel", lat: 23.72743, lon: 90.42048 },
 ];
 
 function coordinatesToWorld(lat: number, lon: number) {
@@ -1622,7 +1639,19 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
 
   for (const landmark of DHAKA_LANDMARKS) {
     const footprint = footprintByKind.get(landmark.kind);
-    if (!footprint) continue;
+    if (!footprint) {
+      const center = coordinatesToWorld(landmark.lat, landmark.lon);
+      const halfWidth = landmark.kind === "airport" ? 150 : 28;
+      const halfDepth = landmark.kind === "airport" ? 85 : 22;
+      allBounds.set(landmark.kind, {
+        minX: center.x - halfWidth,
+        maxX: center.x + halfWidth,
+        minZ: center.y - halfDepth,
+        maxZ: center.y + halfDepth,
+        top: landmark.altitude,
+      });
+      continue;
+    }
     let minX = Infinity;
     let maxX = -Infinity;
     let minZ = Infinity;
@@ -1787,6 +1816,35 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
       cap.castShadow = true;
       group.add(cap);
       addCylinder(group, 0.45, 0.8, 5, [minaretX, 82.5, minaretZ], accent, 8);
+    } else if (landmark.kind === "bangladesh-bank") {
+      addBox(group, [width * 0.9, 8, depth * 0.92], [0, 4, 0], concrete);
+      addBox(group, [width * 0.72, top - 12, depth * 0.66], [0, top * 0.5 + 2, 0], darkGlass);
+      for (let y = 14; y < top - 4; y += 7) {
+        addBox(group, [width * 0.75, 0.8, depth * 0.69], [0, y, 0], paleConcrete);
+      }
+      addBox(group, [width * 0.82, 4, depth * 0.75], [0, top + 2, 0], roof);
+      addBox(group, [5, 14, 5], [0, top + 10, 0], accent);
+    } else if (landmark.kind === "airport") {
+      const runway = addBox(group, [72, 1.2, 3_200], [0, 0.35, 0], recess);
+      runway.receiveShadow = true;
+      addBox(group, [11, 0.4, 3_040], [0, 1.05, 0], paleConcrete);
+      for (let offset = -1_430; offset <= 1_430; offset += 105) {
+        addBox(group, [2.2, 0.45, 42], [0, 1.35, offset], whiteStone);
+      }
+      for (const side of [-1, 1]) {
+        addBox(group, [18, 0.55, 3_100], [side * 94, 0.8, 0], concrete);
+        for (let offset = -1_500; offset <= 1_500; offset += 60) {
+          addCylinder(group, 0.8, 0.8, 0.5, [side * 38, 1.45, offset], side < 0 ? monumentRed : accent, 8);
+        }
+      }
+      addBox(group, [290, 16, 72], [-245, 8, -300], paleConcrete);
+      addBox(group, [230, 8, 126], [-250, 4, -205], concrete);
+      for (const gate of [-120, -40, 40, 120]) {
+        addBox(group, [13, 5, 55], [-202 + gate, 5, -120], glass);
+      }
+      addCylinder(group, 11, 15, 52, [-390, 26, -245], concrete, 12);
+      addCylinder(group, 20, 15, 8, [-390, 55, -245], darkGlass, 12);
+      addCylinder(group, 1.2, 1.2, 13, [-390, 65.5, -245], accent, 8);
     }
 
     const bounds = allBounds.get(landmark.kind)!;
@@ -1806,6 +1864,63 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
     perches.push(perch);
     addLabel(perch.position.clone().add(new THREE.Vector3(0, 24, 0)), landmark.label);
   }
+
+  const metroRoot = new THREE.Group();
+  metroRoot.name = "Dhaka MRT Line 6";
+  const metroPoints = MRT_LINE_6_STATIONS.map((station) => {
+    const world = coordinatesToWorld(station.lat, station.lon);
+    return new THREE.Vector3(world.x, 18, world.y);
+  });
+  const metroCurve = new THREE.CatmullRomCurve3(metroPoints, false, "centripetal", 0.28);
+  const guidewayMaterial = new THREE.MeshStandardMaterial({ color: 0xc9c7bd, roughness: 0.78 });
+  const metroRed = new THREE.MeshStandardMaterial({ color: 0xb72e36, roughness: 0.58, metalness: 0.18 });
+  const metroGlass = new THREE.MeshPhysicalMaterial({ color: 0x365d68, roughness: 0.2, metalness: 0.18, clearcoat: 0.5 });
+  const guideway = new THREE.Mesh(new THREE.TubeGeometry(metroCurve, 360, 4.8, 8, false), guidewayMaterial);
+  guideway.name = "MRT Line 6 elevated guideway";
+  guideway.castShadow = true;
+  guideway.receiveShadow = true;
+  metroRoot.add(guideway);
+  for (const offset of [-2.5, 2.5]) {
+    const railCurve = new THREE.CatmullRomCurve3(metroPoints.map((point) => point.clone().add(new THREE.Vector3(0, 4.2, offset))), false, "centripetal", 0.28);
+    metroRoot.add(new THREE.Mesh(new THREE.TubeGeometry(railCurve, 360, 0.42, 5, false), metroRed));
+  }
+  for (let index = 1; index < 78; index++) {
+    const point = metroCurve.getPointAt(index / 78);
+    const pierHeight = Math.max(5, point.y - 0.5);
+    addCylinder(metroRoot, 2.4, 3.8, pierHeight, [point.x, pierHeight / 2, point.z], concrete, 8);
+    addBox(metroRoot, [18, 2.2, 4.2], [point.x, point.y - 3, point.z], concrete);
+  }
+  MRT_LINE_6_STATIONS.forEach((station, index) => {
+    const point = metroPoints[index];
+    const tangent = metroCurve.getTangentAt(index / (MRT_LINE_6_STATIONS.length - 1));
+    const stationGroup = new THREE.Group();
+    stationGroup.name = `${station.label} MRT station`;
+    stationGroup.position.copy(point);
+    stationGroup.rotation.y = Math.atan2(-tangent.z, tangent.x);
+    addBox(stationGroup, [96, 5, 22], [0, 1.5, 0], concrete);
+    addBox(stationGroup, [82, 1.4, 25], [0, 16, 0], metroRed);
+    for (const side of [-1, 1]) {
+      for (const x of [-34, -12, 12, 34]) addBox(stationGroup, [2, 14, 2], [x, 9, side * 9], darkGlass);
+    }
+    metroRoot.add(stationGroup);
+    addLabel(point.clone().add(new THREE.Vector3(0, 42, 0)), `${station.label} · MRT 6`);
+  });
+  const metroTrain = new THREE.Group();
+  metroTrain.name = "MRT Line 6 train";
+  for (const z of [-27, 0, 27]) {
+    addBox(metroTrain, [12, 9, 24], [0, 5, z], whiteStone);
+    addBox(metroTrain, [12.3, 3.2, 20], [0, 6.5, z], metroGlass);
+    addBox(metroTrain, [12.5, 1.1, 24.5], [0, 10, z], metroRed);
+  }
+  metroRoot.add(metroTrain);
+  scene.userData.metroRailUpdate = (time: number) => {
+    const progress = (time * 0.012) % 1;
+    const point = metroCurve.getPointAt(progress);
+    const tangent = metroCurve.getTangentAt(progress);
+    metroTrain.position.copy(point).add(new THREE.Vector3(0, 5, 0));
+    metroTrain.lookAt(point.clone().add(tangent));
+  };
+  root.add(metroRoot);
 
   scene.add(root);
   scene.userData.landmarkColliders = colliders;
@@ -2999,6 +3114,8 @@ export function BirdFlight() {
       }
 
       if (!pausedRef.current) {
+        const updateMetroRail = scene.userData.metroRailUpdate as ((time: number) => void) | undefined;
+        updateMetroRail?.(elapsedTime);
         const trafficSimulation = scene.userData.trafficSimulation as TrafficSimulation | null | undefined;
         trafficSimulation?.update(dt, frameMs);
         for (const cloud of scene.userData.clouds as THREE.Group[]) {
