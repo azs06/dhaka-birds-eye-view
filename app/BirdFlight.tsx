@@ -1115,7 +1115,17 @@ function addImmediateCityMass(scene: THREE.Scene, roads: OsmMapData["roads"]) {
       }
       if (random() > 0.36 + intensity * 0.42) continue;
       if (landmarkClearings.some((landmark) => Math.hypot(buildingX - landmark.x, buildingZ - landmark.z) < landmark.radius)) continue;
-      const nearbyRoads = roadGrid.get(roadKey(Math.floor(buildingX / roadCellSize), Math.floor(buildingZ / roadCellSize))) ?? [];
+      const width = 22 + random() * 30;
+      const depth = 20 + random() * 32;
+      const buildingRadius = Math.hypot(width, depth) / 2;
+      const roadCellX = Math.floor(buildingX / roadCellSize);
+      const roadCellZ = Math.floor(buildingZ / roadCellSize);
+      const nearbyRoads: Array<{ x1: number; z1: number; x2: number; z2: number; radius: number }> = [];
+      for (let offsetX = -1; offsetX <= 1; offsetX++) {
+        for (let offsetZ = -1; offsetZ <= 1; offsetZ++) {
+          nearbyRoads.push(...(roadGrid.get(roadKey(roadCellX + offsetX, roadCellZ + offsetZ)) ?? []));
+        }
+      }
       if (nearbyRoads.some((segment) => distanceToSegmentSquared(
         buildingX,
         buildingZ,
@@ -1123,10 +1133,8 @@ function addImmediateCityMass(scene: THREE.Scene, roads: OsmMapData["roads"]) {
         segment.z1,
         segment.x2,
         segment.z2,
-      ) < segment.radius ** 2)) continue;
+      ) < (segment.radius + buildingRadius + 6) ** 2)) continue;
 
-      const width = 22 + random() * 30;
-      const depth = 20 + random() * 32;
       const height = 10 + random() * 30 + intensity * (24 + random() * 44);
       const bucket = height > 52 ? 2 : height > 30 ? 1 : 0;
       position.set(buildingX, height / 2 + 0.9, buildingZ);
