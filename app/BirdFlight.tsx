@@ -458,7 +458,7 @@ function createWeatherVfx(
 
     const isNight = !weather.isDay;
     const background = isNight
-      ? mode === "storm" ? 0x07131b : mode === "rain" ? 0x0b1b22 : 0x081824
+      ? mode === "storm" ? 0x10212a : mode === "rain" ? 0x142933 : 0x17313d
       : mode === "fog" ? 0xa4ad91
         : mode === "storm" ? 0x49656b
           : mode === "rain" ? 0x6f9695
@@ -486,16 +486,16 @@ function createWeatherVfx(
     skyUniforms.mieDirectionalG.value = 0.82;
 
     renderer.toneMappingExposure = isNight
-      ? 0.7
+      ? 1
       : mode === "clear" ? 1.02
         : mode === "cloudy" ? 0.9
           : 0.76;
-    hemisphere.intensity = isNight ? 1.08 : 1.8 - cloudAmount * 0.82;
-    hemisphere.color.set(isNight ? 0x6f8eaa : mode === "rain" || mode === "storm" ? 0xb8d0d4 : 0xe8f3ee);
-    hemisphere.groundColor.set(isNight ? 0x26342d : 0x5d6c58);
-    sun.intensity = isNight ? 0.52 : mode === "clear" ? 3.35 : mode === "cloudy" ? 1.25 : 0.46;
+    hemisphere.intensity = isNight ? 1.42 : 1.8 - cloudAmount * 0.82;
+    hemisphere.color.set(isNight ? 0x91abc1 : mode === "rain" || mode === "storm" ? 0xb8d0d4 : 0xe8f3ee);
+    hemisphere.groundColor.set(isNight ? 0x34483d : 0x5d6c58);
+    sun.intensity = isNight ? 0.82 : mode === "clear" ? 3.35 : mode === "cloudy" ? 1.25 : 0.46;
     sun.color.set(isNight ? 0x8ba8c7 : mode === "rain" || mode === "storm" ? 0xd6e5e5 : 0xffd6a0);
-    skyFill.intensity = isNight ? 0.68 : 0.48 + cloudAmount * 0.22;
+    skyFill.intensity = isNight ? 0.92 : 0.48 + cloudAmount * 0.22;
     skyFill.color.set(isNight ? 0x45617b : 0x9bc8d2);
 
     const clouds = scene.userData.clouds as THREE.Group[] | undefined ?? [];
@@ -605,11 +605,11 @@ async function addProceduralDistrictTiles(
   const unitBox = new THREE.BoxGeometry(1, 1, 1);
   const roofBox = new THREE.BoxGeometry(1, 1, 1);
   const treeGeometry = new THREE.IcosahedronGeometry(1, 1);
-  const materials = [0xb7aa90, 0xa8b2aa, 0xbb8069].map(
-    (color) => new THREE.MeshToonMaterial({ color }),
+  const materials = [0xc9bda3, 0xaeb8ae, 0xb9826d].map(
+    (color) => new THREE.MeshStandardMaterial({ color, roughness: 0.9, metalness: 0.01 }),
   );
-  const roofMaterial = new THREE.MeshToonMaterial({ color: 0x4e6257 });
-  const treeMaterial = new THREE.MeshToonMaterial({ color: 0x416f49 });
+  const roofMaterial = new THREE.MeshStandardMaterial({ color: 0x59655f, roughness: 0.94 });
+  const treeMaterial = new THREE.MeshStandardMaterial({ color: 0x4b7452, roughness: 1 });
   const majorRoads = new Set(["motorway", "trunk", "primary", "secondary"]);
   type AvoidanceSegment = { x1: number; z1: number; x2: number; z2: number; radius: number };
   const spatialCellSize = 180;
@@ -1339,7 +1339,7 @@ function addCity(scene: THREE.Scene) {
 
   const ground = new THREE.Mesh(
     new THREE.PlaneGeometry(26_000, 26_000),
-    new THREE.MeshToonMaterial({ color: 0x9bab78, map: makeGroundTexture() }),
+    new THREE.MeshStandardMaterial({ color: 0x87937a, map: makeGroundTexture(), roughness: 1 }),
   );
   ground.rotation.x = -Math.PI / 2;
   ground.receiveShadow = true;
@@ -1360,7 +1360,7 @@ function addCity(scene: THREE.Scene) {
   waterShape.closePath();
   const water = new THREE.Mesh(
     new THREE.ShapeGeometry(waterShape),
-    new THREE.MeshToonMaterial({ color: 0x3b9fac }),
+    new THREE.MeshPhysicalMaterial({ color: 0x397f88, roughness: 0.24, metalness: 0.02, clearcoat: 0.7, clearcoatRoughness: 0.28 }),
   );
   water.rotation.x = -Math.PI / 2;
   water.position.y = 0.45;
@@ -1387,9 +1387,9 @@ function addCity(scene: THREE.Scene) {
   }
   scene.userData.waterRibbons = waterRibbons;
 
-  const roadMaterial = new THREE.MeshToonMaterial({ color: 0x283f3a });
-  const lineMaterial = new THREE.MeshToonMaterial({ color: 0xf3d15f });
-  const concreteMaterial = new THREE.MeshToonMaterial({ color: 0xc9b98f });
+  const roadMaterial = new THREE.MeshStandardMaterial({ color: 0x303a38, roughness: 0.97 });
+  const lineMaterial = new THREE.MeshStandardMaterial({ color: 0xd9c277, roughness: 0.9 });
+  const concreteMaterial = new THREE.MeshStandardMaterial({ color: 0xb9af99, roughness: 0.96 });
   const curbGeometry = new THREE.BoxGeometry(2200, 1.4, 3.2);
   for (const z of [-285, 285]) {
     const road = new THREE.Mesh(new THREE.BoxGeometry(2200, 1.1, 38), roadMaterial);
@@ -1478,11 +1478,11 @@ function addCity(scene: THREE.Scene) {
     fallbackWorld.add(bridge);
   }
 
-  const buildingColors = [0xe5c986, 0xd99a73, 0xc95d57, 0x89a67c, 0xf0ddae, 0xa97062];
-  const buildingMaterials = buildingColors.map((color) => new THREE.MeshToonMaterial({ color }));
-  const facadeMaterials = buildingColors.map((color) => new THREE.MeshToonMaterial({ color: new THREE.Color(color).multiplyScalar(0.78) }));
-  const rooftopMaterial = new THREE.MeshToonMaterial({ color: 0x53675d });
-  const tankMaterials = [0x355c53, 0xb37a55, 0x327f86].map((color) => new THREE.MeshToonMaterial({ color }));
+  const buildingColors = [0xd2c5aa, 0xb7bdb4, 0xc3977f, 0x9eaa9d, 0xd8d3c2, 0xaa826d];
+  const buildingMaterials = buildingColors.map((color) => new THREE.MeshStandardMaterial({ color, roughness: 0.88, metalness: 0.01 }));
+  const facadeMaterials = buildingColors.map((color) => new THREE.MeshStandardMaterial({ color: new THREE.Color(color).multiplyScalar(0.82), roughness: 0.93 }));
+  const rooftopMaterial = new THREE.MeshStandardMaterial({ color: 0x5d6863, roughness: 0.94 });
+  const tankMaterials = [0x526a64, 0xa27c66, 0x557d83].map((color) => new THREE.MeshStandardMaterial({ color, roughness: 0.82 }));
   const windows: Array<{ position: THREE.Vector3; quaternion: THREE.Quaternion; scale: THREE.Vector3; color: THREE.Color }> = [];
   const local = new THREE.Vector3();
   const world = new THREE.Vector3();
@@ -1594,8 +1594,8 @@ function addCity(scene: THREE.Scene) {
 
   const treeTrunk = new THREE.CylinderGeometry(1.1, 1.65, 7.5, 6);
   const treeTop = new THREE.IcosahedronGeometry(1, 1);
-  const trunkMaterial = new THREE.MeshToonMaterial({ color: 0x6f4c3f });
-  const leafMaterials = [0x315f43, 0x4b784a, 0x7b8c4b].map((color) => new THREE.MeshToonMaterial({ color }));
+  const trunkMaterial = new THREE.MeshStandardMaterial({ color: 0x6f5547, roughness: 1 });
+  const leafMaterials = [0x3f684a, 0x567b53, 0x7d8e59].map((color) => new THREE.MeshStandardMaterial({ color, roughness: 1 }));
   const trunkMatrices: THREE.Matrix4[] = [];
   const foliageMatrices: THREE.Matrix4[][] = [[], [], []];
   const treeQuaternion = new THREE.Quaternion();
@@ -1769,6 +1769,57 @@ function polygonShape(points: MapPoint[]) {
   return shape;
 }
 
+function addFolkBuildingPosters(scene: THREE.Scene) {
+  const sites = [
+    { building: "Bashundhara City", label: "ঢাকা", depth: 34, y: 61, asset: "/assets/dhaka-river-folk-poster.webp" },
+    { building: "BRAC Centre", label: "নদীর শহর", depth: 24, y: 43, asset: "/assets/dhaka-rickshaw-folk-poster.webp" },
+    { building: "Four Points by Sheraton", label: "ঢাকা", depth: 27, y: 52, asset: "/assets/dhaka-river-folk-poster.webp" },
+    { building: "Police Plaza Concord", label: "নদীর শহর", depth: 29, y: 45, asset: "/assets/dhaka-rickshaw-folk-poster.webp" },
+  ];
+  const landmarkRoot = scene.userData.landmarkRoot as THREE.Group | undefined;
+  if (!landmarkRoot) return;
+  const backingGeometry = new THREE.BoxGeometry(20, 30, 0.8);
+  const backingMaterial = new THREE.MeshStandardMaterial({ color: 0x273934, roughness: 0.78, metalness: 0.08 });
+
+  const loader = new THREE.TextureLoader();
+  for (const site of sites) {
+    const building = landmarkRoot.getObjectByName(site.building);
+    if (!building) continue;
+    const backing = new THREE.Mesh(backingGeometry, backingMaterial);
+    backing.position.set(0, site.y, -site.depth - 0.35);
+    backing.castShadow = true;
+    building.add(backing);
+    loader.load(site.asset, (source) => {
+      source.colorSpace = THREE.SRGBColorSpace;
+      const canvas = document.createElement("canvas");
+      canvas.width = 512;
+      canvas.height = 768;
+      const context = canvas.getContext("2d");
+      if (!context) return;
+      context.drawImage(source.image, 0, 0, canvas.width, canvas.height);
+      context.fillStyle = "#203a35";
+      context.textAlign = "center";
+      context.textBaseline = "middle";
+      context.font = "700 48px sans-serif";
+      context.fillText(site.label, canvas.width / 2, 663);
+      const texture = new THREE.CanvasTexture(canvas);
+      texture.colorSpace = THREE.SRGBColorSpace;
+      texture.minFilter = THREE.LinearMipmapLinearFilter;
+      texture.anisotropy = 4;
+      const poster = new THREE.Mesh(
+        new THREE.PlaneGeometry(18.5, 28),
+        new THREE.MeshBasicMaterial({ map: texture, toneMapped: false }),
+      );
+      poster.name = `${site.building} folk poster`;
+      poster.position.set(0, site.y, -site.depth - 0.78);
+      poster.rotation.y = Math.PI;
+      poster.renderOrder = 2;
+      building.add(poster);
+      source.dispose();
+    });
+  }
+}
+
 async function mergeIntoMeshBatches(
   group: THREE.Group,
   geometries: THREE.BufferGeometry[],
@@ -1871,7 +1922,7 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
     }
     await yieldIfNeeded(isCancelled);
   }
-  const waterMaterial = new THREE.MeshToonMaterial({ color: 0x2f9eaa });
+  const waterMaterial = new THREE.MeshPhysicalMaterial({ color: 0x397f88, roughness: 0.24, metalness: 0.02, clearcoat: 0.7, clearcoatRoughness: 0.28 });
   await mergeIntoMeshBatches(root, waterAreas, waterMaterial, "OSM water areas", isCancelled);
   await mergeIntoMeshBatches(root, waterLines, waterMaterial, "OSM waterways", isCancelled);
 
@@ -1893,7 +1944,7 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
     }
     await yieldIfNeeded(isCancelled);
   }
-  const roadMaterials = [0x293f3b, 0x3d5148, 0x60705b].map((color) => new THREE.MeshToonMaterial({ color }));
+  const roadMaterials = [0x303a38, 0x46514d, 0x69716a].map((color) => new THREE.MeshStandardMaterial({ color, roughness: 0.96 }));
   for (let index = 0; index < roadBuckets.length; index++) {
     await mergeIntoMeshBatches(root, roadBuckets[index], roadMaterials[index], `OSM roads ${index}`, isCancelled);
   }
@@ -1925,8 +1976,8 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
     });
     await yieldIfNeeded(isCancelled);
   }
-  const buildingMaterials = [0xe3c982, 0xd38a68, 0xc75858, 0x83a17a].map(
-    (color) => new THREE.MeshToonMaterial({ color }),
+  const buildingMaterials = [0xcdbfa5, 0xb5bdb3, 0xc28f76, 0x9daa9d].map(
+    (color) => new THREE.MeshStandardMaterial({ color, roughness: 0.88, metalness: 0.01 }),
   );
   // Nearby procedural towers and landmarks provide local shadows. Keeping the
   // four citywide merged meshes out of the shadow pass avoids redrawing the
@@ -2058,8 +2109,8 @@ export function BirdFlight() {
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFShadowMap;
     renderer.outputColorSpace = THREE.SRGBColorSpace;
-    renderer.toneMapping = THREE.NeutralToneMapping;
-    renderer.toneMappingExposure = 1.02;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1;
     mount.appendChild(renderer.domElement);
 
     const sky = new Sky();
@@ -2092,6 +2143,7 @@ export function BirdFlight() {
     scene.add(skyFill);
 
     const buildingColliders = addCity(scene);
+    addFolkBuildingPosters(scene);
     let buildingColliderGrid = buildColliderGrid(buildingColliders);
     const mapRequestStartedAt = performance.now();
     void fetch("/api/osm")
@@ -2597,10 +2649,6 @@ export function BirdFlight() {
       <div ref={mountRef} className="world" aria-label="Interactive hybrid flight map of central Dhaka" />
       <div className="atmosphere" data-weather={weather.mode} data-daylight={weather.isDay ? "day" : "night"} />
       <div ref={flightEffectRef} className="flight-dynamics" aria-hidden="true" />
-      <div className={`folk-poster-frame${flying ? " compact" : ""}`} aria-hidden="true">
-        <i className="folk-corner top-left" /><i className="folk-corner top-right" />
-        <i className="folk-corner bottom-left" /><i className="folk-corner bottom-right" />
-      </div>
       {!flying && <div className="folk-river-seal" aria-hidden="true">
         <span className="folk-sun" />
         <strong lang="bn">নদীর শহর</strong>

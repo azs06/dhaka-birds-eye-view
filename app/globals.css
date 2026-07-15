@@ -8,7 +8,7 @@ button { font: inherit; }
 .flight-shell { position: fixed; inset: 0; width: 100%; height: 100%; overflow: hidden; isolation: isolate; }
 .flight-shell::before { content: ""; position: absolute; z-index: 2; inset: 0; pointer-events: none; opacity: .26; background-image: repeating-linear-gradient(7deg, rgba(69,53,34,.08) 0 1px, transparent 1px 5px), radial-gradient(circle at 22% 31%, rgba(255,240,196,.2), transparent 28%), radial-gradient(circle at 76% 68%, rgba(124,50,59,.12), transparent 24%); mix-blend-mode: soft-light; }
 .world { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
-.world canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: block; filter: saturate(1.12) contrast(1.045); }
+.world canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: block; filter: saturate(1.02) contrast(1.015); }
 .atmosphere { position: absolute; inset: 0; pointer-events: none; background: radial-gradient(circle at 18% 48%, rgba(12, 30, 22, .28), transparent 46%), linear-gradient(180deg, rgba(255,221,169,.14), transparent 30%, transparent 72%, rgba(20,42,34,.2)); mix-blend-mode: multiply; transition: background .9s ease, opacity .9s ease; }
 .atmosphere[data-weather="cloudy"] { background: linear-gradient(180deg, rgba(41,59,61,.17), rgba(24,43,40,.07) 54%, rgba(17,35,30,.24)); }
 .atmosphere[data-weather="rain"], .atmosphere[data-weather="drizzle"] { background: radial-gradient(circle at 50% 42%, transparent 22%, rgba(15,35,40,.2) 100%), linear-gradient(180deg, rgba(21,42,48,.25), rgba(8,27,29,.3)); }
@@ -147,13 +147,6 @@ kbd { display: inline-grid; min-width: 23px; height: 22px; padding: 0 5px; place
 .map-source.live i { background: var(--acid); box-shadow: 0 0 5px rgba(216,255,98,.55); }
 .map-source a { color: inherit; text-decoration: none; }
 .map-source a:hover { color: var(--cream); text-decoration: underline; }
-.folk-poster-frame { position: absolute; z-index: 3; inset: 15px; border: 2px solid rgba(255,240,196,.74); box-shadow: inset 0 0 0 4px rgba(189,63,112,.3); pointer-events: none; transition: opacity .5s ease; }
-.folk-poster-frame.compact { opacity: .28; }
-.folk-corner { position: absolute; width: 78px; height: 78px; border: 3px solid var(--cream); border-radius: 50%; background: radial-gradient(circle, var(--ink) 0 10%, var(--acid) 11% 22%, transparent 23%), repeating-conic-gradient(from 0deg, var(--vermillion) 0 12deg, var(--acid) 12deg 24deg, var(--magenta) 24deg 36deg, var(--river) 36deg 48deg); box-shadow: 0 0 0 4px var(--ink); clip-path: polygon(50% 0, 61% 22%, 79% 7%, 78% 31%, 100% 28%, 82% 48%, 100% 63%, 74% 66%, 79% 92%, 58% 76%, 48% 100%, 39% 77%, 14% 93%, 21% 66%, 0 62%, 18% 48%, 0 28%, 24% 31%, 21% 7%, 40% 22%); }
-.folk-corner.top-left { left: -14px; top: -14px; }
-.folk-corner.top-right { right: -14px; top: -14px; transform: rotate(90deg); }
-.folk-corner.bottom-left { left: -14px; bottom: -14px; transform: rotate(-90deg); }
-.folk-corner.bottom-right { right: -14px; bottom: -14px; transform: rotate(180deg); }
 .folk-river-seal { position: absolute; z-index: 3; right: clamp(90px, 10vw, 180px); top: 52%; width: 236px; height: 236px; display: grid; align-content: center; justify-items: center; padding: 40px 25px 30px; transform: translateY(-50%) rotate(3deg); border: 6px solid var(--cream); border-radius: 50%; color: var(--cream); background: radial-gradient(circle at 50% 34%, var(--acid) 0 13%, transparent 13.5%), repeating-conic-gradient(from 7deg, var(--vermillion) 0 12deg, #bf4770 12deg 24deg, #f0aa47 24deg 36deg, #2f9eaa 36deg 48deg); box-shadow: 0 0 0 7px var(--ink), 12px 14px 0 rgba(29,53,48,.56); text-align: center; pointer-events: none; overflow: hidden; }
 .folk-river-seal::before { content: ""; position: absolute; inset: 21px; border: 4px double var(--cream); border-radius: inherit; background: rgba(29,53,48,.8); }
 .folk-river-seal strong, .folk-river-seal small { position: relative; z-index: 2; }
@@ -180,8 +173,6 @@ kbd { display: inline-grid; min-width: 23px; height: 22px; padding: 0 5px; place
   .flight-mode { left: 20px; top: 88px; }
   .minimap { width: 110px; height: 110px; }
   .folk-river-seal { display: none; }
-  .folk-poster-frame { inset: 8px; }
-  .folk-corner { width: 52px; height: 52px; }
   .radio-panel, .radio-panel.in-flight { top: 130px; right: 14px; left: 14px; width: auto; max-height: calc(100vh - 146px); overflow-y: auto; padding: 20px; }
   .radio-now-playing, .radio-now-playing.in-flight { top: 130px; right: auto; left: 20px; }
   .radio-display { margin-top: 15px; }

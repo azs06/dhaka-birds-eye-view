@@ -46,9 +46,15 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(component, /fetch\("\/api\/osm"\)/);
   assert.match(component, /addOpenStreetMapWorld/);
   assert.match(component, /MeshToonMaterial/);
-  assert.match(component, /folk-poster-frame/);
+  assert.doesNotMatch(component, /folk-poster-frame/);
+  assert.match(component, /addFolkBuildingPosters/);
+  assert.match(component, /poster\.name = `\$\{site\.building\} folk poster`/);
+  assert.match(component, /dhaka-river-folk-poster\.webp/);
+  assert.match(component, /dhaka-rickshaw-folk-poster\.webp/);
   assert.match(component, /নদীর শহর/);
   assert.match(component, /GREATER DHAKA &amp; ITS RIVERS/);
+  await access(new URL("../public/assets/dhaka-river-folk-poster.webp", import.meta.url));
+  await access(new URL("../public/assets/dhaka-rickshaw-folk-poster.webp", import.meta.url));
   for (const area of ["Moghbazar", "Tejgaon I\/A", "Niketan", "Gulshan 1", "Badda Link Road", "Rampura Bridge"]) {
     assert.match(component, new RegExp(area));
   }
