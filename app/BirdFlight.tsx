@@ -891,25 +891,175 @@ function distanceToSegmentSquared(x: number, z: number, x1: number, z1: number, 
 
 function proceduralFallbackRoads(): OsmMapData["roads"] {
   const roads: OsmMapData["roads"] = [];
-  const spacing = 460;
   let id = -10_000;
-  for (let z = -FLIGHT_EXTENT.z; z <= FLIGHT_EXTENT.z; z += spacing) {
+
+  const corridor = (
+    name: string,
+    kind: string,
+    coordinates: Array<[number, number]>,
+  ) => {
     roads.push({
       id: id--,
-      points: [[-FLIGHT_EXTENT.x, z], [FLIGHT_EXTENT.x, z]],
-      kind: Math.abs(Math.round(z / spacing)) % 4 === 0 ? "primary" : "residential",
+      points: coordinates.map(([lat, lon]) => {
+        const world = coordinatesToWorld(lat, lon);
+        return [world.x, world.y] as MapPoint;
+      }),
+      kind,
+      name,
+    });
+  };
+
+  corridor("Airport Road", "trunk", [
+    [23.861, 90.400], [23.843, 90.399], [23.821, 90.401], [23.793, 90.400],
+    [23.779, 90.399], [23.765, 90.391], [23.758, 90.387], [23.738, 90.396],
+    [23.728, 90.407], [23.713, 90.421],
+  ]);
+  corridor("Begum Rokeya Sarani", "primary", [
+    [23.835, 90.367], [23.825, 90.367], [23.807, 90.369], [23.791, 90.374],
+    [23.778, 90.380], [23.765, 90.385], [23.758, 90.388],
+  ]);
+  corridor("Mirpur Road", "primary", [
+    [23.801, 90.354], [23.781, 90.354], [23.765, 90.359], [23.754, 90.370],
+    [23.744, 90.382], [23.733, 90.385], [23.720, 90.389],
+  ]);
+  corridor("Pragati Sarani", "primary", [
+    [23.823, 90.421], [23.803, 90.421], [23.783, 90.422], [23.772, 90.422],
+    [23.760, 90.421], [23.750, 90.415], [23.741, 90.411],
+  ]);
+  corridor("Purbachal Expressway", "trunk", [
+    [23.825, 90.414], [23.824, 90.430], [23.827, 90.448], [23.833, 90.469],
+    [23.838, 90.491],
+  ]);
+  corridor("Motijheel Arterial", "primary", [
+    [23.737, 90.396], [23.733, 90.407], [23.728, 90.416], [23.727, 90.422],
+    [23.729, 90.437], [23.732, 90.456], [23.724, 90.481],
+  ]);
+  corridor("Dhaka–Chattogram Highway", "trunk", [
+    [23.731, 90.407], [23.720, 90.422], [23.711, 90.435], [23.700, 90.451],
+    [23.686, 90.468], [23.671, 90.488],
+  ]);
+
+  const spacing = 520;
+  const localRandom = seededRandom(7_129);
+  for (let baseZ = -FLIGHT_EXTENT.z; baseZ <= FLIGHT_EXTENT.z; baseZ += spacing) {
+    const points: MapPoint[] = [];
+    const phase = localRandom() * Math.PI * 2;
+    for (let x = -FLIGHT_EXTENT.x; x <= FLIGHT_EXTENT.x; x += 720) {
+      points.push([x, baseZ + Math.sin(x * 0.0012 + phase) * 46 + (localRandom() - 0.5) * 34]);
+    }
+    roads.push({
+      id: id--,
+      points,
+      kind: "residential",
       name: null,
     });
   }
-  for (let x = -FLIGHT_EXTENT.x; x <= FLIGHT_EXTENT.x; x += spacing) {
-    roads.push({
-      id: id--,
-      points: [[x, -FLIGHT_EXTENT.z], [x, FLIGHT_EXTENT.z]],
-      kind: Math.abs(Math.round(x / spacing)) % 4 === 0 ? "primary" : "residential",
-      name: null,
-    });
+  for (let baseX = -FLIGHT_EXTENT.x; baseX <= FLIGHT_EXTENT.x; baseX += spacing) {
+    const points: MapPoint[] = [];
+    const phase = localRandom() * Math.PI * 2;
+    for (let z = -FLIGHT_EXTENT.z; z <= FLIGHT_EXTENT.z; z += 720) {
+      points.push([baseX + Math.sin(z * 0.00115 + phase) * 42 + (localRandom() - 0.5) * 32, z]);
+    }
+    roads.push({ id: id--, points, kind: "residential", name: null });
   }
   return roads;
+}
+
+async function addRoadNetworkMeshes(
+  parent: THREE.Object3D,
+  roads: OsmMapData["roads"],
+  name: string,
+  isCancelled: () => boolean,
+) {
+  const majorRoads = new Set(["motorway", "trunk", "primary", "secondary"]);
+  const localRoads = new Set(["tertiary", "residential", "unclassified", "service"]);
+  const surfaces: THREE.BufferGeometry[][] = [[], [], []];
+  const shoulders: THREE.BufferGeometry[] = [];
+  const centerLines: THREE.BufferGeometry[] = [];
+  const edgeLines: THREE.BufferGeometry[] = [];
+
+  const segmentBox = (
+    x1: number,
+    z1: number,
+    x2: number,
+    z2: number,
+    width: number,
+    height: number,
+    y: number,
+    lateralOffset = 0,
+  ) => {
+    const dx = x2 - x1;
+    const dz = z2 - z1;
+    const length = Math.hypot(dx, dz);
+    if (length < 1) return null;
+    const normalX = -dz / length;
+    const normalZ = dx / length;
+    const geometry = new THREE.BoxGeometry(length + 0.8, height, width);
+    geometry.rotateY(-Math.atan2(dz, dx));
+    geometry.translate(
+      (x1 + x2) / 2 + normalX * lateralOffset,
+      y,
+      (z1 + z2) / 2 + normalZ * lateralOffset,
+    );
+    return geometry;
+  };
+
+  for (const road of roads) {
+    const bucket = majorRoads.has(road.kind) ? 0 : localRoads.has(road.kind) ? 1 : 2;
+    const width = bucket === 0 ? (road.kind === "motorway" || road.kind === "trunk" ? 17 : 14) : bucket === 1 ? 7.5 : 4.2;
+    for (let index = 1; index < road.points.length; index++) {
+      const [x1, z1] = road.points[index - 1];
+      const [x2, z2] = road.points[index];
+      const surface = segmentBox(x1, z1, x2, z2, width, 0.34, 0.98);
+      if (!surface) continue;
+      surfaces[bucket].push(surface);
+      const shoulder = segmentBox(x1, z1, x2, z2, width + (bucket === 0 ? 5.5 : 2.4), 0.24, 0.78);
+      if (shoulder) shoulders.push(shoulder);
+      if (bucket === 0) {
+        const center = segmentBox(x1, z1, x2, z2, 0.58, 0.09, 1.19);
+        if (center) centerLines.push(center);
+        const edgeOffset = width / 2 - 0.85;
+        const leftEdge = segmentBox(x1, z1, x2, z2, 0.32, 0.075, 1.18, -edgeOffset);
+        const rightEdge = segmentBox(x1, z1, x2, z2, 0.32, 0.075, 1.18, edgeOffset);
+        if (leftEdge) edgeLines.push(leftEdge);
+        if (rightEdge) edgeLines.push(rightEdge);
+      }
+    }
+  }
+
+  await mergeIntoMeshBatches(
+    parent,
+    shoulders,
+    new THREE.MeshStandardMaterial({ color: 0xaaa28f, roughness: 0.98 }),
+    `${name} shoulders`,
+    isCancelled,
+    false,
+    280,
+  );
+  const roadMaterials = [0x2f3735, 0x464f4b, 0x626b65].map(
+    (color) => new THREE.MeshStandardMaterial({ color, roughness: 0.95 }),
+  );
+  for (let index = 0; index < surfaces.length; index++) {
+    await mergeIntoMeshBatches(parent, surfaces[index], roadMaterials[index], `${name} roads ${index}`, isCancelled, false, 280);
+  }
+  await mergeIntoMeshBatches(
+    parent,
+    centerLines,
+    new THREE.MeshStandardMaterial({ color: 0xe0bd62, roughness: 0.86 }),
+    `${name} center lines`,
+    isCancelled,
+    false,
+    320,
+  );
+  await mergeIntoMeshBatches(
+    parent,
+    edgeLines,
+    new THREE.MeshStandardMaterial({ color: 0xe5deca, roughness: 0.9 }),
+    `${name} edge lines`,
+    isCancelled,
+    false,
+    320,
+  );
 }
 
 async function addProceduralDistrictTiles(
@@ -962,31 +1112,11 @@ async function addProceduralDistrictTiles(
     await yieldIfNeeded(isCancelled);
   }
   if (data.roads.length === 0 && !scene.userData.proceduralRoadFallback) {
-    const roadGeometries: THREE.BufferGeometry[] = [];
-    for (const road of roads) {
-      const width = majorRoads.has(road.kind) ? 13 : 6.5;
-      for (let index = 1; index < road.points.length; index++) {
-        const [x1, z1] = road.points[index - 1];
-        const [x2, z2] = road.points[index];
-        const length = Math.hypot(x2 - x1, z2 - z1);
-        const geometry = new THREE.BoxGeometry(length, 0.32, width);
-        geometry.rotateY(-Math.atan2(z2 - z1, x2 - x1));
-        geometry.translate((x1 + x2) / 2, 0.92, (z1 + z2) / 2);
-        roadGeometries.push(geometry);
-      }
-    }
-    const mergedRoads = mergeGeometries(roadGeometries, false);
-    roadGeometries.forEach((geometry) => geometry.dispose());
-    if (mergedRoads) {
-      const roadFallback = new THREE.Mesh(
-        mergedRoads,
-        new THREE.MeshStandardMaterial({ color: 0x46514d, roughness: 0.97 }),
-      );
-      roadFallback.name = "Greater Dhaka procedural road fallback";
-      roadFallback.receiveShadow = true;
-      scene.add(roadFallback);
-      scene.userData.proceduralRoadFallback = roadFallback;
-    }
+    const roadFallback = new THREE.Group();
+    roadFallback.name = "Greater Dhaka procedural road fallback";
+    await addRoadNetworkMeshes(roadFallback, roads, "Fallback", isCancelled);
+    scene.add(roadFallback);
+    scene.userData.proceduralRoadFallback = roadFallback;
   }
   for (const feature of data.water) {
     if (feature.area && feature.points.length >= 3) {
@@ -2544,28 +2674,7 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
   await mergeIntoMeshBatches(root, waterAreas, waterMaterial, "OSM water areas", isCancelled);
   await mergeIntoMeshBatches(root, waterLines, waterMaterial, "OSM waterways", isCancelled);
 
-  const roadBuckets: THREE.BufferGeometry[][] = [[], [], []];
-  const majorRoads = new Set(["motorway", "trunk", "primary", "secondary"]);
-  const localRoads = new Set(["tertiary", "residential", "unclassified", "service"]);
-  for (const road of data.roads) {
-    const bucket = majorRoads.has(road.kind) ? 0 : localRoads.has(road.kind) ? 1 : 2;
-    const width = bucket === 0 ? 13 : bucket === 1 ? 7 : 3.8;
-    for (let index = 1; index < road.points.length; index++) {
-      const [x1, z1] = road.points[index - 1];
-      const [x2, z2] = road.points[index];
-      const length = Math.hypot(x2 - x1, z2 - z1);
-      if (length < 1) continue;
-      const geometry = new THREE.BoxGeometry(length + 0.6, 0.3, width);
-      geometry.rotateY(-Math.atan2(z2 - z1, x2 - x1));
-      geometry.translate((x1 + x2) / 2, 0.92, (z1 + z2) / 2);
-      roadBuckets[bucket].push(geometry);
-    }
-    await yieldIfNeeded(isCancelled);
-  }
-  const roadMaterials = [0x303a38, 0x46514d, 0x69716a].map((color) => new THREE.MeshStandardMaterial({ color, roughness: 0.96 }));
-  for (let index = 0; index < roadBuckets.length; index++) {
-    await mergeIntoMeshBatches(root, roadBuckets[index], roadMaterials[index], `OSM roads ${index}`, isCancelled);
-  }
+  await addRoadNetworkMeshes(root, data.roads, "OSM", isCancelled);
 
   const buildingBuckets: THREE.BufferGeometry[][] = [[], [], [], []];
   const landmarkOsmIds = scene.userData.landmarkOsmIds as Set<number> | undefined;
