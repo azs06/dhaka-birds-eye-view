@@ -115,6 +115,8 @@ const BRAKE_SPEED = 18;
 const CRUISE_SPEED = 44;
 const BOOST_SPEED = 78;
 const DEFAULT_FLIGHT_ALTITUDE = 130;
+const FLIGHT_AMBIENCE_GAIN = 0.28;
+const RADIO_DUCKED_AMBIENCE_GAIN = 0.24;
 const DEFAULT_WEATHER: WeatherSnapshot = {
   source: "Open-Meteo",
   fetchedAt: "",
@@ -830,7 +832,7 @@ function createFlightAudio(): FlightAudio {
   let enabled = false;
   let radioDucking = false;
 
-  const activeGain = () => radioDucking ? 0.14 : 0.28;
+  const activeGain = () => radioDucking ? RADIO_DUCKED_AMBIENCE_GAIN : FLIGHT_AMBIENCE_GAIN;
 
   const makeNoise = (audioContext: AudioContext, duration: number, softness = 0.76) => {
     const buffer = audioContext.createBuffer(1, audioContext.sampleRate * duration, audioContext.sampleRate);
