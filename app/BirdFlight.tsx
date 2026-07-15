@@ -3131,6 +3131,11 @@ export function BirdFlight() {
     };
 
     const keys = new Set<string>();
+    const flightControlCodes = new Set([
+      "KeyA", "KeyD", "KeyQ", "KeyS", "KeyW",
+      "ArrowDown", "ArrowLeft", "ArrowRight", "ArrowUp",
+      "ControlLeft", "ControlRight", "ShiftLeft", "ShiftRight",
+    ]);
     let yaw = 0.15;
     let yawRate = 0;
     let pitch = 0;
@@ -3169,7 +3174,9 @@ export function BirdFlight() {
     let nearestPerch: Perch | null = null;
 
     const onKeyDown = (event: KeyboardEvent) => {
-      keys.add(event.code);
+      if (flightControlCodes.has(event.code) && flyingRef.current && !pausedRef.current) {
+        keys.add(event.code);
+      }
       if (["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.code)) event.preventDefault();
       if (event.code === "KeyC" && !event.repeat) {
         focusLandmark(null);
@@ -3226,8 +3233,14 @@ export function BirdFlight() {
       }
     };
     const onKeyUp = (event: KeyboardEvent) => keys.delete(event.code);
+    const clearFlightControls = () => keys.clear();
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== "visible") clearFlightControls();
+    };
     window.addEventListener("keydown", onKeyDown, { passive: false });
     window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", clearFlightControls);
+    document.addEventListener("visibilitychange", onVisibilityChange);
 
     const onResize = () => {
       camera.aspect = mount.clientWidth / mount.clientHeight;
@@ -3251,6 +3264,7 @@ export function BirdFlight() {
       }
       elapsedTime += dt;
       const active = flyingRef.current && !pausedRef.current && !restingRef.current;
+      if (!active) clearFlightControls();
       const turn = active ? (keys.has("KeyA") || keys.has("ArrowLeft") ? 1 : 0) - (keys.has("KeyD") || keys.has("ArrowRight") ? 1 : 0) : 0;
       const climb = active ? (keys.has("KeyW") || keys.has("ArrowUp") ? 1 : 0) - (keys.has("KeyS") || keys.has("ArrowDown") ? 1 : 0) : 0;
       const boost = active && (keys.has("ShiftLeft") || keys.has("ShiftRight"));
@@ -3520,6 +3534,8 @@ export function BirdFlight() {
       cancelAnimationFrame(animation);
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", clearFlightControls);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       window.removeEventListener("resize", onResize);
       renderer.dispose();
       scene.traverse((object) => {
