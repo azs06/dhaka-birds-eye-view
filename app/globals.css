@@ -69,6 +69,8 @@ kbd { display: inline-grid; min-width: 23px; height: 22px; padding: 0 5px; place
 .map-road { position: absolute; width: 180px; height: 2px; left: -15px; top: 48px; background: rgba(241,235,216,.4); transform: rotate(-9deg); }
 .map-area { position: absolute; z-index: 2; transform: translate(-50%, -50%); color: rgba(241,235,216,.82); font: 600 5px/1 var(--font-mono); letter-spacing: .05em; text-shadow: 0 1px 3px rgba(8,25,21,.9); }
 .map-area::before { content: ""; display: block; width: 3px; height: 3px; margin: 0 auto 2px; border-radius: 50%; background: var(--acid); box-shadow: 0 0 4px rgba(216,255,98,.8); }
+.map-river { position: absolute; z-index: 3; transform: translate(-50%, -50%); color: #a7f2f4; font: 700 5px/1 var(--font-mono); letter-spacing: .06em; text-shadow: 0 1px 4px rgba(3,22,27,.95); }
+.map-river::before { content: ""; display: block; width: 8px; height: 2px; margin: 0 auto 2px; border-radius: 999px; background: #62cbd0; box-shadow: 0 0 5px rgba(98,203,208,.8); }
 .map-bird { position: absolute; z-index: 4; left: 50%; top: 50%; width: 16px; height: 16px; color: var(--acid); font-size: 12px; transform-origin: center; }
 .camera-chip { position: absolute; z-index: 3; right: 29px; top: 112px; display: flex; align-items: center; gap: 11px; padding: 9px 9px 9px 13px; background: var(--glass); font: 500 9px var(--font-mono); letter-spacing: .09em; }
 .camera-chip span { opacity: .5; }

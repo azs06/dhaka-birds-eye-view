@@ -1,9 +1,9 @@
 const CENTER = { lat: 23.7715, lon: 90.4165 };
 const BOUNDS = {
-  south: 23.724,
-  west: 90.366,
-  north: 23.825,
-  east: 90.464,
+  south: 23.668,
+  west: 90.306,
+  north: 23.876,
+  east: 90.528,
 };
 // Dense building footprints stay focused on the original Greater Hatirjheel
 // core. The expanded tiles still fetch roads, water, and named/tall buildings;
@@ -334,12 +334,15 @@ async function fetchOverpass(tiles: Array<{ bounds: number[]; query: string }>) 
 
 export async function GET() {
   const middleLatitude = (BOUNDS.south + BOUNDS.north) / 2;
-  const middleLongitude = (BOUNDS.west + BOUNDS.east) / 2;
+  const firstLongitude = BOUNDS.west + (BOUNDS.east - BOUNDS.west) / 3;
+  const secondLongitude = BOUNDS.west + (BOUNDS.east - BOUNDS.west) * 2 / 3;
   const tileBounds = [
-    [BOUNDS.south, BOUNDS.west, middleLatitude, middleLongitude],
-    [BOUNDS.south, middleLongitude, middleLatitude, BOUNDS.east],
-    [middleLatitude, BOUNDS.west, BOUNDS.north, middleLongitude],
-    [middleLatitude, middleLongitude, BOUNDS.north, BOUNDS.east],
+    [BOUNDS.south, BOUNDS.west, middleLatitude, firstLongitude],
+    [BOUNDS.south, firstLongitude, middleLatitude, secondLongitude],
+    [BOUNDS.south, secondLongitude, middleLatitude, BOUNDS.east],
+    [middleLatitude, BOUNDS.west, BOUNDS.north, firstLongitude],
+    [middleLatitude, firstLongitude, BOUNDS.north, secondLongitude],
+    [middleLatitude, secondLongitude, BOUNDS.north, BOUNDS.east],
   ];
   const tiles = tileBounds.map((bounds) => {
     const bbox = bounds.join(",");
@@ -362,6 +365,7 @@ export async function GET() {
       relation["building"]["name"]["type"="multipolygon"](${bbox});
       way["highway"~"^(motorway|trunk|primary|secondary|tertiary|residential|unclassified)$"](${bbox});
       way["natural"="water"](${bbox});
+      relation["natural"="water"]["type"="multipolygon"](${bbox});
       way["waterway"](${bbox});
     );out geom qt;` };
   });
@@ -413,14 +417,20 @@ export async function GET() {
       })
       .filter((road): road is NonNullable<typeof road> => Boolean(road)));
 
-    const water = elements
-      .filter((element) => element.type === "way" && (element.tags?.natural === "water" || element.tags?.waterway))
-      .map((element) => {
-        const points = cleanGeometry(element, element.tags?.natural === "water");
-        if (!points) return null;
-        return { id: element.id, points, area: element.tags?.natural === "water" };
-      })
-      .filter((feature): feature is NonNullable<typeof feature> => Boolean(feature));
+    const water = elements.flatMap((element) => {
+      const isWaterArea = element.tags?.natural === "water";
+      if (!isWaterArea && !element.tags?.waterway) return [];
+      const geometries = element.type === "relation" && isWaterArea
+        ? relationOuterRings(element)
+        : element.type === "way"
+          ? [cleanGeometry(element, isWaterArea)].filter((points): points is WorldPoint[] => Boolean(points))
+          : [];
+      return geometries.map((points, ringIndex) => ({
+        id: element.type === "relation" ? RELATION_ID_OFFSET + element.id * 100 + ringIndex : element.id,
+        points,
+        area: isWaterArea,
+      }));
+    });
 
     return Response.json({
       source: "OpenStreetMap",

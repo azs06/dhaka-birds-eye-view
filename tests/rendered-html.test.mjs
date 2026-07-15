@@ -45,7 +45,7 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(component, /Hatirjheel Lake/);
   assert.match(component, /fetch\("\/api\/osm"\)/);
   assert.match(component, /addOpenStreetMapWorld/);
-  assert.match(component, /HATIRJHEEL &amp; CENTRAL DHAKA/);
+  assert.match(component, /GREATER DHAKA &amp; ITS RIVERS/);
   for (const area of ["Moghbazar", "Tejgaon I\/A", "Niketan", "Gulshan 1", "Badda Link Road", "Rampura Bridge"]) {
     assert.match(component, new RegExp(area));
   }
@@ -54,6 +54,12 @@ test("keeps the finished flight experience free of starter preview code", async 
   }
   for (const area of ["Dhanmondi", "Farmgate", "Shahbagh", "Ramna", "Motijheel", "Khilgaon", "Agargaon", "Baridhara", "Kuril", "Bashundhara R/A"]) {
     assert.match(component, new RegExp(area));
+  }
+  for (const area of ["Mohammadpur", "Mirpur 10", "Uttara", "Purbachal", "Demra", "Old Dhaka", "Lalbagh", "Keraniganj"]) {
+    assert.match(component, new RegExp(area));
+  }
+  for (const waterway of ["Buriganga River", "Turag River", "Tongi Khal", "Balu River", "Shitalakshya River"]) {
+    assert.match(component, new RegExp(waterway));
   }
   assert.match(component, /addProceduralDistrictTiles/);
   assert.match(component, /proceduralDistrictTiles/);
@@ -74,8 +80,8 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(component, /verticalSpeed = Math\.min\(22, verticalSpeed \+ 8\.5\)/);
   assert.match(component, /Ctrl \/ Q/);
   assert.match(component, /VERT M\/S/);
-  assert.match(mapRoute, /south: 23\.724/);
-  assert.match(mapRoute, /north: 23\.825/);
+  assert.match(mapRoute, /south: 23\.668/);
+  assert.match(mapRoute, /north: 23\.876/);
   assert.match(mapRoute, /CORE_BUILDING_BOUNDS/);
   assert.match(mapRoute, /BUILDING_CELL_SIZE = 250/);
   assert.match(mapRoute, /BUILDINGS_PER_CELL = 16/);
@@ -84,6 +90,7 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(mapRoute, /spatiallySampleRoads/);
   assert.match(mapRoute, /way\["building"\]/);
   assert.match(mapRoute, /relation\["building"\]\["type"="multipolygon"\]/);
+  assert.match(mapRoute, /relation\["natural"="water"\]\["type"="multipolygon"\]/);
   assert.match(component, /selectSpatiallyEvenBuildings/);
   assert.match(component, /buildColliderGrid/);
   for (const landmark of ["Holy Rosary Church", "Bashundhara City", "Hatirjheel Amphitheatre", "Police Plaza Concord", "BRAC Centre", "Four Points by Sheraton"]) {

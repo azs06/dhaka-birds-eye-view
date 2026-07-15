@@ -19,6 +19,13 @@ type AreaLandmark = {
   heading: number;
   minimap?: boolean;
 };
+type WaterLandmark = {
+  label: string;
+  shortLabel: string;
+  lat: number;
+  lon: number;
+  minimap?: boolean;
+};
 type DhakaLandmark = AreaLandmark & { kind: "church" | "mall" | "amphitheatre" | "twin-tower" | "brac" | "hotel" };
 type ProceduralDistrictTile = { group: THREE.Group; centerX: number; centerZ: number; colliders: BuildingCollider[] };
 type WaterRibbon = THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
@@ -84,7 +91,7 @@ type WeatherVfx = {
 
 const clamp = THREE.MathUtils.clamp;
 const MAP_CENTER = { lat: 23.7715, lon: 90.4165 };
-const FLIGHT_EXTENT = { x: 5_300, z: 5_800 };
+const FLIGHT_EXTENT = { x: 11_200, z: 11_500 };
 const COLLISION_CELL_SIZE = 180;
 const BRAKE_SPEED = 18;
 const CRUISE_SPEED = 44;
@@ -132,6 +139,31 @@ const AREA_LANDMARKS: AreaLandmark[] = [
   { label: "Baridhara", shortLabel: "BRD", lat: 23.80336, lon: 90.42026, altitude: 76, heading: 0, minimap: true },
   { label: "Kuril", shortLabel: "KRL", lat: 23.81814, lon: 90.42213, altitude: 68, heading: 0 },
   { label: "Bashundhara R/A", shortLabel: "BSR", lat: 23.81893, lon: 90.43682, altitude: 82, heading: -Math.PI / 2, minimap: true },
+  { label: "Mohammadpur", shortLabel: "MHP", lat: 23.76541, lon: 90.35872, altitude: 54, heading: Math.PI / 2, minimap: true },
+  { label: "Mirpur 1", shortLabel: "MR1", lat: 23.79807, lon: 90.35318, altitude: 58, heading: Math.PI / 2 },
+  { label: "Mirpur 10", shortLabel: "MR10", lat: 23.80673, lon: 90.36856, altitude: 64, heading: Math.PI / 2, minimap: true },
+  { label: "Pallabi", shortLabel: "PLB", lat: 23.82535, lon: 90.36631, altitude: 56, heading: 0 },
+  { label: "Dhaka Cantonment", shortLabel: "CAN", lat: 23.82191, lon: 90.39112, altitude: 62, heading: 0 },
+  { label: "Hazrat Shahjalal Airport", shortLabel: "DAC", lat: 23.84343, lon: 90.39784, altitude: 42, heading: 0, minimap: true },
+  { label: "Uttara", shortLabel: "UTR", lat: 23.87532, lon: 90.39679, altitude: 68, heading: 0, minimap: true },
+  { label: "Purbachal", shortLabel: "PUR", lat: 23.83611, lon: 90.49069, altitude: 48, heading: -Math.PI / 2, minimap: true },
+  { label: "Demra", shortLabel: "DEM", lat: 23.72432, lon: 90.49338, altitude: 48, heading: -Math.PI / 2, minimap: true },
+  { label: "Jatrabari", shortLabel: "JAT", lat: 23.71052, lon: 90.43491, altitude: 58, heading: Math.PI },
+  { label: "Old Dhaka", shortLabel: "OLD", lat: 23.71039, lon: 90.40744, altitude: 54, heading: Math.PI, minimap: true },
+  { label: "Lalbagh", shortLabel: "LAL", lat: 23.71825, lon: 90.38809, altitude: 46, heading: Math.PI, minimap: true },
+  { label: "Sadarghat", shortLabel: "SDR", lat: 23.70615, lon: 90.41124, altitude: 38, heading: Math.PI },
+  { label: "Kamrangirchar", shortLabel: "KAM", lat: 23.71603, lon: 90.36531, altitude: 42, heading: Math.PI },
+  { label: "Keraniganj", shortLabel: "KER", lat: 23.69796, lon: 90.38509, altitude: 44, heading: Math.PI, minimap: true },
+];
+const WATER_LANDMARKS: WaterLandmark[] = [
+  { label: "Hatirjheel Lake", shortLabel: "HJL", lat: 23.77051, lon: 90.41635, minimap: true },
+  { label: "Dhanmondi Lake", shortLabel: "DHL", lat: 23.74608, lon: 90.37506 },
+  { label: "Gulshan Lake", shortLabel: "GLL", lat: 23.79308, lon: 90.41693 },
+  { label: "Buriganga River", shortLabel: "BUR", lat: 23.70396, lon: 90.39277, minimap: true },
+  { label: "Turag River", shortLabel: "TUR", lat: 23.80258, lon: 90.33982, minimap: true },
+  { label: "Tongi Khal", shortLabel: "TON", lat: 23.87524, lon: 90.38187, minimap: true },
+  { label: "Balu River", shortLabel: "BAL", lat: 23.78091, lon: 90.49525, minimap: true },
+  { label: "Shitalakshya River", shortLabel: "SHI", lat: 23.71674, lon: 90.51805, minimap: true },
 ];
 const DHAKA_LANDMARKS: DhakaLandmark[] = [
   { label: "Holy Rosary Church", shortLabel: "HRC", lat: 23.759151, lon: 90.392216, altitude: 61, heading: Math.PI / 2, kind: "church" },
@@ -1058,7 +1090,7 @@ function addCity(scene: THREE.Scene) {
   };
 
   const ground = new THREE.Mesh(
-    new THREE.PlaneGeometry(12_500, 12_500),
+    new THREE.PlaneGeometry(26_000, 26_000),
     new THREE.MeshStandardMaterial({ color: 0x87937a, map: makeGroundTexture(), roughness: 1 }),
   );
   ground.rotation.x = -Math.PI / 2;
@@ -1371,7 +1403,7 @@ function addCity(scene: THREE.Scene) {
     };
   }).concat(landmarkWorld.perches);
   const areaLabels = new THREE.Group();
-  areaLabels.name = "Greater Hatirjheel area labels";
+  areaLabels.name = "Greater Dhaka area labels";
   for (const [index, landmark] of AREA_LANDMARKS.entries()) {
     const canvas = document.createElement("canvas");
     canvas.width = 384;
@@ -1397,6 +1429,34 @@ function addCity(scene: THREE.Scene) {
     areaLabels.add(label);
   }
   scene.add(areaLabels);
+  const waterLabels = new THREE.Group();
+  waterLabels.name = "Greater Dhaka waterway labels";
+  for (const landmark of WATER_LANDMARKS) {
+    const canvas = document.createElement("canvas");
+    canvas.width = 448;
+    canvas.height = 80;
+    const context = canvas.getContext("2d");
+    if (!context) continue;
+    context.fillStyle = "rgba(8, 38, 43, 0.82)";
+    context.fillRect(2, 2, 444, 76);
+    context.strokeStyle = "rgba(132, 232, 239, 0.8)";
+    context.lineWidth = 3;
+    context.strokeRect(3.5, 3.5, 441, 73);
+    context.fillStyle = "#a7f2f4";
+    context.font = "600 27px monospace";
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+    context.fillText(landmark.label.toUpperCase(), 224, 41);
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.minFilter = THREE.LinearFilter;
+    const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false, toneMapped: false }));
+    const world = coordinatesToWorld(landmark.lat, landmark.lon);
+    label.position.set(world.x, 20, world.y);
+    label.scale.set(86, 15, 1);
+    waterLabels.add(label);
+  }
+  scene.add(waterLabels);
   const perchMaterial = new THREE.MeshStandardMaterial({ color: 0x4a5552, roughness: 0.72, metalness: 0.2 });
   const perchMarkers: THREE.Group[] = [];
   for (const [index, perch] of perches.entries()) {
@@ -1697,7 +1757,7 @@ export function BirdFlight() {
     mount.appendChild(renderer.domElement);
 
     const sky = new Sky();
-    sky.scale.setScalar(9000);
+    sky.scale.setScalar(15_000);
     const skyUniforms = sky.material.uniforms;
     skyUniforms.turbidity.value = 5.8;
     skyUniforms.rayleigh.value = 3.15;
@@ -2232,7 +2292,7 @@ export function BirdFlight() {
           <div><strong>BIRD&apos;S EYE VIEW</strong><small>DHAKA · EARLY FLIGHT</small></div>
         </div>}
         {!flying && <div className="header-center">
-          <div className="location"><span className="pulse" /> HATIRJHEEL &amp; CENTRAL DHAKA <b>23.7715° N</b></div>
+          <div className="location"><span className="pulse" /> GREATER DHAKA &amp; ITS RIVERS <b>23.7715° N</b></div>
           <div className={`weather-chip ${weatherStatus}`} title={`Feels like ${Math.round(weather.apparentTemperature)}°C · Wind ${Math.round(weather.windSpeed)} km/h`}>
             <strong>{weatherIcon(weather.mode, weather.isDay)}</strong>
             <span>{weather.label}</span>
@@ -2267,7 +2327,7 @@ export function BirdFlight() {
           </section>
           <div className="flight-mode"><i /><span ref={flightModeRef} data-mode="cruise">CRUISE</span></div>
 
-          <div className="minimap" aria-label="Mini map of the expanded central Dhaka flight grid">
+          <div className="minimap" aria-label="Mini map of the Greater Dhaka river basin flight grid">
             <span className="north">N</span>
             <div className="map-water one" /><div className="map-water two" />
             <div className="map-road" />
@@ -2285,8 +2345,22 @@ export function BirdFlight() {
                 >{landmark.shortLabel}</span>
               );
             })}
+            {WATER_LANDMARKS.filter((landmark) => landmark.minimap).map((landmark) => {
+              const world = coordinatesToWorld(landmark.lat, landmark.lon);
+              return (
+                <span
+                  key={landmark.label}
+                  className="map-river"
+                  title={landmark.label}
+                  style={{
+                    left: `${50 + clamp(world.x / FLIGHT_EXTENT.x, -1, 1) * 43}%`,
+                    top: `${50 + clamp(world.y / FLIGHT_EXTENT.z, -1, 1) * 43}%`,
+                  }}
+                >{landmark.shortLabel}</span>
+              );
+            })}
             <div ref={mapBirdRef} className="map-bird">▲</div>
-            <small>DHAKA FLIGHT GRID</small>
+            <small>GREATER DHAKA BASIN</small>
           </div>
 
           <div className="camera-chip"><span>CAMERA</span>{cameraMode}<kbd>C</kbd></div>
@@ -2305,7 +2379,7 @@ export function BirdFlight() {
         <section className="welcome-panel">
           <span className="eyebrow">A CITY FROM ANOTHER POINT OF VIEW</span>
           <h1>The sky<br />belongs to you.</h1>
-          <p>Take wing across Dhaka—from Dhanmondi, Shahbagh, and Motijheel to Banani, Baridhara, Kuril, and Bashundhara—with Hatirjheel at its heart.</p>
+          <p>Cross Greater Dhaka from Uttara and Mirpur to Old Dhaka, Keraniganj, Demra, and Purbachal—following the Buriganga, Turag, Balu, Shitalakshya, and the lakes between them.</p>
           <button onClick={beginFlight} className="primary-button"><span>BEGIN FLIGHT</span><b>→</b></button>
           <div className="quick-controls"><span><kbd>WASD</kbd> STEER</span><span><kbd>CTRL / Q</kbd> BRAKE</span><span><kbd>SPACE</kbd> FLAP</span><span><kbd>C</kbd> CAMERA</span></div>
         </section>
