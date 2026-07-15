@@ -828,7 +828,9 @@ function createFlightAudio(): FlightAudio {
   let windFilter: BiquadFilterNode | null = null;
   let waterGain: GainNode | null = null;
   let cityGain: GainNode | null = null;
+  let natureGain: GainNode | null = null;
   let flapBuffer: AudioBuffer | null = null;
+  let birdCallTimer = 0;
   let enabled = false;
   let radioDucking = false;
 
@@ -844,6 +846,42 @@ function createFlightAudio(): FlightAudio {
       data[i] = previous;
     }
     return buffer;
+  };
+
+  const playBirdCall = () => {
+    if (!enabled || !context || !natureGain) return;
+    const now = context.currentTime;
+    const panner = context.createStereoPanner();
+    panner.pan.value = Math.random() * 1.5 - 0.75;
+    panner.connect(natureGain);
+    const basePitch = 1_650 + Math.random() * 720;
+    const notes = Math.random() > 0.5 ? 3 : 2;
+
+    for (let index = 0; index < notes; index++) {
+      const startAt = now + index * (0.105 + Math.random() * 0.035);
+      const oscillator = context.createOscillator();
+      oscillator.type = "sine";
+      oscillator.frequency.setValueAtTime(basePitch * (1 + index * 0.055), startAt);
+      oscillator.frequency.exponentialRampToValueAtTime(basePitch * (1.28 + index * 0.035), startAt + 0.075);
+      oscillator.frequency.exponentialRampToValueAtTime(basePitch * 0.94, startAt + 0.19);
+      const envelope = context.createGain();
+      envelope.gain.setValueAtTime(0.0001, startAt);
+      envelope.gain.exponentialRampToValueAtTime(0.018 + Math.random() * 0.008, startAt + 0.025);
+      envelope.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.2);
+      oscillator.connect(envelope).connect(panner);
+      if (index === notes - 1) oscillator.onended = () => panner.disconnect();
+      oscillator.start(startAt);
+      oscillator.stop(startAt + 0.22);
+    }
+  };
+
+  const scheduleBirdCall = (delay = 1_800 + Math.random() * 2_800) => {
+    if (birdCallTimer) window.clearTimeout(birdCallTimer);
+    birdCallTimer = window.setTimeout(() => {
+      birdCallTimer = 0;
+      playBirdCall();
+      if (enabled) scheduleBirdCall(4_200 + Math.random() * 6_800);
+    }, delay);
   };
 
   const initialize = () => {
@@ -885,6 +923,46 @@ function createFlightAudio(): FlightAudio {
     cityTone.connect(cityGain).connect(master);
     cityTone.start();
 
+    natureGain = context.createGain();
+    natureGain.gain.value = 0.72;
+    natureGain.connect(master);
+
+    const leafRustle = context.createBufferSource();
+    leafRustle.buffer = makeNoise(context, 7.4, 0.955);
+    leafRustle.loop = true;
+    const rustleFilter = context.createBiquadFilter();
+    rustleFilter.type = "bandpass";
+    rustleFilter.frequency.value = 2_350;
+    rustleFilter.Q.value = 0.32;
+    const rustleGain = context.createGain();
+    rustleGain.gain.value = 0.018;
+    leafRustle.connect(rustleFilter).connect(rustleGain).connect(natureGain);
+    leafRustle.start();
+
+    const breezePulse = context.createOscillator();
+    breezePulse.type = "sine";
+    breezePulse.frequency.value = 0.11;
+    const breezeDepth = context.createGain();
+    breezeDepth.gain.value = 0.009;
+    breezePulse.connect(breezeDepth).connect(rustleGain.gain);
+    breezePulse.start();
+
+    const crickets = context.createOscillator();
+    crickets.type = "sine";
+    crickets.frequency.value = 3_780;
+    const cricketGain = context.createGain();
+    cricketGain.gain.value = 0.0017;
+    crickets.connect(cricketGain).connect(natureGain);
+    crickets.start();
+
+    const cricketPulse = context.createOscillator();
+    cricketPulse.type = "square";
+    cricketPulse.frequency.value = 7.2;
+    const cricketDepth = context.createGain();
+    cricketDepth.gain.value = 0.0014;
+    cricketPulse.connect(cricketDepth).connect(cricketGain.gain);
+    cricketPulse.start();
+
     const breath = context.createOscillator();
     breath.type = "sine";
     breath.frequency.value = 0.08;
@@ -903,6 +981,7 @@ function createFlightAudio(): FlightAudio {
     enabled = true;
     master.gain.cancelScheduledValues(context.currentTime);
     master.gain.setTargetAtTime(activeGain(), context.currentTime, 0.45);
+    scheduleBirdCall();
     return true;
   };
 
@@ -914,6 +993,11 @@ function createFlightAudio(): FlightAudio {
       enabled = !enabled;
       master.gain.cancelScheduledValues(context.currentTime);
       master.gain.setTargetAtTime(enabled ? activeGain() : 0, context.currentTime, 0.18);
+      if (enabled) scheduleBirdCall();
+      else if (birdCallTimer) {
+        window.clearTimeout(birdCallTimer);
+        birdCallTimer = 0;
+      }
       return enabled;
     },
     pause() {
@@ -943,13 +1027,14 @@ function createFlightAudio(): FlightAudio {
       source.start(now);
     },
     setFlight(speed, altitude) {
-      if (!context || !windGain || !windFilter || !waterGain || !cityGain) return;
+      if (!context || !windGain || !windFilter || !waterGain || !cityGain || !natureGain) return;
       const now = context.currentTime;
       windGain.gain.setTargetAtTime(0.025 + speed / 1450, now, 0.35);
       windFilter.frequency.setTargetAtTime(420 + speed * 7.5, now, 0.4);
       const nearness = clamp(1 - altitude / 190, 0, 1);
       waterGain.gain.setTargetAtTime(0.004 + nearness * 0.021, now, 0.7);
       cityGain.gain.setTargetAtTime(0.004 + nearness * 0.008, now, 0.8);
+      natureGain.gain.setTargetAtTime(0.42 + nearness * 0.58, now, 1.1);
     },
     setRadioDucking(active) {
       radioDucking = active;
@@ -959,6 +1044,8 @@ function createFlightAudio(): FlightAudio {
     },
     dispose() {
       enabled = false;
+      if (birdCallTimer) window.clearTimeout(birdCallTimer);
+      birdCallTimer = 0;
       context?.close();
       context = null;
     },
@@ -2671,7 +2758,13 @@ export function BirdFlight() {
           </div>
         </div>}
         <div className="top-actions">
-          <button className={`icon-button sound-button${soundOn ? " active" : ""}`} onClick={toggleSound} aria-label={soundOn ? "Mute ambient sound" : "Enable ambient sound"}>♫</button>
+          <button
+            className={`icon-button sound-button${soundOn ? " active" : ""}`}
+            onClick={toggleSound}
+            aria-label={soundOn ? "Mute nature ambience" : "Enable nature ambience"}
+            aria-pressed={soundOn}
+            title={soundOn ? "Nature ambience on" : "Turn on nature ambience"}
+          >♫</button>
           <button
             className={`icon-button radio-toggle${radioStatus === "playing" || radioStatus === "buffering" ? " active" : ""}`}
             onClick={() => setRadioOpen((value) => !value)}
@@ -2842,6 +2935,7 @@ export function BirdFlight() {
             <div><dt>C</dt><dd>Switch camera</dd></div>
             <div><dt>P / Esc</dt><dd>Pause / resume flight</dd></div>
             <div><dt>E</dt><dd>Land / take off at a perch</dd></div>
+            <div><dt>♫</dt><dd>Nature ambience: birds, leaves, water, and insects</dd></div>
             <div><dt>R / [ ]</dt><dd>Radio power / tune station</dd></div>
           </dl>
         </section>

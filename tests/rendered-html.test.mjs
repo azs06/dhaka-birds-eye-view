@@ -75,6 +75,10 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(component, /createAirflowVfx/);
   assert.match(component, /createWeatherVfx/);
   assert.match(component, /createFlightRadio/);
+  assert.match(component, /scheduleBirdCall/);
+  assert.match(component, /const leafRustle/);
+  assert.match(component, /const crickets/);
+  assert.match(component, /Nature ambience: birds, leaves, water, and insects/);
   assert.match(component, /RADIO_DUCKED_AMBIENCE_GAIN = 0\.24/);
   assert.match(component, /Monsoon Drift/);
   for (const station of ["Radio Foorti", "Dhaka FM", "Jago FM"]) {
