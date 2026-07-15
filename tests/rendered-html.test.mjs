@@ -77,6 +77,7 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(mapRoute, /CORE_BUILDING_BOUNDS/);
   assert.match(mapRoute, /BUILDING_CELL_SIZE = 250/);
   assert.match(mapRoute, /BUILDINGS_PER_CELL = 16/);
+  assert.match(mapRoute, /MAX_BUILDINGS = 3_600/);
   assert.match(mapRoute, /spatiallySampleBuildings/);
   assert.match(mapRoute, /spatiallySampleRoads/);
   assert.match(mapRoute, /way\["building"\]/);

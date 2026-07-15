@@ -58,6 +58,9 @@ type BirdFlightWindow = Window & {
     objects: number;
     proceduralTiles: number;
     visibleTiles: number;
+    maxFrameMs: number;
+    longFrames: number;
+    mapBuildMs: number | null;
   };
 };
 type FlightAudio = {
@@ -170,6 +173,37 @@ function buildColliderGrid(colliders: BuildingCollider[]) {
         else grid.set(key, [collider]);
       }
     }
+  }
+  return grid;
+}
+
+function createMainThreadYielder(budgetMs = 6) {
+  let deadline = performance.now() + budgetMs;
+  return async (isCancelled: () => boolean) => {
+    if (performance.now() < deadline) return;
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+    if (isCancelled()) throw new DOMException("Map build cancelled", "AbortError");
+    deadline = performance.now() + budgetMs;
+  };
+}
+
+async function buildColliderGridAsync(colliders: BuildingCollider[], isCancelled: () => boolean) {
+  const grid = new Map<string, BuildingCollider[]>();
+  const yieldIfNeeded = createMainThreadYielder();
+  for (const collider of colliders) {
+    const minX = Math.floor((collider.x - collider.halfWidth) / COLLISION_CELL_SIZE);
+    const maxX = Math.floor((collider.x + collider.halfWidth) / COLLISION_CELL_SIZE);
+    const minZ = Math.floor((collider.z - collider.halfDepth) / COLLISION_CELL_SIZE);
+    const maxZ = Math.floor((collider.z + collider.halfDepth) / COLLISION_CELL_SIZE);
+    for (let cellX = minX; cellX <= maxX; cellX++) {
+      for (let cellZ = minZ; cellZ <= maxZ; cellZ++) {
+        const key = `${cellX}:${cellZ}`;
+        const entries = grid.get(key);
+        if (entries) entries.push(collider);
+        else grid.set(key, [collider]);
+      }
+    }
+    await yieldIfNeeded(isCancelled);
   }
   return grid;
 }
@@ -472,11 +506,12 @@ function distanceToSegmentSquared(x: number, z: number, x1: number, z1: number, 
   return (x - closestX) ** 2 + (z - closestZ) ** 2;
 }
 
-function addProceduralDistrictTiles(
+async function addProceduralDistrictTiles(
   scene: THREE.Scene,
   data: OsmMapData,
   osmColliders: BuildingCollider[],
   initialPosition: THREE.Vector3,
+  isCancelled: () => boolean,
 ) {
   const tileSize = 460;
   const visibilityRadius = 1_550;
@@ -495,7 +530,9 @@ function addProceduralDistrictTiles(
   const spatialCellSize = 180;
   const roadGrid = new Map<string, AvoidanceSegment[]>();
   const waterGrid = new Map<string, AvoidanceSegment[]>();
+  const waterAreaGrid = new Map<string, MapPoint[][]>();
   const colliderGrid = new Map<string, BuildingCollider[]>();
+  const yieldIfNeeded = createMainThreadYielder();
   const spatialKey = (cellX: number, cellZ: number) => `${cellX}:${cellZ}`;
   const addToGrid = <T,>(grid: Map<string, T[]>, item: T, minX: number, maxX: number, minZ: number, maxZ: number) => {
     for (let cellX = Math.floor(minX / spatialCellSize); cellX <= Math.floor(maxX / spatialCellSize); cellX++) {
@@ -515,15 +552,21 @@ function addProceduralDistrictTiles(
       const segment = { x1, z1, x2, z2, radius };
       addToGrid(roadGrid, segment, Math.min(x1, x2) - 42, Math.max(x1, x2) + 42, Math.min(z1, z2) - 42, Math.max(z1, z2) + 42);
     }
+    await yieldIfNeeded(isCancelled);
   }
-  const waterAreas = data.water.filter((feature) => feature.area && feature.points.length >= 3).map((feature) => feature.points);
   for (const feature of data.water) {
+    if (feature.area && feature.points.length >= 3) {
+      const xs = feature.points.map(([x]) => x);
+      const zs = feature.points.map(([, z]) => z);
+      addToGrid(waterAreaGrid, feature.points, Math.min(...xs), Math.max(...xs), Math.min(...zs), Math.max(...zs));
+    }
     for (let index = 1; index < feature.points.length; index++) {
       const [x1, z1] = feature.points[index - 1];
       const [x2, z2] = feature.points[index];
       const segment = { x1, z1, x2, z2, radius: 10 };
       addToGrid(waterGrid, segment, Math.min(x1, x2) - 46, Math.max(x1, x2) + 46, Math.min(z1, z2) - 46, Math.max(z1, z2) + 46);
     }
+    await yieldIfNeeded(isCancelled);
   }
   for (const collider of osmColliders) {
     addToGrid(
@@ -534,6 +577,7 @@ function addProceduralDistrictTiles(
       collider.z - collider.halfDepth - 38,
       collider.z + collider.halfDepth + 38,
     );
+    await yieldIfNeeded(isCancelled);
   }
   const districtCenters = AREA_LANDMARKS.map((landmark) => {
     const world = coordinatesToWorld(landmark.lat, landmark.lon);
@@ -541,8 +585,8 @@ function addProceduralDistrictTiles(
   });
 
   const blockedByMap = (x: number, z: number, halfWidth: number, halfDepth: number) => {
-    if (waterAreas.some((points) => pointInPolygon(x, z, points))) return true;
     const key = spatialKey(Math.floor(x / spatialCellSize), Math.floor(z / spatialCellSize));
+    if ((waterAreaGrid.get(key) ?? []).some((points) => pointInPolygon(x, z, points))) return true;
     const waterClearance = Math.max(halfWidth, halfDepth) + 10;
     if ((waterGrid.get(key) ?? []).some((segment) => distanceToSegmentSquared(x, z, segment.x1, segment.z1, segment.x2, segment.z2) < waterClearance ** 2)) return true;
     for (const segment of roadGrid.get(key) ?? []) {
@@ -677,10 +721,14 @@ function addProceduralDistrictTiles(
         trees.castShadow = true;
         group.add(trees);
       }
-      if (group.children.length === 0) continue;
+      if (group.children.length === 0) {
+        await yieldIfNeeded(isCancelled);
+        continue;
+      }
       group.visible = Math.hypot(centerX - initialPosition.x, centerZ - initialPosition.z) < visibilityRadius;
       scene.add(group);
       tiles.push({ group, centerX, centerZ, colliders: tileColliders });
+      await yieldIfNeeded(isCancelled);
     }
   }
   scene.userData.proceduralDistrictTiles = tiles;
@@ -1419,29 +1467,43 @@ function polygonShape(points: MapPoint[]) {
   return shape;
 }
 
-function mergeIntoMesh(
+async function mergeIntoMeshBatches(
   group: THREE.Group,
   geometries: THREE.BufferGeometry[],
   material: THREE.Material,
   name: string,
+  isCancelled: () => boolean,
   shadows = false,
+  batchSize = 160,
 ) {
   if (geometries.length === 0) return;
-  const merged = mergeGeometries(geometries, false);
-  geometries.forEach((geometry) => geometry.dispose());
-  if (!merged) return;
-  const mesh = new THREE.Mesh(merged, material);
-  mesh.name = name;
-  mesh.castShadow = shadows;
-  mesh.receiveShadow = true;
-  group.add(mesh);
+  const yieldIfNeeded = createMainThreadYielder();
+  for (let start = 0; start < geometries.length; start += batchSize) {
+    const batch = geometries.slice(start, start + batchSize);
+    const merged = mergeGeometries(batch, false);
+    batch.forEach((geometry) => geometry.dispose());
+    if (merged) {
+      const mesh = new THREE.Mesh(merged, material);
+      mesh.name = `${name} ${Math.floor(start / batchSize) + 1}`;
+      mesh.castShadow = shadows;
+      mesh.receiveShadow = true;
+      group.add(mesh);
+    }
+    await yieldIfNeeded(isCancelled);
+  }
 }
 
-function selectSpatiallyEvenBuildings(buildings: OsmMapData["buildings"], budget = 2_600) {
+async function selectSpatiallyEvenBuildings(
+  buildings: OsmMapData["buildings"],
+  isCancelled: () => boolean,
+  budget = 2_600,
+) {
   const tileSize = 380;
   const perTile = 9;
   const tiles = new Map<string, Array<{ building: OsmMapData["buildings"][number]; score: number }>>();
+  const yieldIfNeeded = createMainThreadYielder();
   for (const building of buildings) {
+    await yieldIfNeeded(isCancelled);
     if (building.points.length < 3 || building.points.length > 96) continue;
     let x = 0;
     let z = 0;
@@ -1473,14 +1535,17 @@ function selectSpatiallyEvenBuildings(buildings: OsmMapData["buildings"], budget
       if (entries[index]) selected.push(entries[index].building);
       if (selected.length >= budget) break;
     }
+    await yieldIfNeeded(isCancelled);
   }
   return selected;
 }
 
-function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData) {
+async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCancelled: () => boolean) {
   const root = new THREE.Group();
   root.name = "Live OpenStreetMap world";
+  scene.add(root);
   const colliders: BuildingCollider[] = [];
+  const yieldIfNeeded = createMainThreadYielder();
 
   const waterAreas: THREE.BufferGeometry[] = [];
   const waterLines: THREE.BufferGeometry[] = [];
@@ -1502,10 +1567,11 @@ function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData) {
       geometry.translate((x1 + x2) / 2, 0.74, (z1 + z2) / 2);
       waterLines.push(geometry);
     }
+    await yieldIfNeeded(isCancelled);
   }
   const waterMaterial = new THREE.MeshPhysicalMaterial({ color: 0x377f88, roughness: 0.23, clearcoat: 0.68, clearcoatRoughness: 0.28 });
-  mergeIntoMesh(root, waterAreas, waterMaterial, "OSM water areas");
-  mergeIntoMesh(root, waterLines, waterMaterial, "OSM waterways");
+  await mergeIntoMeshBatches(root, waterAreas, waterMaterial, "OSM water areas", isCancelled);
+  await mergeIntoMeshBatches(root, waterLines, waterMaterial, "OSM waterways", isCancelled);
 
   const roadBuckets: THREE.BufferGeometry[][] = [[], [], []];
   const majorRoads = new Set(["motorway", "trunk", "primary", "secondary"]);
@@ -1523,14 +1589,17 @@ function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData) {
       geometry.translate((x1 + x2) / 2, 0.92, (z1 + z2) / 2);
       roadBuckets[bucket].push(geometry);
     }
+    await yieldIfNeeded(isCancelled);
   }
   const roadMaterials = [0x3c4444, 0x4a514e, 0x5b615b].map((color) => new THREE.MeshStandardMaterial({ color, roughness: 0.94 }));
-  roadBuckets.forEach((geometries, index) => mergeIntoMesh(root, geometries, roadMaterials[index], `OSM roads ${index}`));
+  for (let index = 0; index < roadBuckets.length; index++) {
+    await mergeIntoMeshBatches(root, roadBuckets[index], roadMaterials[index], `OSM roads ${index}`, isCancelled);
+  }
 
   const buildingBuckets: THREE.BufferGeometry[][] = [[], [], [], []];
   // The full Dhaka payload can contain tens of thousands of footprints. Keep the
   // live mesh deterministic and geographically even; procedural tiles fill the gaps.
-  for (const building of selectSpatiallyEvenBuildings(data.buildings)) {
+  for (const building of await selectSpatiallyEvenBuildings(data.buildings, isCancelled)) {
     if (building.points.length < 3) continue;
     const geometry = new THREE.ExtrudeGeometry(polygonShape(building.points), {
       depth: building.height,
@@ -1552,6 +1621,7 @@ function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData) {
       halfDepth: Math.max(2, (maxZ - minZ) / 2),
       top: building.height,
     });
+    await yieldIfNeeded(isCancelled);
   }
   const buildingMaterials = [0xcdbd9f, 0xb5beb5, 0xc58e72, 0x99aa9d].map(
     (color) => new THREE.MeshStandardMaterial({ color, roughness: 0.8, metalness: 0.02 }),
@@ -1559,7 +1629,9 @@ function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData) {
   // Nearby procedural towers and landmarks provide local shadows. Keeping the
   // four citywide merged meshes out of the shadow pass avoids redrawing the
   // entire map into the large directional-light shadow camera every frame.
-  buildingBuckets.forEach((geometries, index) => mergeIntoMesh(root, geometries, buildingMaterials[index], `OSM buildings ${index}`));
+  for (let index = 0; index < buildingBuckets.length; index++) {
+    await mergeIntoMeshBatches(root, buildingBuckets[index], buildingMaterials[index], `OSM buildings ${index}`, isCancelled);
+  }
 
   if (colliders.length === 0) {
     root.traverse((object) => {
@@ -1568,9 +1640,9 @@ function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData) {
         object.material.dispose();
       }
     });
+    scene.remove(root);
     return null;
   }
-  scene.add(root);
   const fallback = scene.userData.fallbackWorld as THREE.Group | undefined;
   if (fallback) fallback.visible = false;
   return colliders;
@@ -1654,22 +1726,33 @@ export function BirdFlight() {
 
     const buildingColliders = addCity(scene);
     let buildingColliderGrid = buildColliderGrid(buildingColliders);
+    const mapRequestStartedAt = performance.now();
     void fetch("/api/osm")
       .then(async (response) => {
         if (!response.ok) throw new Error(`Map request failed with ${response.status}`);
         return await response.json() as OsmMapData;
       })
-      .then((data) => {
+      .then(async (data) => {
         if (disposed) return;
-        const osmColliders = addOpenStreetMapWorld(scene, data);
+        const mapBuildStartedAt = performance.now();
+        const osmColliders = await addOpenStreetMapWorld(scene, data, () => disposed);
         if (!osmColliders) throw new Error("OpenStreetMap response contained no usable buildings");
         const landmarkColliders = scene.userData.landmarkColliders as BuildingCollider[] | undefined ?? [];
-        const proceduralColliders = addProceduralDistrictTiles(scene, data, [...osmColliders, ...landmarkColliders], crow.position);
+        const proceduralColliders = await addProceduralDistrictTiles(
+          scene,
+          data,
+          [...osmColliders, ...landmarkColliders],
+          crow.position,
+          () => disposed,
+        );
         buildingColliders.splice(0, buildingColliders.length, ...osmColliders, ...proceduralColliders, ...landmarkColliders);
-        buildingColliderGrid = buildColliderGrid(buildingColliders);
+        buildingColliderGrid = await buildColliderGridAsync(buildingColliders, () => disposed);
+        if (disposed) return;
+        renderer.domElement.dataset.mapRequestMs = (performance.now() - mapRequestStartedAt).toFixed(1);
+        renderer.domElement.dataset.mapBuildMs = (performance.now() - mapBuildStartedAt).toFixed(1);
         setMapStatus("live");
       })
-      .catch(() => {
+      .catch(async () => {
         if (disposed) return;
         if (!(scene.userData.proceduralDistrictTiles as ProceduralDistrictTile[] | undefined)?.length) {
           const emptyMap: OsmMapData = {
@@ -1679,11 +1762,21 @@ export function BirdFlight() {
             roads: [],
             water: [],
           };
-          const proceduralColliders = addProceduralDistrictTiles(scene, emptyMap, buildingColliders, crow.position);
+          const proceduralColliders = await addProceduralDistrictTiles(
+            scene,
+            emptyMap,
+            buildingColliders,
+            crow.position,
+            () => disposed,
+          );
+          if (disposed) return;
           buildingColliders.push(...proceduralColliders);
-          buildingColliderGrid = buildColliderGrid(buildingColliders);
+          buildingColliderGrid = await buildColliderGridAsync(buildingColliders, () => disposed);
         }
         setMapStatus("fallback");
+      })
+      .catch(() => {
+        if (!disposed) setMapStatus("fallback");
       });
 
     const crow = new THREE.Group();
@@ -1742,6 +1835,8 @@ export function BirdFlight() {
       restAction.setEffectiveWeight(0);
     });
 
+    let maxFrameMs = 0;
+    let longFrames = 0;
     (window as BirdFlightWindow).__birdFlightDiagnostics = () => ({
       calls: renderer.info.render.calls,
       triangles: renderer.info.render.triangles,
@@ -1750,6 +1845,9 @@ export function BirdFlight() {
       objects: scene.children.reduce((count, child) => count + 1 + child.children.length, 0),
       proceduralTiles: (scene.userData.proceduralDistrictTiles as ProceduralDistrictTile[] | undefined)?.length ?? 0,
       visibleTiles: (scene.userData.proceduralDistrictTiles as ProceduralDistrictTile[] | undefined)?.filter((tile) => tile.group.visible).length ?? 0,
+      maxFrameMs,
+      longFrames,
+      mapBuildMs: Number.parseFloat(renderer.domElement.dataset.mapBuildMs ?? "") || null,
     });
 
     const keys = new Set<string>();
@@ -1838,8 +1936,13 @@ export function BirdFlight() {
     const animate = () => {
       animation = requestAnimationFrame(animate);
       const now = performance.now();
-      const dt = Math.min((now - lastFrame) / 1000, 0.035);
+      const frameMs = now - lastFrame;
+      const dt = Math.min(frameMs / 1000, 0.035);
       lastFrame = now;
+      if (flyingRef.current) {
+        maxFrameMs = Math.max(maxFrameMs, frameMs);
+        if (frameMs > 50) longFrames++;
+      }
       elapsedTime += dt;
       const active = flyingRef.current && !pausedRef.current && !restingRef.current;
       const turn = active ? (keys.has("KeyA") || keys.has("ArrowLeft") ? 1 : 0) - (keys.has("KeyD") || keys.has("ArrowRight") ? 1 : 0) : 0;
@@ -2060,6 +2163,8 @@ export function BirdFlight() {
         renderer.domElement.dataset.triangles = renderer.info.render.triangles.toString();
         renderer.domElement.dataset.geometries = renderer.info.memory.geometries.toString();
         renderer.domElement.dataset.textures = renderer.info.memory.textures.toString();
+        renderer.domElement.dataset.maxFrameMs = maxFrameMs.toFixed(1);
+        renderer.domElement.dataset.longFrames = longFrames.toString();
       }
     };
     animate();

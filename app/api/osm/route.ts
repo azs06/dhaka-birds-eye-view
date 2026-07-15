@@ -17,6 +17,7 @@ const CORE_BUILDING_BOUNDS = {
 const WORLD_SCALE = 1;
 const BUILDING_CELL_SIZE = 250;
 const BUILDINGS_PER_CELL = 16;
+const MAX_BUILDINGS = 3_600;
 const RELATION_ID_OFFSET = 1_000_000_000_000;
 const MAX_ROADS = 1_800;
 
@@ -158,9 +159,9 @@ function spatiallySampleBuildings<T extends { id: number; points: WorldPoint[]; 
     else cells.set(key, [building]);
   }
 
-  return Array.from(cells.entries())
+  const sampledCells = Array.from(cells.entries())
     .sort(([a], [b]) => a.localeCompare(b))
-    .flatMap(([, cell]) => {
+    .map(([, cell]) => {
       const priority = cell
         .filter((building) => building.priority)
         .sort((a, b) => deterministicBuildingOrder(a.id) - deterministicBuildingOrder(b.id) || a.id - b.id);
@@ -171,6 +172,18 @@ function spatiallySampleBuildings<T extends { id: number; points: WorldPoint[]; 
         .slice(0, remainingSlots);
       return [...priority, ...sampled];
     });
+  const selected: T[] = [];
+  for (let index = 0; selected.length < MAX_BUILDINGS; index++) {
+    let addedAtDepth = false;
+    for (const cell of sampledCells) {
+      if (!cell[index]) continue;
+      selected.push(cell[index]);
+      addedAtDepth = true;
+      if (selected.length >= MAX_BUILDINGS) break;
+    }
+    if (!addedAtDepth) break;
+  }
+  return selected;
 }
 
 function spatiallySampleRoads<T extends { id: number; points: WorldPoint[]; kind: string }>(roads: T[]) {
