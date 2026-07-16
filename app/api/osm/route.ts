@@ -1,25 +1,32 @@
 const CENTER = { lat: 23.7715, lon: 90.4165 };
+// Full Dhaka metro: Uttara/Diabari in the north (~23.905), Keraniganj/Old Dhaka
+// in the south (~23.655), Mohammadpur/Turag in the west, Bashundhara/Balu River
+// in the east. Roughly a 26 km (N-S) by 24 km (E-W) footprint around the centre.
 const BOUNDS = {
-  south: 23.668,
-  west: 90.306,
-  north: 23.876,
-  east: 90.528,
+  south: 23.655,
+  west: 90.300,
+  north: 23.905,
+  east: 90.535,
 };
-// Dense building footprints stay focused on the original Greater Hatirjheel
-// core. The expanded tiles still fetch roads, water, and named/tall buildings;
-// the client fills remaining lots with its culled procedural district system.
+// Dense building footprints cover the central urban spine (Old-Dhaka-adjacent
+// Ramna/Motijheel up through Dhanmondi, Tejgaon, Hatirjheel, Gulshan and
+// Banani). The wider tiles still fetch roads, water, and named/tall buildings
+// everywhere else; the client fills remaining lots with its culled procedural
+// district system, so outer areas stay populated without a huge OSM payload.
 const CORE_BUILDING_BOUNDS = {
-  south: 23.742,
-  west: 90.389,
-  north: 23.801,
-  east: 90.444,
+  south: 23.720,
+  west: 90.365,
+  north: 23.805,
+  east: 90.435,
 };
 const WORLD_SCALE = 1;
 const BUILDING_CELL_SIZE = 250;
 const BUILDINGS_PER_CELL = 16;
-const MAX_BUILDINGS = 3_600;
+// Budgets scaled up with the ~1.3x larger fetch area (and the enlarged core)
+// so per-cell density stays uniform instead of thinning out across the metro.
+const MAX_BUILDINGS = 5_200;
 const RELATION_ID_OFFSET = 1_000_000_000_000;
-const MAX_ROADS = 1_800;
+const MAX_ROADS = 2_600;
 
 type OsmPoint = { lat: number; lon: number };
 type OsmElement = {
@@ -218,7 +225,7 @@ async function fetchOsmMapApi(bounds: number[]) {
   const [south, west, north, east] = bounds;
   const bbox = `${west},${south},${east},${north}`;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 20_000);
+  const timer = setTimeout(() => controller.abort(), 27_000);
   try {
     const response = await fetch(`https://api.openstreetmap.org/api/0.6/map?bbox=${bbox}`, {
       headers: {
@@ -269,7 +276,7 @@ async function requestOverpass(query: string, preferredEndpoint = 0) {
   for (let attempt = 0; attempt < overpassEndpoints.length; attempt++) {
     const endpoint = overpassEndpoints[(preferredEndpoint + attempt) % overpassEndpoints.length];
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 18_000);
+    const timer = setTimeout(() => controller.abort(), 27_000);
     try {
       const response = await fetch(endpoint, {
         method: "POST",
@@ -333,17 +340,24 @@ async function fetchOverpass(tiles: Array<{ bounds: number[]; query: string }>) 
 }
 
 export async function GET() {
-  const middleLatitude = (BOUNDS.south + BOUNDS.north) / 2;
-  const firstLongitude = BOUNDS.west + (BOUNDS.east - BOUNDS.west) / 3;
-  const secondLongitude = BOUNDS.west + (BOUNDS.east - BOUNDS.west) * 2 / 3;
-  const tileBounds = [
-    [BOUNDS.south, BOUNDS.west, middleLatitude, firstLongitude],
-    [BOUNDS.south, firstLongitude, middleLatitude, secondLongitude],
-    [BOUNDS.south, secondLongitude, middleLatitude, BOUNDS.east],
-    [middleLatitude, BOUNDS.west, BOUNDS.north, firstLongitude],
-    [middleLatitude, firstLongitude, BOUNDS.north, secondLongitude],
-    [middleLatitude, secondLongitude, BOUNDS.north, BOUNDS.east],
-  ];
+  // 3x3 grid of tiles. Splitting the larger metro footprint into 9 smaller
+  // queries keeps each Overpass request (and its core-building payload) within
+  // the timeout, and lets partial failures fall back per-tile.
+  const TILE_ROWS = 3;
+  const TILE_COLS = 3;
+  const latStep = (BOUNDS.north - BOUNDS.south) / TILE_ROWS;
+  const lonStep = (BOUNDS.east - BOUNDS.west) / TILE_COLS;
+  const tileBounds: number[][] = [];
+  for (let row = 0; row < TILE_ROWS; row++) {
+    for (let col = 0; col < TILE_COLS; col++) {
+      tileBounds.push([
+        BOUNDS.south + latStep * row,
+        BOUNDS.west + lonStep * col,
+        BOUNDS.south + latStep * (row + 1),
+        BOUNDS.west + lonStep * (col + 1),
+      ]);
+    }
+  }
   const tiles = tileBounds.map((bounds) => {
     const bbox = bounds.join(",");
     const coreSouth = Math.max(bounds[0], CORE_BUILDING_BOUNDS.south);
@@ -357,7 +371,7 @@ export async function GET() {
     const fallbackBounds = coreSouth < coreNorth && coreWest < coreEast
       ? [coreSouth, coreWest, coreNorth, coreEast]
       : bounds;
-    return { bounds: fallbackBounds, query: `[out:json][timeout:20];(
+    return { bounds: fallbackBounds, query: `[out:json][timeout:25];(
       ${coreBuildingQuery}
       way["building"]["name"](${bbox});
       way["building"]["height"](${bbox});

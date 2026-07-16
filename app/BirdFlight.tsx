@@ -138,6 +138,7 @@ type TrafficVehicle = {
   segmentProgress: number;
   direction: 1 | -1;
   laneOffset: number;
+  sizeScale: number;
   speed: number;
   baseSpeed: number;
   phase: number;
@@ -149,7 +150,9 @@ type TrafficVehicle = {
 
 const clamp = THREE.MathUtils.clamp;
 const MAP_CENTER = { lat: 23.7715, lon: 90.4165 };
-const FLIGHT_EXTENT = { x: 11_200, z: 11_500 };
+// Half-extents (metres) of the flyable world, matched to the OSM fetch BOUNDS
+// in app/api/osm/route.ts: ~+/-12 km E-W and reaching Uttara in the north.
+const FLIGHT_EXTENT = { x: 12_000, z: 14_800 };
 const COLLISION_CELL_SIZE = 180;
 const BRAKE_SPEED = 18;
 const CRUISE_SPEED = 44;
@@ -159,9 +162,15 @@ const MIN_FLIGHT_ALTITUDE = 10;
 const MAX_FLIGHT_ALTITUDE = 650;
 const CEILING_EASE_DEPTH = 90;
 const MIN_CEILING_CLIMB_SPEED = 1.8;
-const TRAFFIC_ROUTE_SAMPLE_RATIO = 0.35;
-const TRAFFIC_ROUTE_BUDGET = 72;
-const TRAFFIC_MAX_VEHICLES = 84;
+const TRAFFIC_ROUTE_SAMPLE_RATIO = 0.5;
+const TRAFFIC_ROUTE_BUDGET = 160;
+const TRAFFIC_MAX_VEHICLES = 320;
+const TRAFFIC_MIN_VEHICLES = 40;
+// Sparse ambient density: roughly one vehicle per this many metres of major road
+// (local streets count at a quarter rate). Raise it for lighter traffic, lower for denser.
+const TRAFFIC_METERS_PER_VEHICLE = 260;
+// Fraction of vehicles routed onto major roads (highway/primary/secondary).
+const TRAFFIC_MAJOR_SHARE = 0.75;
 const TRAFFIC_BASE_TICK_HZ = 10;
 const TRAFFIC_THROTTLED_TICK_HZ = 5;
 const TRAFFIC_LONG_FRAME_MS = 34;
@@ -248,6 +257,8 @@ const AREA_LANDMARKS: AreaLandmark[] = [
   { label: "Pallabi", shortLabel: "PLB", lat: 23.82535, lon: 90.36631, altitude: 56, heading: 0 },
   { label: "Dhaka Cantonment", shortLabel: "CAN", lat: 23.82191, lon: 90.39112, altitude: 62, heading: 0 },
   { label: "Uttara", shortLabel: "UTR", lat: 23.87532, lon: 90.39679, altitude: 68, heading: 0, minimap: true },
+  { label: "Uttara Sector 3", shortLabel: "US3", lat: 23.86894, lon: 90.40224, altitude: 58, heading: 0 },
+  { label: "Diabari", shortLabel: "DBR", lat: 23.88566, lon: 90.37641, altitude: 60, heading: 0, minimap: true },
   { label: "Purbachal", shortLabel: "PUR", lat: 23.83611, lon: 90.49069, altitude: 48, heading: -Math.PI / 2, minimap: true },
   { label: "Demra", shortLabel: "DEM", lat: 23.72432, lon: 90.49338, altitude: 48, heading: -Math.PI / 2, minimap: true },
   { label: "Jatrabari", shortLabel: "JAT", lat: 23.71052, lon: 90.43491, altitude: 58, heading: Math.PI },
@@ -386,15 +397,24 @@ function trafficRoadLength(points: MapPoint[]) {
 }
 
 function selectTrafficRoads(roads: OsmMapData["roads"]) {
-  const supportedKinds = new Set(["motorway", "trunk", "primary", "secondary", "tertiary", "residential", "unclassified", "service"]);
+  const majorKinds = new Set(["motorway", "trunk", "primary", "secondary"]);
+  const localKinds = new Set(["tertiary", "residential", "unclassified", "service"]);
   const candidates = roads.flatMap((road, index) => {
     const points = road.points.filter(([x, z]) => Number.isFinite(x) && Number.isFinite(z));
-    if (!supportedKinds.has(road.kind) || points.length < 2 || trafficRoadLength(points) < 70) return [];
+    if ((!majorKinds.has(road.kind) && !localKinds.has(road.kind)) || points.length < 2) return [];
+    const length = trafficRoadLength(points);
+    if (length < 70) return [];
     const hash = Math.imul(road.id || index + 1, 2_654_435_761) >>> 0;
-    const score = hash / 4_294_967_295;
-    if (roads.length > 4 && score > TRAFFIC_ROUTE_SAMPLE_RATIO) return [];
+    const sample = hash / 4_294_967_295;
+    const major = majorKinds.has(road.kind);
+    // Keep every major road; thin the far denser local grid by hash sampling.
+    if (!major && roads.length > 4 && sample > TRAFFIC_ROUTE_SAMPLE_RATIO) return [];
+    // Mirror the rendered surface widths from addRoadNetworkMeshes so vehicles sit in lanes.
+    const width = major ? (road.kind === "motorway" || road.kind === "trunk" ? 17 : 14) : 7.5;
     const center = points[Math.floor(points.length / 2)];
-    return [{ ...road, points, score, cell: `${Math.floor(center[0] / 1_200)}:${Math.floor(center[1] / 1_200)}` }];
+    // Major roads (offset 0) sort ahead of locals (offset 1); the hash shuffles within each tier.
+    const score = (major ? 0 : 1) + sample;
+    return [{ ...road, points, major, length, width, score, cell: `${Math.floor(center[0] / 1_200)}:${Math.floor(center[1] / 1_200)}` }];
   });
 
   candidates.sort((a, b) => a.score - b.score);
@@ -425,9 +445,26 @@ function createTrafficSimulation(
   if (routes.length === 0) return null;
 
   const random = seededRandom(9_047);
+  const majorRoutes = routes.filter((route) => route.major);
+  const localRoutes = routes.filter((route) => !route.major);
+  const majorLength = majorRoutes.reduce((sum, route) => sum + route.length, 0);
+  const localLength = localRoutes.reduce((sum, route) => sum + route.length, 0);
+  // Density scales with total road length, weighted toward major roads.
+  const densityTarget = Math.round((majorLength + localLength * 0.25) / TRAFFIC_METERS_PER_VEHICLE);
   const vehicleTotal = routes.length <= 4
     ? maxVehicles
-    : Math.min(maxVehicles, Math.max(24, Math.round(routes.length * 1.15)));
+    : clamp(densityTarget, TRAFFIC_MIN_VEHICLES, maxVehicles);
+  // Route most vehicles onto major roads so highways feel busier than side streets.
+  const majorVehicleCount = majorRoutes.length === 0
+    ? 0
+    : localRoutes.length === 0
+      ? vehicleTotal
+      : Math.round(vehicleTotal * TRAFFIC_MAJOR_SHARE);
+  const routeForIndex = (index: number) => {
+    if (index < majorVehicleCount && majorRoutes.length > 0) return majorRoutes[index % majorRoutes.length];
+    const pool = localRoutes.length > 0 ? localRoutes : majorRoutes;
+    return pool.length > 0 ? pool[index % pool.length] : routes[index % routes.length];
+  };
   const trafficRoot = new THREE.Group();
   trafficRoot.name = "Sampled real-time traffic";
   parent.add(trafficRoot);
@@ -449,7 +486,7 @@ function createTrafficSimulation(
   const palette = [0xe0b653, 0xb54f46, 0x4e7380, 0xd8d2ba, 0x45604f, 0xc8c5b7, 0x8d5d72];
   const vehicles: TrafficVehicle[] = [];
   for (let index = 0; index < vehicleTotal; index++) {
-    const road = routes[index % routes.length];
+    const road = routeForIndex(index);
     const direction: 1 | -1 = random() > 0.5 ? 1 : -1;
     const segmentIndex = direction === 1
       ? Math.floor(random() * (road.points.length - 1))
@@ -463,7 +500,9 @@ function createTrafficSimulation(
     const dx = end[0] - start[0];
     const dz = end[1] - start[1];
     const heading = Math.atan2(dz, dx);
-    const laneOffset = 0.75 + random() * 0.85;
+    // Sit opposing lanes to each side of the centerline, spaced by the rendered road width.
+    const laneOffset = road.width * 0.24 + random() * 0.6;
+    const sizeScale = 0.85 + random() * 0.4;
     const position = new THREE.Vector3(
       THREE.MathUtils.lerp(start[0], end[0], ratio) - Math.sin(heading) * laneOffset * direction,
       2.25,
@@ -477,6 +516,7 @@ function createTrafficSimulation(
       segmentProgress,
       direction,
       laneOffset,
+      sizeScale,
       speed: baseSpeed,
       baseSpeed,
       phase: random() * Math.PI * 2,
@@ -550,7 +590,7 @@ function createTrafficSimulation(
   };
 
   const renderVehicles = (alpha: number) => {
-    visibleVehicles = Math.min(vehicleTotal, Math.max(visibleVehicles, Math.floor(8 + simulationTime * 9)));
+    visibleVehicles = Math.min(vehicleTotal, Math.max(visibleVehicles, Math.floor(12 + simulationTime * 16)));
     bodies.count = visibleVehicles;
     cabins.count = visibleVehicles;
     for (let index = 0; index < visibleVehicles; index++) {
@@ -561,9 +601,10 @@ function createTrafficSimulation(
         Math.cos(vehicle.heading - vehicle.previousHeading),
       );
       quaternion.setFromAxisAngle(up, -(vehicle.previousHeading + headingDelta * alpha));
+      scale.setScalar(vehicle.sizeScale);
       matrix.compose(renderPosition, quaternion, scale);
       bodies.setMatrixAt(index, matrix);
-      renderPosition.y += 1.12;
+      renderPosition.y += 1.12 * vehicle.sizeScale;
       matrix.compose(renderPosition, quaternion, scale);
       cabins.setMatrixAt(index, matrix);
     }
@@ -1035,12 +1076,13 @@ async function addRoadNetworkMeshes(
     isCancelled,
     false,
     280,
+    false,
   );
   const roadMaterials = [0x2f3735, 0x464f4b, 0x626b65].map(
     (color) => new THREE.MeshStandardMaterial({ color, roughness: 0.95 }),
   );
   for (let index = 0; index < surfaces.length; index++) {
-    await mergeIntoMeshBatches(parent, surfaces[index], roadMaterials[index], `${name} roads ${index}`, isCancelled, false, 280);
+    await mergeIntoMeshBatches(parent, surfaces[index], roadMaterials[index], `${name} roads ${index}`, isCancelled, false, 280, false);
   }
   await mergeIntoMeshBatches(
     parent,
@@ -1050,6 +1092,7 @@ async function addRoadNetworkMeshes(
     isCancelled,
     false,
     320,
+    false,
   );
   await mergeIntoMeshBatches(
     parent,
@@ -1059,6 +1102,7 @@ async function addRoadNetworkMeshes(
     isCancelled,
     false,
     320,
+    false,
   );
 }
 
@@ -2165,14 +2209,42 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
   const guidewayMaterial = new THREE.MeshStandardMaterial({ color: 0xc9c7bd, roughness: 0.78 });
   const metroRed = new THREE.MeshStandardMaterial({ color: 0xb72e36, roughness: 0.58, metalness: 0.18 });
   const metroGlass = new THREE.MeshPhysicalMaterial({ color: 0x365d68, roughness: 0.2, metalness: 0.18, clearcoat: 0.5 });
-  const guideway = new THREE.Mesh(new THREE.TubeGeometry(metroCurve, 360, 4.8, 8, false), guidewayMaterial);
-  guideway.name = "MRT Line 6 elevated guideway";
-  guideway.castShadow = true;
-  guideway.receiveShadow = true;
-  metroRoot.add(guideway);
-  for (const offset of [-2.5, 2.5]) {
-    const railCurve = new THREE.CatmullRomCurve3(metroPoints.map((point) => point.clone().add(new THREE.Vector3(0, 4.2, offset))), false, "centripetal", 0.28);
-    metroRoot.add(new THREE.Mesh(new THREE.TubeGeometry(railCurve, 360, 0.42, 5, false), metroRed));
+  const metroSteel = new THREE.MeshStandardMaterial({ color: 0xd2d6d9, roughness: 0.42, metalness: 0.55 });
+  const RAIL_TOP_Y = 18.9;
+  const TRACK_OFFSET = 2.6;
+
+  // Box-girder guideway: a chain of rectangular boxes swept along the curve, resting on the piers.
+  const GIRDER_SAMPLES = 220;
+  let girderPrev = metroCurve.getPointAt(0);
+  for (let index = 1; index <= GIRDER_SAMPLES; index++) {
+    const point = metroCurve.getPointAt(index / GIRDER_SAMPLES);
+    const midX = (girderPrev.x + point.x) / 2;
+    const midY = (girderPrev.y + point.y) / 2;
+    const midZ = (girderPrev.z + point.z) / 2;
+    const dx = point.x - girderPrev.x;
+    const dz = point.z - girderPrev.z;
+    const segLength = Math.hypot(dx, dz) + 0.7;
+    const girder = addBox(metroRoot, [segLength, 2.4, 9.6], [midX, midY - 1.2, midZ], guidewayMaterial);
+    girder.rotation.y = Math.atan2(-dz, dx);
+    girderPrev = point;
+  }
+  // Two running rails sitting on top of the girder deck, offset perpendicular to the track (dual-track).
+  const RAIL_SAMPLES = 220;
+  for (const track of [-1, 1]) {
+    const railPoints: THREE.Vector3[] = [];
+    for (let index = 0; index <= RAIL_SAMPLES; index++) {
+      const u = index / RAIL_SAMPLES;
+      const p = metroCurve.getPointAt(u);
+      const t = metroCurve.getTangentAt(u);
+      const perpLength = Math.hypot(t.z, t.x) || 1;
+      railPoints.push(new THREE.Vector3(
+        p.x + (-t.z / perpLength) * track * TRACK_OFFSET,
+        RAIL_TOP_Y,
+        p.z + (t.x / perpLength) * track * TRACK_OFFSET,
+      ));
+    }
+    const railCurve = new THREE.CatmullRomCurve3(railPoints, false, "centripetal", 0.5);
+    metroRoot.add(new THREE.Mesh(new THREE.TubeGeometry(railCurve, RAIL_SAMPLES, 0.4, 5, false), metroRed));
   }
   for (let index = 1; index < 78; index++) {
     const point = metroCurve.getPointAt(index / 78);
@@ -2180,35 +2252,147 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
     addCylinder(metroRoot, 2.4, 3.8, pierHeight, [point.x, pierHeight / 2, point.z], concrete, 8);
     addBox(metroRoot, [18, 2.2, 4.2], [point.x, point.y - 3, point.z], concrete);
   }
+
+  // Elevated station hall: platform deck, glazed sides, a vaulted (arch-profile) roof, and stair blocks to street level.
+  const stationCount = MRT_LINE_6_STATIONS.length;
+  const VAULT_RADIUS = 13;
+  const VAULT_RISE = 0.55;
+  const ROOF_BASE_Y = 11;
+  const stationVaultGeometry = new THREE.CylinderGeometry(VAULT_RADIUS, VAULT_RADIUS, 90, 20, 1, true, 0, Math.PI);
   MRT_LINE_6_STATIONS.forEach((station, index) => {
     const point = metroPoints[index];
-    const tangent = metroCurve.getTangentAt(index / (MRT_LINE_6_STATIONS.length - 1));
+    const tangent = metroCurve.getTangentAt(index / (stationCount - 1));
     const stationGroup = new THREE.Group();
     stationGroup.name = `${station.label} MRT station`;
     stationGroup.position.copy(point);
     stationGroup.rotation.y = Math.atan2(-tangent.z, tangent.x);
-    addBox(stationGroup, [96, 5, 22], [0, 1.5, 0], concrete);
-    addBox(stationGroup, [82, 1.4, 25], [0, 16, 0], metroRed);
+    // Platform deck (station long axis runs along local X, over the tracks).
+    addBox(stationGroup, [98, 3, 22], [0, 0.5, 0], concrete);
+    for (const side of [-1, 1]) addBox(stationGroup, [98, 0.35, 0.6], [0, 2.1, side * 10.4], metroRed);
+    // Supporting columns and glazed side walls up to the eaves.
     for (const side of [-1, 1]) {
-      for (const x of [-34, -12, 12, 34]) addBox(stationGroup, [2, 14, 2], [x, 9, side * 9], darkGlass);
+      for (const x of [-40, -20, 0, 20, 40]) addBox(stationGroup, [1.8, ROOF_BASE_Y - 2, 1.8], [x, (ROOF_BASE_Y + 2) / 2, side * 11.4], concrete);
+      addBox(stationGroup, [90, ROOF_BASE_Y - 2, 0.4], [0, (ROOF_BASE_Y + 2) / 2, side * 11.4], metroGlass);
+    }
+    for (const end of [-1, 1]) addBox(stationGroup, [0.6, ROOF_BASE_Y - 2, 24], [end * 45, (ROOF_BASE_Y + 2) / 2, 0], metroGlass);
+    // Vaulted roof (half-cylinder arch), flattened a little, with a red line-colour accent along the eaves and ridge.
+    const vault = new THREE.Mesh(stationVaultGeometry, whiteStone);
+    vault.rotation.z = Math.PI / 2;
+    vault.position.y = ROOF_BASE_Y;
+    vault.scale.x = VAULT_RISE;
+    vault.castShadow = true;
+    vault.receiveShadow = true;
+    stationGroup.add(vault);
+    for (const side of [-1, 1]) addBox(stationGroup, [92, 0.9, 0.7], [0, ROOF_BASE_Y, side * VAULT_RADIUS], metroRed);
+    addBox(stationGroup, [92, 0.3, 1.2], [0, ROOF_BASE_Y + VAULT_RADIUS * VAULT_RISE, 0], metroRed);
+    // Two entrance stair blocks angling down to street level on either side.
+    for (const side of [-1, 1]) {
+      const run = 23;
+      const drop = 18;
+      const slope = Math.hypot(run, drop);
+      const stair = addBox(stationGroup, [8, 2.6, slope], [0, -drop / 2, side * (11 + run / 2)], concrete);
+      stair.rotation.x = side * Math.atan2(drop, run);
+      addBox(stationGroup, [10, 3, 6], [0, -drop + 0.5, side * (11 + run + 2)], paleConcrete);
     }
     metroRoot.add(stationGroup);
     addLabel(point.clone().add(new THREE.Vector3(0, 42, 0)), `${station.label} · MRT 6`);
   });
-  const metroTrain = new THREE.Group();
-  metroTrain.name = "MRT Line 6 train";
-  for (const z of [-27, 0, 27]) {
-    addBox(metroTrain, [12, 9, 24], [0, 5, z], whiteStone);
-    addBox(metroTrain, [12.3, 3.2, 20], [0, 6.5, z], metroGlass);
-    addBox(metroTrain, [12.5, 1.1, 24.5], [0, 10, z], metroRed);
-  }
-  metroRoot.add(metroTrain);
+
+  // Stainless-steel 6-car trainset, magenta/red Line-6 stripe, dark window band, rounded nose cabs at both ends.
+  const CAR_COUNT = 6;
+  const CAR_LEN = 19.8;
+  const CAR_PITCH = 21;
+  const CAR_W = 3;
+  const buildTrain = () => {
+    const train = new THREE.Group();
+    train.name = "MRT Line 6 trainset";
+    for (let car = 0; car < CAR_COUNT; car++) {
+      const z = (car - (CAR_COUNT - 1) / 2) * CAR_PITCH;
+      addBox(train, [CAR_W, 3.2, CAR_LEN], [0, 2.6, z], metroSteel);
+      addBox(train, [CAR_W + 0.04, 1.1, CAR_LEN - 2.4], [0, 3.1, z], darkGlass);
+      addBox(train, [CAR_W + 0.06, 0.55, CAR_LEN - 0.6], [0, 2.15, z], metroRed);
+      addBox(train, [CAR_W - 0.5, 0.5, CAR_LEN - 0.4], [0, 4.35, z], metroSteel);
+      addBox(train, [0.8, 0.22, CAR_LEN - 0.4], [0, 4.62, z], metroRed);
+      for (const b of [-1, 1]) addBox(train, [2.4, 0.9, 3.6], [0, 0.35, z + b * 6.4], recess);
+      // Nose cab detailing on the two end cars.
+      if (car === 0 || car === CAR_COUNT - 1) {
+        const dir = car === 0 ? -1 : 1;
+        const tip = z + dir * (CAR_LEN / 2);
+        addBox(train, [CAR_W - 0.4, 2.6, 1.4], [0, 2.4, tip - dir * 0.7], metroSteel);
+        const windshield = addBox(train, [CAR_W - 0.1, 2.2, 0.5], [0, 3.2, tip - dir * 0.9], darkGlass);
+        windshield.rotation.x = dir * 0.42;
+        addBox(train, [CAR_W - 0.2, 0.5, 0.35], [0, 1.9, tip - dir * 0.2], metroRed);
+      }
+    }
+    train.traverse((object) => { object.frustumCulled = false; });
+    return train;
+  };
+
+  // Precompute each station's arc-length position (u in [0,1]) so trains can stop at them.
+  const stationU = MRT_LINE_6_STATIONS.map((_, index) => {
+    const targetT = index / (stationCount - 1);
+    let lo = 0;
+    let hi = 1;
+    for (let k = 0; k < 30; k++) {
+      const mid = (lo + hi) / 2;
+      if (metroCurve.getUtoTmapping(mid, 0) < targetT) lo = mid;
+      else hi = mid;
+    }
+    return (lo + hi) / 2;
+  });
+  // Ping-pong stop sequence: run up the line stopping at each station, dwell at the terminus, run back down.
+  const stopSeq = [...stationU, ...stationU.slice(0, -1).reverse()];
+  const CRUISE = 0.04; // arc-fraction per second
+  const DWELL = 2.4; // seconds stopped at each station
+  const segDur = stopSeq.map((u, i) => Math.abs(stopSeq[(i + 1) % stopSeq.length] - u) / CRUISE);
+  const dirSign = stopSeq.map((u, i) => {
+    const next = stopSeq[(i + 1) % stopSeq.length] - u;
+    if (Math.abs(next) > 1e-6) return Math.sign(next);
+    const prev = u - stopSeq[(i - 1 + stopSeq.length) % stopSeq.length];
+    return Math.sign(prev) || 1;
+  });
+  const cycle = segDur.reduce((sum, d) => sum + d + DWELL, 0);
+  const runner = (time: number, phase: number) => {
+    let tp = (time + phase) % cycle;
+    if (tp < 0) tp += cycle;
+    let acc = 0;
+    for (let i = 0; i < stopSeq.length; i++) {
+      if (tp < acc + DWELL) return { u: stopSeq[i], dir: dirSign[i] };
+      acc += DWELL;
+      if (tp < acc + segDur[i]) {
+        const f = segDur[i] > 0 ? (tp - acc) / segDur[i] : 1;
+        const ease = f * f * (3 - 2 * f);
+        const next = stopSeq[(i + 1) % stopSeq.length];
+        return { u: stopSeq[i] + (next - stopSeq[i]) * ease, dir: dirSign[i] };
+      }
+      acc += segDur[i];
+    }
+    return { u: stopSeq[0], dir: dirSign[0] };
+  };
+
+  const TRAIN_COUNT = 3;
+  const trains = Array.from({ length: TRAIN_COUNT }, (_, i) => {
+    const train = buildTrain();
+    metroRoot.add(train);
+    return { train, phase: (cycle * i) / TRAIN_COUNT };
+  });
+  const trainPoint = new THREE.Vector3();
+  const trainTangent = new THREE.Vector3();
+  const trainPerp = new THREE.Vector3();
+  const trainTarget = new THREE.Vector3();
   scene.userData.metroRailUpdate = (time: number) => {
-    const progress = (time * 0.012) % 1;
-    const point = metroCurve.getPointAt(progress);
-    const tangent = metroCurve.getTangentAt(progress);
-    metroTrain.position.copy(point).add(new THREE.Vector3(0, 5, 0));
-    metroTrain.lookAt(point.clone().add(tangent));
+    for (const { train, phase } of trains) {
+      const { u, dir } = runner(time, phase);
+      const cu = Math.min(Math.max(u, 0), 1);
+      metroCurve.getPointAt(cu, trainPoint);
+      metroCurve.getTangentAt(cu, trainTangent);
+      trainPerp.set(-trainTangent.z, 0, trainTangent.x).normalize();
+      const side = dir >= 0 ? 1 : -1;
+      train.position.copy(trainPoint).addScaledVector(trainPerp, side * TRACK_OFFSET);
+      train.position.y = RAIL_TOP_Y;
+      trainTarget.copy(train.position).addScaledVector(trainTangent, dir >= 0 ? 1 : -1);
+      train.lookAt(trainTarget);
+    }
   };
   root.add(metroRoot);
 
@@ -2271,7 +2455,7 @@ function addCity(scene: THREE.Scene) {
   };
 
   const ground = new THREE.Mesh(
-    new THREE.PlaneGeometry(26_000, 26_000),
+    new THREE.PlaneGeometry(34_000, 34_000),
     new THREE.MeshStandardMaterial({ color: 0x87937a, map: makeGroundTexture(), roughness: 1 }),
   );
   ground.rotation.x = -Math.PI / 2;
@@ -2685,6 +2869,7 @@ async function mergeIntoMeshBatches(
   isCancelled: () => boolean,
   shadows = false,
   batchSize = 160,
+  frustumCulled = true,
 ) {
   if (geometries.length === 0) return;
   const yieldIfNeeded = createMainThreadYielder();
@@ -2697,6 +2882,11 @@ async function mergeIntoMeshBatches(
       mesh.name = `${name} ${Math.floor(start / batchSize) + 1}`;
       mesh.castShadow = shadows;
       mesh.receiveShadow = true;
+      // Each merged batch bundles road segments spanning a wide area, so its
+      // bounding sphere leaves the frustum (and the whole batch is culled) long
+      // before the individual roads do — making connected roads pop in/out as the
+      // camera turns. Ground-level road/water meshes opt out of frustum culling.
+      mesh.frustumCulled = frustumCulled;
       group.add(mesh);
     }
     await yieldIfNeeded(isCancelled);
@@ -2780,10 +2970,71 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
     await yieldIfNeeded(isCancelled);
   }
   const waterMaterial = new THREE.MeshPhysicalMaterial({ color: 0x397f88, roughness: 0.24, metalness: 0.02, clearcoat: 0.7, clearcoatRoughness: 0.28 });
-  await mergeIntoMeshBatches(root, waterAreas, waterMaterial, "OSM water areas", isCancelled);
-  await mergeIntoMeshBatches(root, waterLines, waterMaterial, "OSM waterways", isCancelled);
+  await mergeIntoMeshBatches(root, waterAreas, waterMaterial, "OSM water areas", isCancelled, false, 160, false);
+  await mergeIntoMeshBatches(root, waterLines, waterMaterial, "OSM waterways", isCancelled, false, 160, false);
 
   await addRoadNetworkMeshes(root, data.roads, "OSM", isCancelled);
+
+  // Roads and water are ground-level features. Reject any building footprint that would
+  // sit on top of them so extruded walls never occlude the asphalt or the lake surface.
+  // The clearance radii mirror the rendered road/water widths from the mesh passes above.
+  const clearanceCellSize = 180;
+  const clearanceKey = (cellX: number, cellZ: number) => `${cellX}:${cellZ}`;
+  type ClearanceSegment = { x1: number; z1: number; x2: number; z2: number; radius: number };
+  const roadClearanceGrid = new Map<string, ClearanceSegment[]>();
+  const waterClearanceGrid = new Map<string, ClearanceSegment[]>();
+  const waterAreaClearanceGrid = new Map<string, MapPoint[][]>();
+  const addToClearanceGrid = <T,>(grid: Map<string, T[]>, item: T, minX: number, maxX: number, minZ: number, maxZ: number) => {
+    for (let cellX = Math.floor(minX / clearanceCellSize); cellX <= Math.floor(maxX / clearanceCellSize); cellX++) {
+      for (let cellZ = Math.floor(minZ / clearanceCellSize); cellZ <= Math.floor(maxZ / clearanceCellSize); cellZ++) {
+        const key = clearanceKey(cellX, cellZ);
+        const entries = grid.get(key);
+        if (entries) entries.push(item);
+        else grid.set(key, [item]);
+      }
+    }
+  };
+  const majorRoadKinds = new Set(["motorway", "trunk", "primary", "secondary"]);
+  const localRoadKinds = new Set(["tertiary", "residential", "unclassified", "service"]);
+  for (const road of data.roads) {
+    const major = majorRoadKinds.has(road.kind);
+    const surfaceWidth = major ? (road.kind === "motorway" || road.kind === "trunk" ? 17 : 14) : localRoadKinds.has(road.kind) ? 7.5 : 4.2;
+    const shoulder = major ? 5.5 : 2.4;
+    const radius = (surfaceWidth + shoulder) / 2 + 2;
+    for (let index = 1; index < road.points.length; index++) {
+      const [x1, z1] = road.points[index - 1];
+      const [x2, z2] = road.points[index];
+      addToClearanceGrid(roadClearanceGrid, { x1, z1, x2, z2, radius }, Math.min(x1, x2) - radius, Math.max(x1, x2) + radius, Math.min(z1, z2) - radius, Math.max(z1, z2) + radius);
+    }
+    await yieldIfNeeded(isCancelled);
+  }
+  for (const feature of data.water) {
+    if (feature.area && feature.points.length >= 3) {
+      const xs = feature.points.map(([x]) => x);
+      const zs = feature.points.map(([, z]) => z);
+      addToClearanceGrid(waterAreaClearanceGrid, feature.points, Math.min(...xs), Math.max(...xs), Math.min(...zs), Math.max(...zs));
+    }
+    for (let index = 1; index < feature.points.length; index++) {
+      const [x1, z1] = feature.points[index - 1];
+      const [x2, z2] = feature.points[index];
+      addToClearanceGrid(waterClearanceGrid, { x1, z1, x2, z2, radius: 6 }, Math.min(x1, x2) - 6, Math.max(x1, x2) + 6, Math.min(z1, z2) - 6, Math.max(z1, z2) + 6);
+    }
+    await yieldIfNeeded(isCancelled);
+  }
+  const footprintBlockedByGround = (x: number, z: number, halfWidth: number, halfDepth: number) => {
+    const key = clearanceKey(Math.floor(x / clearanceCellSize), Math.floor(z / clearanceCellSize));
+    if ((waterAreaClearanceGrid.get(key) ?? []).some((points) => pointInPolygon(x, z, points))) return true;
+    const reach = Math.max(halfWidth, halfDepth);
+    for (const segment of waterClearanceGrid.get(key) ?? []) {
+      const clearance = reach + segment.radius;
+      if (distanceToSegmentSquared(x, z, segment.x1, segment.z1, segment.x2, segment.z2) < clearance ** 2) return true;
+    }
+    for (const segment of roadClearanceGrid.get(key) ?? []) {
+      const clearance = reach + segment.radius;
+      if (distanceToSegmentSquared(x, z, segment.x1, segment.z1, segment.x2, segment.z2) < clearance ** 2) return true;
+    }
+    return false;
+  };
 
   const buildingBuckets: THREE.BufferGeometry[][] = [[], [], [], []];
   const landmarkOsmIds = scene.userData.landmarkOsmIds as Set<number> | undefined;
@@ -2791,6 +3042,20 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
   // live mesh deterministic and geographically even; procedural tiles fill the gaps.
   for (const building of await selectSpatiallyEvenBuildings(data.buildings, isCancelled)) {
     if (building.points.length < 3 || landmarkOsmIds?.has(building.id)) continue;
+    const xs = building.points.map(([x]) => x);
+    const zs = building.points.map(([, z]) => z);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minZ = Math.min(...zs);
+    const maxZ = Math.max(...zs);
+    const centerX = (minX + maxX) / 2;
+    const centerZ = (minZ + maxZ) / 2;
+    const halfWidth = Math.max(2, (maxX - minX) / 2);
+    const halfDepth = Math.max(2, (maxZ - minZ) / 2);
+    if (footprintBlockedByGround(centerX, centerZ, halfWidth, halfDepth)) {
+      await yieldIfNeeded(isCancelled);
+      continue;
+    }
     const geometry = new THREE.ExtrudeGeometry(polygonShape(building.points), {
       depth: building.height,
       bevelEnabled: false,
@@ -2798,17 +3063,11 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
     });
     geometry.rotateX(-Math.PI / 2);
     buildingBuckets[Math.abs(building.id) % buildingBuckets.length].push(geometry);
-    const xs = building.points.map(([x]) => x);
-    const zs = building.points.map(([, z]) => z);
-    const minX = Math.min(...xs);
-    const maxX = Math.max(...xs);
-    const minZ = Math.min(...zs);
-    const maxZ = Math.max(...zs);
     colliders.push({
-      x: (minX + maxX) / 2,
-      z: (minZ + maxZ) / 2,
-      halfWidth: Math.max(2, (maxX - minX) / 2),
-      halfDepth: Math.max(2, (maxZ - minZ) / 2),
+      x: centerX,
+      z: centerZ,
+      halfWidth,
+      halfDepth,
       top: building.height,
     });
     await yieldIfNeeded(isCancelled);
