@@ -11,7 +11,7 @@ import { DHAKA_LANDMARK_FOOTPRINTS, type LandmarkFootprintPart } from "./dhaka-l
 
 type CameraMode = "CHASE" | "BIRD'S EYE";
 type BuildingCollider = { x: number; z: number; halfWidth: number; halfDepth: number; top: number };
-type Perch = { position: THREE.Vector3; label: string; heading: number };
+type Perch = { position: THREE.Vector3; label: string; heading: number; kind?: "landmark" | "tree" };
 type AreaLandmark = {
   label: string;
   shortLabel: string;
@@ -73,6 +73,8 @@ type OsmMapData = {
   buildings: Array<{ id: number; points: MapPoint[]; height: number; name: string | null }>;
   roads: Array<{ id: number; points: MapPoint[]; kind: string; name: string | null }>;
   water: Array<{ id: number; points: MapPoint[]; area: boolean }>;
+  metroLines?: MapPoint[][];
+  metroStations?: Array<{ id: number; name: string | null; point: MapPoint }>;
 };
 type BirdFlightWindow = Window & {
   __birdFlightDiagnostics?: () => {
@@ -162,6 +164,12 @@ const MIN_FLIGHT_ALTITUDE = 10;
 const MAX_FLIGHT_ALTITUDE = 650;
 const CEILING_EASE_DEPTH = 90;
 const MIN_CEILING_CLIMB_SPEED = 1.8;
+// Landing reach: landmark perches are big rooftop targets, treetops are tighter.
+const LANDMARK_LANDING_RADIUS = 27;
+const TREE_LANDING_RADIUS = 20;
+// Tree perches are spatially hashed so the per-frame nearest-perch search only
+// touches the 3x3 cells around the bird instead of every tree in the city.
+const TREE_PERCH_CELL_SIZE = 160;
 const TRAFFIC_ROUTE_SAMPLE_RATIO = 0.5;
 const TRAFFIC_ROUTE_BUDGET = 160;
 const TRAFFIC_MAX_VEHICLES = 320;
@@ -1048,10 +1056,14 @@ async function addRoadNetworkMeshes(
   for (const road of roads) {
     const bucket = majorRoads.has(road.kind) ? 0 : localRoads.has(road.kind) ? 1 : 2;
     const width = bucket === 0 ? (road.kind === "motorway" || road.kind === "trunk" ? 17 : 14) : bucket === 1 ? 7.5 : 4.2;
+    // Stagger deck heights per class so crossing roads never share a coplanar top
+    // face — identical-height boxes in different asphalt colours z-fight at every
+    // junction where a local street overlaps a major road.
+    const surfaceY = bucket === 0 ? 0.98 : bucket === 1 ? 0.9 : 0.84;
     for (let index = 1; index < road.points.length; index++) {
       const [x1, z1] = road.points[index - 1];
       const [x2, z2] = road.points[index];
-      const surface = segmentBox(x1, z1, x2, z2, width, 0.34, 0.98);
+      const surface = segmentBox(x1, z1, x2, z2, width, 0.34, surfaceY);
       if (!surface) continue;
       surfaces[bucket].push(surface);
       const shoulder = segmentBox(x1, z1, x2, z2, width + (bucket === 0 ? 5.5 : 2.4), 0.24, 0.78);
@@ -1215,12 +1227,24 @@ async function addProceduralDistrictTiles(
   const colliders: BuildingCollider[] = [];
   const unitBox = new THREE.BoxGeometry(1, 1, 1);
   const roofBox = new THREE.BoxGeometry(1, 1, 1);
-  const treeGeometry = new THREE.IcosahedronGeometry(1, 1);
+  const foliageGeometry = new THREE.IcosahedronGeometry(1, 1);
+  const trunkGeometry = new THREE.CylinderGeometry(0.5, 0.72, 1, 6);
   const materials = [0xc9bda3, 0xaeb8ae, 0xb9826d].map(
     (color) => new THREE.MeshStandardMaterial({ color, roughness: 0.9, metalness: 0.01 }),
   );
   const roofMaterial = new THREE.MeshStandardMaterial({ color: 0x59655f, roughness: 0.94 });
-  const treeMaterial = new THREE.MeshStandardMaterial({ color: 0x4b7452, roughness: 1 });
+  const trunkMaterial = new THREE.MeshStandardMaterial({ color: 0x6b5140, roughness: 1 });
+  const foliageMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1 });
+  const foliagePalette = [0x3f684a, 0x567b53, 0x7d8e59, 0x4b7452].map((color) => new THREE.Color(color));
+  const bushPalette = [0x5d8a55, 0x6f9a58, 0x4e7d4f].map((color) => new THREE.Color(color));
+  const treePerchGrid = (scene.userData.treePerchGrid as Map<string, Perch[]> | undefined) ?? new Map<string, Perch[]>();
+  scene.userData.treePerchGrid = treePerchGrid;
+  const registerTreePerch = (perch: Perch) => {
+    const key = `${Math.floor(perch.position.x / TREE_PERCH_CELL_SIZE)}:${Math.floor(perch.position.z / TREE_PERCH_CELL_SIZE)}`;
+    const bucket = treePerchGrid.get(key);
+    if (bucket) bucket.push(perch);
+    else treePerchGrid.set(key, [perch]);
+  };
   const majorRoads = new Set(["motorway", "trunk", "primary", "secondary"]);
   type AvoidanceSegment = { x1: number; z1: number; x2: number; z2: number; radius: number };
   const spatialCellSize = 180;
@@ -1350,7 +1374,9 @@ async function addProceduralDistrictTiles(
       if (Math.abs(centerX) > FLIGHT_EXTENT.x + tileSize / 2 || Math.abs(centerZ) > FLIGHT_EXTENT.z + tileSize / 2) continue;
       const transforms: THREE.Matrix4[][] = [[], [], []];
       const roofTransforms: THREE.Matrix4[] = [];
-      const treeTransforms: THREE.Matrix4[] = [];
+      const trunkTransforms: THREE.Matrix4[] = [];
+      const foliageTransforms: THREE.Matrix4[] = [];
+      const foliageColors: THREE.Color[] = [];
       const tileColliders: BuildingCollider[] = [];
       let tileIntensity = 0.2;
       for (const district of districtCenters) {
@@ -1398,17 +1424,62 @@ async function addProceduralDistrictTiles(
         }
       }
 
-      const targetTrees = 2 + Math.floor(random() * 4);
+      // Full trees: trunk + clustered canopy blobs, each registering a treetop
+      // perch so the bird can land anywhere in the city, not just at landmarks.
+      const targetTrees = 8 + Math.floor(random() * 6 + tileIntensity * 5);
       for (let index = 0; index < targetTrees; index++) {
         const x = centerX + (random() - 0.5) * (tileSize - 34);
         const z = centerZ + (random() - 0.5) * (tileSize - 34);
-        const radius = 3.2 + random() * 2.8;
-        if (blockedByMap(x, z, radius, radius)) continue;
+        const canopyRadius = 2.9 + random() * 2.4;
+        if (blockedByMap(x, z, canopyRadius + 1.5, canopyRadius + 1.5)) continue;
+        if (tileColliders.some((collider) => Math.abs(x - collider.x) < collider.halfWidth + canopyRadius && Math.abs(z - collider.z) < collider.halfDepth + canopyRadius)) continue;
+        const trunkHeight = 7 + random() * 4.5;
+        const trunkThickness = 0.65 + random() * 0.4;
+        quaternion.setFromEuler(new THREE.Euler((random() - 0.5) * 0.09, random() * Math.PI, (random() - 0.5) * 0.09));
+        position.set(x, trunkHeight / 2 + 0.92, z);
+        scale.set(trunkThickness, trunkHeight, trunkThickness);
+        trunkTransforms.push(matrix.compose(position, quaternion, scale).clone());
+        const crownBase = trunkHeight + 0.92;
+        const shade = foliagePalette[Math.floor(random() * foliagePalette.length)];
+        const blobCount = 2 + Math.floor(random() * 3);
+        let crownTop = crownBase;
+        for (let blob = 0; blob < blobCount; blob++) {
+          const spread = blob === 0 ? 0 : canopyRadius * (0.35 + random() * 0.5);
+          const angle = random() * Math.PI * 2;
+          const blobRadius = canopyRadius * (blob === 0 ? 1 : 0.55 + random() * 0.35);
+          const blobHeight = blobRadius * (0.82 + random() * 0.3);
+          position.set(
+            x + Math.cos(angle) * spread,
+            crownBase + (blob === 0 ? blobRadius * 0.55 : blobRadius * (0.2 + random() * 0.75)),
+            z + Math.sin(angle) * spread,
+          );
+          quaternion.setFromEuler(new THREE.Euler(random(), random(), random()));
+          scale.set(blobRadius, blobHeight, blobRadius);
+          foliageTransforms.push(matrix.compose(position, quaternion, scale).clone());
+          foliageColors.push(shade.clone().offsetHSL((random() - 0.5) * 0.02, (random() - 0.5) * 0.08, (random() - 0.5) * 0.05));
+          crownTop = Math.max(crownTop, position.y + blobHeight * 0.8);
+        }
+        registerTreePerch({
+          position: new THREE.Vector3(x, crownTop - 0.3, z),
+          label: "Treetop",
+          heading: 0,
+          kind: "tree",
+        });
+      }
+
+      // Ground foliage: low bushes and shrubs scattered between the lots.
+      const targetBushes = 8 + Math.floor(random() * 9);
+      for (let index = 0; index < targetBushes; index++) {
+        const x = centerX + (random() - 0.5) * (tileSize - 24);
+        const z = centerZ + (random() - 0.5) * (tileSize - 24);
+        const radius = 0.9 + random() * 1.6;
+        if (blockedByMap(x, z, radius + 0.8, radius + 0.8)) continue;
         if (tileColliders.some((collider) => Math.abs(x - collider.x) < collider.halfWidth + radius && Math.abs(z - collider.z) < collider.halfDepth + radius)) continue;
         quaternion.setFromEuler(new THREE.Euler(random(), random(), random()));
-        position.set(x, 7 + random() * 3.5, z);
-        scale.set(radius, 5 + random() * 3.5, radius);
-        treeTransforms.push(matrix.compose(position, quaternion, scale).clone());
+        position.set(x, 0.92 + radius * 0.55, z);
+        scale.set(radius, radius * (0.7 + random() * 0.4), radius);
+        foliageTransforms.push(matrix.compose(position, quaternion, scale).clone());
+        foliageColors.push(bushPalette[Math.floor(random() * bushPalette.length)].clone().offsetHSL(0, (random() - 0.5) * 0.06, (random() - 0.5) * 0.05));
       }
 
       const group = new THREE.Group();
@@ -1429,12 +1500,25 @@ async function addProceduralDistrictTiles(
         roofs.castShadow = true;
         group.add(roofs);
       }
-      if (treeTransforms.length > 0) {
-        const trees = new THREE.InstancedMesh(treeGeometry, treeMaterial, treeTransforms.length);
-        treeTransforms.forEach((transform, index) => trees.setMatrixAt(index, transform));
-        trees.instanceMatrix.needsUpdate = true;
-        trees.castShadow = true;
-        group.add(trees);
+      if (trunkTransforms.length > 0) {
+        const trunks = new THREE.InstancedMesh(trunkGeometry, trunkMaterial, trunkTransforms.length);
+        trunkTransforms.forEach((transform, index) => trunks.setMatrixAt(index, transform));
+        trunks.instanceMatrix.needsUpdate = true;
+        trunks.castShadow = true;
+        group.add(trunks);
+      }
+      if (foliageTransforms.length > 0) {
+        // Canopies and bushes share one instanced mesh; per-instance colors give
+        // the palette variety without extra materials or draw calls.
+        const foliage = new THREE.InstancedMesh(foliageGeometry, foliageMaterial, foliageTransforms.length);
+        foliageTransforms.forEach((transform, index) => {
+          foliage.setMatrixAt(index, transform);
+          foliage.setColorAt(index, foliageColors[index]);
+        });
+        foliage.instanceMatrix.needsUpdate = true;
+        if (foliage.instanceColor) foliage.instanceColor.needsUpdate = true;
+        foliage.castShadow = true;
+        group.add(foliage);
       }
       if (group.children.length === 0) {
         await yieldIfNeeded(isCancelled);
@@ -1924,7 +2008,57 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
     return mesh;
   };
 
-  const addLabel = (position: THREE.Vector3, text: string) => {
+  // Voxel relief: a pixel-art elevation (strings of palette chars, "." = empty)
+  // extruded `depth` voxels and rendered as one InstancedMesh per material.
+  // `position` is the centre of the grid's bottom edge.
+  const addVoxelRelief = (
+    parent: THREE.Object3D,
+    rows: string[],
+    palette: Record<string, THREE.Material>,
+    voxel: number,
+    position: [number, number, number],
+    options?: { depth?: number; rotationY?: number; leanX?: number },
+  ) => {
+    const group = new THREE.Group();
+    group.position.set(...position);
+    if (options?.rotationY) group.rotation.y = options.rotationY;
+    if (options?.leanX) group.rotation.x = options.leanX;
+    const depth = options?.depth ?? 1;
+    const gridWidth = rows[0].length;
+    const counts = new Map<string, number>();
+    for (const row of rows) for (const cell of row) if (cell !== ".") counts.set(cell, (counts.get(cell) ?? 0) + depth);
+    const matrix = new THREE.Matrix4();
+    const quaternion = new THREE.Quaternion();
+    const scale = new THREE.Vector3(voxel, voxel, voxel);
+    const voxelPosition = new THREE.Vector3();
+    for (const [cell, count] of counts) {
+      const material = palette[cell];
+      if (!material) continue;
+      const instanced = new THREE.InstancedMesh(unitBox, material, count);
+      instanced.castShadow = true;
+      instanced.receiveShadow = true;
+      let index = 0;
+      rows.forEach((row, rowIndex) => {
+        for (let column = 0; column < row.length; column++) {
+          if (row[column] !== cell) continue;
+          for (let layer = 0; layer < depth; layer++) {
+            voxelPosition.set(
+              (column - (gridWidth - 1) / 2) * voxel,
+              (rows.length - 1 - rowIndex) * voxel + voxel / 2,
+              (layer - (depth - 1) / 2) * voxel,
+            );
+            matrix.compose(voxelPosition, quaternion, scale);
+            instanced.setMatrixAt(index++, matrix);
+          }
+        }
+      });
+      group.add(instanced);
+    }
+    parent.add(group);
+    return group;
+  };
+
+  const addLabel = (position: THREE.Vector3, text: string, parent: THREE.Object3D = root) => {
     const canvas = document.createElement("canvas");
     canvas.width = 512;
     canvas.height = 96;
@@ -1946,7 +2080,7 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
     const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false, toneMapped: false }));
     label.position.copy(position);
     label.scale.set(96, 18, 1);
-    root.add(label);
+    parent.add(label);
   };
 
   const partMaterial = (kind: DhakaLandmark["kind"], part: LandmarkFootprintPart) => {
@@ -1968,7 +2102,7 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
     return whiteStone;
   };
 
-  const partCenters = new Map<number, THREE.Vector2>();
+  const partBounds = new Map<number, { minX: number; maxX: number; minZ: number; maxZ: number; height: number }>();
   const allBounds = new Map<DhakaLandmark["kind"], { minX: number; maxX: number; minZ: number; maxZ: number; top: number }>();
 
   for (const landmark of DHAKA_LANDMARKS) {
@@ -2003,7 +2137,7 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
       const partMaxX = Math.max(...xs);
       const partMinZ = Math.min(...zs);
       const partMaxZ = Math.max(...zs);
-      partCenters.set(part.osmId, new THREE.Vector2((partMinX + partMaxX) / 2, (partMinZ + partMaxZ) / 2));
+      partBounds.set(part.osmId, { minX: partMinX, maxX: partMaxX, minZ: partMinZ, maxZ: partMaxZ, height: part.height });
       if (part.role !== "ground" && part.role !== "water") {
         minX = Math.min(minX, partMinX);
         maxX = Math.max(maxX, partMaxX);
@@ -2038,36 +2172,71 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
     allBounds.set(landmark.kind, { minX, maxX, minZ, maxZ, top });
   }
 
+  // Landmarks with no OSM masses to align with may orient details by heading;
+  // footprint-anchored details must stay in world space like the masses they decorate.
+  const proceduralKinds = new Set<DhakaLandmark["kind"]>(["shaheed-minar", "amphitheatre", "bangladesh-bank", "airport"]);
+
   const detailGroup = (landmark: DhakaLandmark) => {
     const bounds = allBounds.get(landmark.kind)!;
     const group = new THREE.Group();
     group.name = `${landmark.label} signature architecture`;
     group.position.set((bounds.minX + bounds.maxX) / 2, 0.9, (bounds.minZ + bounds.maxZ) / 2);
-    group.rotation.y = landmark.heading;
+    if (proceduralKinds.has(landmark.kind)) group.rotation.y = landmark.heading;
     root.add(group);
+    const anchor = (osmId: number) => {
+      const part = partBounds.get(osmId);
+      if (!part) return null;
+      return {
+        x: (part.minX + part.maxX) / 2 - group.position.x,
+        z: (part.minZ + part.maxZ) / 2 - group.position.z,
+        width: part.maxX - part.minX,
+        depth: part.maxZ - part.minZ,
+        height: part.height,
+      };
+    };
     return {
       group,
+      anchor,
       width: Math.max(8, bounds.maxX - bounds.minX),
       depth: Math.max(8, bounds.maxZ - bounds.minZ),
-      top: Math.max(bounds.top, landmark.altitude),
+      top: bounds.top > 0 ? bounds.top : landmark.altitude,
     };
   };
 
   for (const landmark of DHAKA_LANDMARKS) {
-    const { group, width, depth, top } = detailGroup(landmark);
+    const { group, anchor, width, depth, top } = detailGroup(landmark);
 
     if (landmark.kind === "church") {
-      for (const side of [-1, 1]) {
-        const spire = new THREE.Mesh(new THREE.ConeGeometry(3.8, 15, 8), roof);
-        spire.position.set(side * width * 0.22, 28, -depth * 0.3);
+      const tower = anchor(983631140);
+      if (tower) {
+        const spire = new THREE.Mesh(new THREE.ConeGeometry(Math.min(tower.width, tower.depth) * 0.52, 14, 8), roof);
+        spire.position.set(tower.x, tower.height + 7, tower.z);
         spire.castShadow = true;
         group.add(spire);
-        addBox(group, [0.7, 7, 0.7], [side * width * 0.22, 39, -depth * 0.3], accent);
-        addBox(group, [3.8, 0.7, 0.7], [side * width * 0.22, 40.4, -depth * 0.3], accent);
+        addBox(group, [0.7, 6, 0.7], [tower.x, tower.height + 17, tower.z], accent);
+        addBox(group, [3.4, 0.7, 0.7], [tower.x, tower.height + 18.2, tower.z], accent);
+      }
+      for (const osmId of [983631141, 983631142]) {
+        const upper = anchor(osmId);
+        if (!upper) continue;
+        const pinnacle = new THREE.Mesh(new THREE.ConeGeometry(Math.min(upper.width, upper.depth) * 0.42, 6, 8), roof);
+        pinnacle.position.set(upper.x, upper.height + 3, upper.z);
+        pinnacle.castShadow = true;
+        group.add(pinnacle);
       }
     } else if (landmark.kind === "bashundhara-city") {
-      for (let y = 33; y < top; y += 8.5) addCylinder(group, width * 0.18, width * 0.18, 0.9, [0, y, 0], accent, 24);
-      addCylinder(group, width * 0.11, width * 0.14, 10, [0, top + 5, 0], darkGlass, 20);
+      const tower = anchor(1092674471);
+      if (tower) {
+        for (let y = 7; y < tower.height - 3; y += 4.6) {
+          addBox(group, [tower.width * 1.04, 0.55, tower.depth * 1.04], [tower.x, y, tower.z], paleConcrete);
+        }
+        addBox(group, [tower.width * 0.94, 1.8, tower.depth * 0.94], [tower.x, tower.height + 0.9, tower.z], roof);
+      }
+      const core = anchor(1092674472);
+      if (core) {
+        addDome(group, Math.max(3.2, Math.min(core.width, core.depth) * 0.52), [core.x, core.height + 0.4, core.z], glass);
+        addCylinder(group, 0.5, 0.9, 11, [core.x, core.height + 6, core.z], accent, 8);
+      }
     } else if (landmark.kind === "amphitheatre") {
       for (let tier = 0; tier < 7; tier++) {
         const seating = new THREE.Mesh(
@@ -2081,83 +2250,208 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
         group.add(seating);
       }
     } else if (landmark.kind === "police-plaza") {
-      addBox(group, [Math.max(5, width * 0.09), top * 0.94, depth * 1.01], [0, top * 0.47, 0], paleConcrete);
-      addBox(group, [width * 0.92, 2.2, depth * 1.02], [0, top + 1.1, 0], roof);
+      const mass = anchor(366560370);
+      if (mass) {
+        addBox(group, [Math.max(5, mass.width * 0.09), mass.height * 0.96, mass.depth * 1.03], [mass.x, mass.height * 0.48, mass.z], paleConcrete);
+        for (let y = 10; y < mass.height - 4; y += 7.4) {
+          addBox(group, [mass.width * 1.03, 0.6, mass.depth * 1.03], [mass.x, y, mass.z], paleConcrete);
+        }
+        addBox(group, [mass.width * 0.9, 2.2, mass.depth * 1.04], [mass.x, mass.height + 1.1, mass.z], roof);
+      }
     } else if (landmark.kind === "brac") {
-      addBox(group, [width * 0.16, top * 0.88, depth * 1.01], [width * 0.12, top * 0.48, 0], darkGlass);
-      addBox(group, [width * 1.02, 2, depth * 1.02], [0, top + 1, 0], roof);
+      const mass = anchor(229029081);
+      if (mass) {
+        addBox(group, [mass.width * 0.18, mass.height * 0.92, mass.depth * 1.02], [mass.x + mass.width * 0.2, mass.height * 0.46, mass.z], darkGlass);
+        for (let y = 8; y < mass.height - 4; y += 6.5) {
+          addBox(group, [mass.width * 1.02, 0.6, mass.depth * 1.02], [mass.x, y, mass.z], paleConcrete);
+        }
+        addBox(group, [mass.width, 1.8, mass.depth], [mass.x, mass.height + 0.9, mass.z], roof);
+      }
     } else if (landmark.kind === "hotel") {
-      addBox(group, [width * 0.16, top * 0.9, depth * 1.01], [-width * 0.12, top * 0.46, 0], glass);
-      for (let y = 12; y < top; y += 9) addBox(group, [width * 1.02, 0.7, depth * 1.02], [0, y, 0], paleConcrete);
-      addBox(group, [width * 0.72, 4, depth * 0.72], [0, top + 2, 0], roof);
+      const mass = anchor(498432169);
+      if (mass) {
+        for (let y = 10; y < mass.height - 5; y += 8) {
+          addBox(group, [mass.width * 1.02, 0.65, mass.depth * 1.02], [mass.x, y, mass.z], paleConcrete);
+        }
+        addBox(group, [mass.width * 0.7, 3.5, mass.depth * 0.7], [mass.x, mass.height + 1.7, mass.z], roof);
+        addBox(group, [4, 6, 4], [mass.x, mass.height + 5.5, mass.z], accent);
+      }
     } else if (landmark.kind === "parliament") {
-      addCylinder(group, Math.min(width, depth) * 0.17, Math.min(width, depth) * 0.2, 11, [0, top + 5.5, 0], concrete, 8);
-      const circle = (x: number, y: number, z: number, rotateY: number) => {
-        const disk = new THREE.Mesh(new THREE.CylinderGeometry(9, 9, 1.2, 32), recess);
-        disk.position.set(x, y, z);
-        disk.rotation.x = Math.PI / 2;
-        disk.rotation.y = rotateY;
-        group.add(disk);
-      };
-      circle(0, 25, -depth * 0.5 - 0.4, 0);
-      circle(0, 24, depth * 0.5 + 0.4, 0);
+      const drum = anchor(443037035);
+      if (drum) {
+        addCylinder(group, Math.min(drum.width, drum.depth) * 0.34, Math.min(drum.width, drum.depth) * 0.44, 8, [drum.x, drum.height + 4, drum.z], concrete, 8);
+      }
+      const ring = anchor(443036732);
+      if (ring) {
+        // Louis Kahn's signature geometric voids, sunk flush into the assembly drum walls.
+        const cutout = (radius: number, segments: number, x: number, y: number, z: number, alongX: boolean) => {
+          const disk = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius, 1.6, segments), recess);
+          disk.position.set(x, y, z);
+          if (alongX) disk.rotation.z = Math.PI / 2;
+          else disk.rotation.x = Math.PI / 2;
+          group.add(disk);
+        };
+        cutout(8, 32, ring.x, ring.height * 0.55, ring.z - ring.depth * 0.5, false);
+        cutout(8, 32, ring.x, ring.height * 0.55, ring.z + ring.depth * 0.5, false);
+        cutout(7, 3, ring.x - ring.width * 0.5, ring.height * 0.52, ring.z, true);
+        cutout(7, 3, ring.x + ring.width * 0.5, ring.height * 0.52, ring.z, true);
+      }
     } else if (landmark.kind === "lalbagh-fort") {
-      const tomb = partCenters.get(624024857);
-      const mosque = partCenters.get(624024874);
-      const origin = group.position;
-      if (tomb) addDome(group, 8.5, [tomb.x - origin.x, 15, tomb.y - origin.z], whiteStone);
+      const grounds = anchor(624024881);
+      if (grounds) {
+        const halfWidth = grounds.width / 2 - 2;
+        const halfDepth = grounds.depth / 2 - 2;
+        addBox(group, [grounds.width - 4, 4.5, 1.8], [grounds.x, 2.6, grounds.z - halfDepth], redBrick);
+        addBox(group, [grounds.width - 4, 4.5, 1.8], [grounds.x, 2.6, grounds.z + halfDepth], redBrick);
+        addBox(group, [1.8, 4.5, grounds.depth - 4], [grounds.x - halfWidth, 2.6, grounds.z], redBrick);
+        addBox(group, [1.8, 4.5, grounds.depth - 4], [grounds.x + halfWidth, 2.6, grounds.z], redBrick);
+        for (const [sideX, sideZ] of [[-1, -1], [1, -1], [-1, 1], [1, 1]] as const) {
+          const cornerX = grounds.x + sideX * halfWidth;
+          const cornerZ = grounds.z + sideZ * halfDepth;
+          addCylinder(group, 3.4, 3.8, 7, [cornerX, 3.5, cornerZ], redBrick, 12);
+          addDome(group, 3.3, [cornerX, 7, cornerZ], whiteStone);
+        }
+      }
+      const tomb = anchor(624024857);
+      if (tomb) {
+        const domeRadius = Math.max(5, Math.min(tomb.width, tomb.depth) * 0.38);
+        addDome(group, domeRadius, [tomb.x, tomb.height, tomb.z], whiteStone);
+        addCylinder(group, 0.35, 0.6, 3.2, [tomb.x, tomb.height + domeRadius + 1.4, tomb.z], accent, 8);
+      }
+      const mosque = anchor(624024874);
       if (mosque) {
-        for (const offset of [-9, 0, 9]) addDome(group, 4.7, [mosque.x - origin.x + offset, 11, mosque.y - origin.z], whiteStone);
+        const alongX = mosque.width >= mosque.depth;
+        const spacing = Math.max(mosque.width, mosque.depth) * 0.3;
+        for (const step of [-1, 0, 1]) {
+          const radius = step === 0 ? 3.8 : 3.1;
+          addDome(group, radius, [mosque.x + (alongX ? step * spacing : 0), mosque.height, mosque.z + (alongX ? 0 : step * spacing)], whiteStone);
+        }
+      }
+      const gate = anchor(624024884);
+      if (gate) {
+        addBox(group, [gate.width * 0.5, 4, gate.depth * 0.5], [gate.x, gate.height + 2, gate.z], redBrick);
+        addDome(group, Math.max(2.4, Math.min(gate.width, gate.depth) * 0.26), [gate.x, gate.height + 4, gate.z], whiteStone);
       }
     } else if (landmark.kind === "ahsan-manzil") {
-      const palace = partCenters.get(624025793);
-      const origin = group.position;
+      const palace = anchor(624025793);
       if (palace) {
-        const x = palace.x - origin.x;
-        const z = palace.y - origin.z;
-        addCylinder(group, 9.5, 11.5, 6, [x, 27, z], whiteStone, 18);
-        addDome(group, 9.5, [x, 30, z], pinkPlaster);
-        addCylinder(group, 0.55, 0.9, 5, [x, 41.5, z], accent, 8);
+        addBox(group, [palace.width * 1.03, 1.1, palace.depth * 1.03], [palace.x, palace.height + 0.4, palace.z], whiteStone);
+        const domeRadius = clamp(Math.min(palace.width, palace.depth) * 0.28, 5, 8.5);
+        addCylinder(group, domeRadius * 1.12, domeRadius * 1.3, 5, [palace.x, palace.height + 2.5, palace.z], pinkPlaster, 8);
+        addCylinder(group, domeRadius * 0.94, domeRadius * 1.04, 2.4, [palace.x, palace.height + 6.2, palace.z], whiteStone, 8);
+        addDome(group, domeRadius, [palace.x, palace.height + 7, palace.z], pinkPlaster);
+        addCylinder(group, 0.4, 0.7, 4, [palace.x, palace.height + 7 + domeRadius + 1.8, palace.z], accent, 8);
+        // Pilaster rhythm along the river-facing south facade.
+        const alongX = palace.width >= palace.depth;
+        const span = (alongX ? palace.width : palace.depth) * 0.42;
+        for (let index = 0; index < 7; index++) {
+          const offset = -span + (2 * span * index) / 6;
+          const pilasterX = palace.x + (alongX ? offset : palace.width / 2 + 0.3);
+          const pilasterZ = palace.z + (alongX ? palace.depth / 2 + 0.3 : offset);
+          addBox(group, alongX ? [1.4, palace.height * 0.82, 1] : [1, palace.height * 0.82, 1.4], [pilasterX, palace.height * 0.44, pilasterZ], whiteStone);
+        }
+        addBox(group, [10, 1.4, 6], [palace.x, 0.8, palace.z + palace.depth / 2 + 3.2], whiteStone);
+        addBox(group, [13, 0.7, 9], [palace.x, 0.35, palace.z + palace.depth / 2 + 4.4], paleConcrete);
       }
     } else if (landmark.kind === "shaheed-minar") {
-      const redSun = new THREE.Mesh(new THREE.CylinderGeometry(10, 10, 1.4, 40), monumentRed);
-      redSun.position.set(0, 12, 3.5);
-      redSun.rotation.x = Math.PI / 2;
-      group.add(redSun);
-      for (const index of [-2, -1, 0, 1, 2]) {
-        const height = index === 0 ? 15 : 12.5 - Math.abs(index) * 0.4;
-        const x = index * 8.4;
-        const pillar = addBox(group, [3.8, height, 3.2], [x, height / 2 + 1.5, 0], whiteStone);
-        pillar.rotation.z = index * -0.045;
-        const crossbar = addBox(group, [7.2, 1.8, 3.5], [x, height + 1.1, 0], whiteStone);
-        crossbar.rotation.z = index * -0.045;
-      }
+      addBox(group, [44, 0.6, 28], [0, 0.3, 2], paleConcrete);
+      addBox(group, [40, 1.2, 23], [0, 0.9, 0], whiteStone);
+      // Voxel-art elevation: five column-and-lintel frames bowing forward,
+      // the mother frame tallest at centre, the red sun rising behind.
+      addVoxelRelief(
+        group,
+        [
+          "..RRRR..",
+          ".RRRRRR.",
+          "RRRRRRRR",
+          "RRRRRRRR",
+          "RRRRRRRR",
+          "RRRRRRRR",
+          ".RRRRRR.",
+          "..RRRR..",
+        ],
+        { R: monumentRed },
+        1.4,
+        [4.5, 4.2, -3.6],
+        { depth: 1 },
+      );
+      addVoxelRelief(
+        group,
+        [
+          "..........WWWW..........",
+          "..........W..W..........",
+          ".....WWWW.W..W.WWWW.....",
+          ".....W..W.W..W.W..W.....",
+          "WWWW.W..W.W..W.W..W.WWWW",
+          "W..W.W..W.W..W.W..W.W..W",
+          "W..W.W..W.W..W.W..W.W..W",
+          "W..W.W..W.W..W.W..W.W..W",
+          "W..W.W..W.W..W.W..W.W..W",
+          "W..W.W..W.W..W.W..W.W..W",
+        ],
+        { W: whiteStone },
+        1.6,
+        [0, 1.4, 0],
+        { depth: 1, leanX: -0.15 },
+      );
     } else if (landmark.kind === "curzon-hall") {
-      addCylinder(group, 8, 10, 6, [0, 21, 0], whiteStone, 16);
-      addDome(group, 8, [0, 24, 0], redBrick);
-      for (const side of [-1, 1]) addDome(group, 5.5, [side * width * 0.32, 19, -depth * 0.08], whiteStone);
+      const mass = anchor(264272612);
+      if (mass) {
+        addBox(group, [mass.width * 1.02, 0.7, mass.depth * 1.02], [mass.x, 5.5, mass.z], whiteStone);
+        addBox(group, [mass.width * 1.02, 0.7, mass.depth * 1.02], [mass.x, 11.5, mass.z], whiteStone);
+        addCylinder(group, 6.5, 7.5, 4.5, [mass.x, mass.height + 2, mass.z], whiteStone, 16);
+        addDome(group, 6.5, [mass.x, mass.height + 4, mass.z], redBrick);
+        addCylinder(group, 0.4, 0.7, 3.4, [mass.x, mass.height + 11.6, mass.z], accent, 8);
+        const cornerX = mass.width / 2 - 4;
+        const cornerZ = mass.depth / 2 - 4;
+        for (const [sideX, sideZ] of [[-1, -1], [1, -1], [-1, 1], [1, 1]] as const) {
+          addCylinder(group, 1.6, 1.8, 4, [mass.x + sideX * cornerX, mass.height + 1.6, mass.z + sideZ * cornerZ], whiteStone, 10);
+          addDome(group, 2, [mass.x + sideX * cornerX, mass.height + 3.6, mass.z + sideZ * cornerZ], whiteStone);
+        }
+      }
     } else if (landmark.kind === "baitul-mukarram") {
-      addBox(group, [width * 0.62, 2.4, depth * 0.62], [0, 33.2, 0], whiteStone);
-      for (const y of [20, 25, 30]) addBox(group, [width * 0.6, 1.1, 0.7], [0, y, -depth * 0.5 - 0.35], recess);
-      const minaretX = width * 0.43;
-      const minaretZ = depth * 0.36;
-      addBox(group, [8.5, 58, 8.5], [minaretX, 29, minaretZ], concrete);
-      addBox(group, [12, 2.4, 12], [minaretX, 59, minaretZ], whiteStone);
-      addBox(group, [6.2, 12, 6.2], [minaretX, 66, minaretZ], concrete);
-      const cap = new THREE.Mesh(new THREE.ConeGeometry(5.2, 8, 4), whiteStone);
-      cap.position.set(minaretX, 76, minaretZ);
-      cap.rotation.y = Math.PI / 4;
-      cap.castShadow = true;
-      group.add(cap);
-      addCylinder(group, 0.45, 0.8, 5, [minaretX, 82.5, minaretZ], accent, 8);
+      const mass = anchor(186664126);
+      if (mass) {
+        addBox(group, [mass.width * 0.6, 2.2, mass.depth * 0.6], [mass.x, mass.height + 1.1, mass.z], whiteStone);
+        // Voxel arch screens: rows of recessed pointed arches sunk into every
+        // facade of the great white cube, in repeating 5-column units.
+        const voxel = 2.2;
+        const archRows = (columns: number) => {
+          const lines: string[] = [];
+          for (let row = 0; row < 10; row++) {
+            let line = "";
+            for (let column = 0; column < columns; column++) {
+              const phase = column % 5;
+              if (row === 0) line += ".";
+              else if (row === 1) line += phase === 2 ? "D" : ".";
+              else line += phase >= 1 && phase <= 3 ? "D" : ".";
+            }
+            lines.push(line);
+          }
+          return lines;
+        };
+        const screenColumns = (wallLength: number) => Math.max(6, Math.floor((wallLength - 10) / voxel));
+        for (const side of [-1, 1]) {
+          addVoxelRelief(group, archRows(screenColumns(mass.width)), { D: recess }, voxel, [mass.x, 3, mass.z + side * (mass.depth / 2 - 0.6)], { depth: 1 });
+          addVoxelRelief(group, archRows(screenColumns(mass.depth)), { D: recess }, voxel, [mass.x + side * (mass.width / 2 - 0.6), 3, mass.z], { depth: 1, rotationY: Math.PI / 2 });
+        }
+        const minaretX = mass.x + mass.width * 0.6;
+        const minaretZ = mass.z + mass.depth * 0.52;
+        addCylinder(group, 2.6, 3.1, 50, [minaretX, 25, minaretZ], paleConcrete, 12);
+        addCylinder(group, 4.2, 4.2, 1.6, [minaretX, 50.8, minaretZ], whiteStone, 12);
+        addCylinder(group, 1.9, 2.3, 10, [minaretX, 56.5, minaretZ], paleConcrete, 12);
+        addDome(group, 2.2, [minaretX, 61.5, minaretZ], whiteStone);
+        addCylinder(group, 0.35, 0.6, 4.5, [minaretX, 65.5, minaretZ], accent, 8);
+      }
     } else if (landmark.kind === "bangladesh-bank") {
       addBox(group, [width * 0.9, 8, depth * 0.92], [0, 4, 0], concrete);
-      addBox(group, [width * 0.72, top - 12, depth * 0.66], [0, top * 0.5 + 2, 0], darkGlass);
-      for (let y = 14; y < top - 4; y += 7) {
+      const shaftHeight = top - 10;
+      addBox(group, [width * 0.72, shaftHeight, depth * 0.66], [0, shaftHeight / 2 + 7, 0], darkGlass);
+      for (let y = 14; y < top - 6; y += 7) {
         addBox(group, [width * 0.75, 0.8, depth * 0.69], [0, y, 0], paleConcrete);
       }
-      addBox(group, [width * 0.82, 4, depth * 0.75], [0, top + 2, 0], roof);
-      addBox(group, [5, 14, 5], [0, top + 10, 0], accent);
+      addBox(group, [width * 0.78, 2.6, depth * 0.72], [0, top - 1.5, 0], roof);
+      addBox(group, [5, 9, 5], [0, top + 2.5, 0], accent);
     } else if (landmark.kind === "airport") {
       const runway = addBox(group, [72, 1.2, 3_200], [0, 0.35, 0], recess);
       runway.receiveShadow = true;
@@ -2187,11 +2481,11 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
       z: (bounds.minZ + bounds.maxZ) / 2,
       halfWidth: Math.max(3, (bounds.maxX - bounds.minX) / 2),
       halfDepth: Math.max(3, (bounds.maxZ - bounds.minZ) / 2),
-      top: landmark.altitude,
+      top,
     });
     const world = coordinatesToWorld(landmark.lat, landmark.lon);
     const perch = {
-      position: new THREE.Vector3(world.x, landmark.altitude, world.y),
+      position: new THREE.Vector3(world.x, top, world.y),
       label: landmark.label,
       heading: landmark.heading,
     };
@@ -2199,202 +2493,252 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
     addLabel(perch.position.clone().add(new THREE.Vector3(0, 24, 0)), landmark.label);
   }
 
-  const metroRoot = new THREE.Group();
-  metroRoot.name = "Dhaka MRT Line 6";
-  const metroPoints = MRT_LINE_6_STATIONS.map((station) => {
+  const METRO_DECK_Y = 18;
+  type MetroStationSpec = { label: string; x: number; z: number };
+
+  const disposeMetroGroup = (group: THREE.Group) => {
+    group.traverse((object) => {
+      if (object instanceof THREE.Sprite) {
+        object.material.map?.dispose();
+        object.material.dispose();
+        return;
+      }
+      if (object instanceof THREE.Mesh && object.geometry !== unitBox) object.geometry.dispose();
+    });
+    root.remove(group);
+  };
+
+  const buildMetro = (centerline: THREE.Vector3[], stationSpecs: MetroStationSpec[]) => {
+    const metroRoot = new THREE.Group();
+    metroRoot.name = "Dhaka MRT Line 6";
+    const metroCurve = new THREE.CatmullRomCurve3(centerline, false, "centripetal", 0.28);
+    const curveLength = metroCurve.getLength();
+    const guidewayMaterial = new THREE.MeshStandardMaterial({ color: 0xc9c7bd, roughness: 0.78 });
+    const metroRed = new THREE.MeshStandardMaterial({ color: 0xb72e36, roughness: 0.58, metalness: 0.18 });
+    const metroGlass = new THREE.MeshPhysicalMaterial({ color: 0x365d68, roughness: 0.2, metalness: 0.18, clearcoat: 0.5 });
+    const metroSteel = new THREE.MeshStandardMaterial({ color: 0xd2d6d9, roughness: 0.42, metalness: 0.55 });
+    const RAIL_TOP_Y = METRO_DECK_Y + 0.9;
+    const TRACK_OFFSET = 2.6;
+
+    // Box-girder guideway: a chain of rectangular boxes swept along the curve, resting on the piers.
+    // Sample counts scale with the line's true length so the dense OSM track geometry
+    // and the coarse station-to-station fallback both render smoothly.
+    const GIRDER_SAMPLES = Math.min(560, Math.max(160, Math.round(curveLength / 90)));
+    let girderPrev = metroCurve.getPointAt(0);
+    for (let index = 1; index <= GIRDER_SAMPLES; index++) {
+      const point = metroCurve.getPointAt(index / GIRDER_SAMPLES);
+      const midX = (girderPrev.x + point.x) / 2;
+      const midY = (girderPrev.y + point.y) / 2;
+      const midZ = (girderPrev.z + point.z) / 2;
+      const dx = point.x - girderPrev.x;
+      const dz = point.z - girderPrev.z;
+      const segLength = Math.hypot(dx, dz) + 0.7;
+      const girder = addBox(metroRoot, [segLength, 2.4, 9.6], [midX, midY - 1.2, midZ], guidewayMaterial);
+      girder.rotation.y = Math.atan2(-dz, dx);
+      girderPrev = point;
+    }
+    // Two running rails sitting on top of the girder deck, offset perpendicular to the track (dual-track).
+    const RAIL_SAMPLES = GIRDER_SAMPLES;
+    for (const track of [-1, 1]) {
+      const railPoints: THREE.Vector3[] = [];
+      for (let index = 0; index <= RAIL_SAMPLES; index++) {
+        const u = index / RAIL_SAMPLES;
+        const p = metroCurve.getPointAt(u);
+        const t = metroCurve.getTangentAt(u);
+        const perpLength = Math.hypot(t.z, t.x) || 1;
+        railPoints.push(new THREE.Vector3(
+          p.x + (-t.z / perpLength) * track * TRACK_OFFSET,
+          RAIL_TOP_Y,
+          p.z + (t.x / perpLength) * track * TRACK_OFFSET,
+        ));
+      }
+      const railCurve = new THREE.CatmullRomCurve3(railPoints, false, "centripetal", 0.5);
+      metroRoot.add(new THREE.Mesh(new THREE.TubeGeometry(railCurve, RAIL_SAMPLES, 0.4, 5, false), metroRed));
+    }
+    const PIER_COUNT = Math.max(24, Math.round(curveLength / 260));
+    for (let index = 1; index < PIER_COUNT; index++) {
+      const point = metroCurve.getPointAt(index / PIER_COUNT);
+      const pierHeight = Math.max(5, point.y - 0.5);
+      addCylinder(metroRoot, 2.4, 3.8, pierHeight, [point.x, pierHeight / 2, point.z], concrete, 8);
+      addBox(metroRoot, [18, 2.2, 4.2], [point.x, point.y - 3, point.z], concrete);
+    }
+
+    // Project each station onto the curve: nearest arc-length parameter wins. Stations
+    // further than 200 m from the line are dropped as bad data.
+    const PROJECTION_SAMPLES = 1600;
+    const stations = stationSpecs
+      .map((spec) => {
+        let bestU = 0;
+        let bestDistanceSquared = Infinity;
+        for (let index = 0; index <= PROJECTION_SAMPLES; index++) {
+          const sample = metroCurve.getPointAt(index / PROJECTION_SAMPLES);
+          const distanceSquared = (sample.x - spec.x) ** 2 + (sample.z - spec.z) ** 2;
+          if (distanceSquared < bestDistanceSquared) {
+            bestDistanceSquared = distanceSquared;
+            bestU = index / PROJECTION_SAMPLES;
+          }
+        }
+        return { label: spec.label, u: bestU, distance: Math.sqrt(bestDistanceSquared) };
+      })
+      .filter((station) => station.distance < 200)
+      .sort((a, b) => a.u - b.u);
+
+    // Elevated station hall: platform deck, glazed sides, a vaulted (arch-profile) roof, and stair blocks to street level.
+    const VAULT_RADIUS = 13;
+    const VAULT_RISE = 0.55;
+    const ROOF_BASE_Y = 11;
+    const stationVaultGeometry = new THREE.CylinderGeometry(VAULT_RADIUS, VAULT_RADIUS, 90, 20, 1, true, 0, Math.PI);
+    for (const station of stations) {
+      const point = metroCurve.getPointAt(station.u);
+      const tangent = metroCurve.getTangentAt(station.u);
+      const stationGroup = new THREE.Group();
+      stationGroup.name = `${station.label} MRT station`;
+      stationGroup.position.copy(point);
+      stationGroup.rotation.y = Math.atan2(-tangent.z, tangent.x);
+      // Platform deck (station long axis runs along local X, over the tracks).
+      addBox(stationGroup, [98, 3, 22], [0, 0.5, 0], concrete);
+      for (const side of [-1, 1]) addBox(stationGroup, [98, 0.35, 0.6], [0, 2.1, side * 10.4], metroRed);
+      // Supporting columns and glazed side walls up to the eaves.
+      for (const side of [-1, 1]) {
+        for (const x of [-40, -20, 0, 20, 40]) addBox(stationGroup, [1.8, ROOF_BASE_Y - 2, 1.8], [x, (ROOF_BASE_Y + 2) / 2, side * 11.4], concrete);
+        addBox(stationGroup, [90, ROOF_BASE_Y - 2, 0.4], [0, (ROOF_BASE_Y + 2) / 2, side * 11.4], metroGlass);
+      }
+      for (const end of [-1, 1]) addBox(stationGroup, [0.6, ROOF_BASE_Y - 2, 24], [end * 45, (ROOF_BASE_Y + 2) / 2, 0], metroGlass);
+      // Vaulted roof (half-cylinder arch), flattened a little, with a red line-colour accent along the eaves and ridge.
+      const vault = new THREE.Mesh(stationVaultGeometry, whiteStone);
+      vault.rotation.z = Math.PI / 2;
+      vault.position.y = ROOF_BASE_Y;
+      vault.scale.x = VAULT_RISE;
+      vault.castShadow = true;
+      vault.receiveShadow = true;
+      stationGroup.add(vault);
+      for (const side of [-1, 1]) addBox(stationGroup, [92, 0.9, 0.7], [0, ROOF_BASE_Y, side * VAULT_RADIUS], metroRed);
+      addBox(stationGroup, [92, 0.3, 1.2], [0, ROOF_BASE_Y + VAULT_RADIUS * VAULT_RISE, 0], metroRed);
+      // Two entrance stair blocks angling down to street level on either side.
+      for (const side of [-1, 1]) {
+        const run = 23;
+        const drop = 18;
+        const slope = Math.hypot(run, drop);
+        const stair = addBox(stationGroup, [8, 2.6, slope], [0, -drop / 2, side * (11 + run / 2)], concrete);
+        stair.rotation.x = side * Math.atan2(drop, run);
+        addBox(stationGroup, [10, 3, 6], [0, -drop + 0.5, side * (11 + run + 2)], paleConcrete);
+      }
+      metroRoot.add(stationGroup);
+      addLabel(point.clone().add(new THREE.Vector3(0, 42, 0)), `${station.label} · MRT 6`, metroRoot);
+    }
+
+    // Stainless-steel 6-car trainset, magenta/red Line-6 stripe, dark window band, rounded nose cabs at both ends.
+    const CAR_COUNT = 6;
+    const CAR_LEN = 19.8;
+    const CAR_PITCH = 21;
+    const CAR_W = 3;
+    const buildTrain = () => {
+      const train = new THREE.Group();
+      train.name = "MRT Line 6 trainset";
+      for (let car = 0; car < CAR_COUNT; car++) {
+        const z = (car - (CAR_COUNT - 1) / 2) * CAR_PITCH;
+        addBox(train, [CAR_W, 3.2, CAR_LEN], [0, 2.6, z], metroSteel);
+        addBox(train, [CAR_W + 0.04, 1.1, CAR_LEN - 2.4], [0, 3.1, z], darkGlass);
+        addBox(train, [CAR_W + 0.06, 0.55, CAR_LEN - 0.6], [0, 2.15, z], metroRed);
+        addBox(train, [CAR_W - 0.5, 0.5, CAR_LEN - 0.4], [0, 4.35, z], metroSteel);
+        addBox(train, [0.8, 0.22, CAR_LEN - 0.4], [0, 4.62, z], metroRed);
+        for (const b of [-1, 1]) addBox(train, [2.4, 0.9, 3.6], [0, 0.35, z + b * 6.4], recess);
+        // Nose cab detailing on the two end cars.
+        if (car === 0 || car === CAR_COUNT - 1) {
+          const dir = car === 0 ? -1 : 1;
+          const tip = z + dir * (CAR_LEN / 2);
+          addBox(train, [CAR_W - 0.4, 2.6, 1.4], [0, 2.4, tip - dir * 0.7], metroSteel);
+          const windshield = addBox(train, [CAR_W - 0.1, 2.2, 0.5], [0, 3.2, tip - dir * 0.9], darkGlass);
+          windshield.rotation.x = dir * 0.42;
+          addBox(train, [CAR_W - 0.2, 0.5, 0.35], [0, 1.9, tip - dir * 0.2], metroRed);
+        }
+      }
+      train.traverse((object) => { object.frustumCulled = false; });
+      return train;
+    };
+
+    // Ping-pong stop sequence over the projected station parameters: run up the line
+    // stopping at each station, dwell at the terminus, run back down.
+    const stationU = stations.map((station) => station.u);
+    const stops = stationU.length >= 2 ? stationU : [0, 1];
+    const stopSeq = [...stops, ...stops.slice(0, -1).reverse()];
+    const CRUISE = 0.04; // arc-fraction per second
+    const DWELL = 2.4; // seconds stopped at each station
+    const segDur = stopSeq.map((u, i) => Math.abs(stopSeq[(i + 1) % stopSeq.length] - u) / CRUISE);
+    const dirSign = stopSeq.map((u, i) => {
+      const next = stopSeq[(i + 1) % stopSeq.length] - u;
+      if (Math.abs(next) > 1e-6) return Math.sign(next);
+      const prev = u - stopSeq[(i - 1 + stopSeq.length) % stopSeq.length];
+      return Math.sign(prev) || 1;
+    });
+    const cycle = segDur.reduce((sum, d) => sum + d + DWELL, 0);
+    const runner = (time: number, phase: number) => {
+      let tp = (time + phase) % cycle;
+      if (tp < 0) tp += cycle;
+      let acc = 0;
+      for (let i = 0; i < stopSeq.length; i++) {
+        if (tp < acc + DWELL) return { u: stopSeq[i], dir: dirSign[i] };
+        acc += DWELL;
+        if (tp < acc + segDur[i]) {
+          const f = segDur[i] > 0 ? (tp - acc) / segDur[i] : 1;
+          const ease = f * f * (3 - 2 * f);
+          const next = stopSeq[(i + 1) % stopSeq.length];
+          return { u: stopSeq[i] + (next - stopSeq[i]) * ease, dir: dirSign[i] };
+        }
+        acc += segDur[i];
+      }
+      return { u: stopSeq[0], dir: dirSign[0] };
+    };
+
+    const TRAIN_COUNT = 3;
+    const trains = Array.from({ length: TRAIN_COUNT }, (_, i) => {
+      const train = buildTrain();
+      metroRoot.add(train);
+      return { train, phase: (cycle * i) / TRAIN_COUNT };
+    });
+    const trainPoint = new THREE.Vector3();
+    const trainTangent = new THREE.Vector3();
+    const trainPerp = new THREE.Vector3();
+    const trainTarget = new THREE.Vector3();
+    scene.userData.metroRailUpdate = (time: number) => {
+      for (const { train, phase } of trains) {
+        const { u, dir } = runner(time, phase);
+        const cu = Math.min(Math.max(u, 0), 1);
+        metroCurve.getPointAt(cu, trainPoint);
+        metroCurve.getTangentAt(cu, trainTangent);
+        trainPerp.set(-trainTangent.z, 0, trainTangent.x).normalize();
+        const side = dir >= 0 ? 1 : -1;
+        train.position.copy(trainPoint).addScaledVector(trainPerp, side * TRACK_OFFSET);
+        train.position.y = RAIL_TOP_Y;
+        trainTarget.copy(train.position).addScaledVector(trainTangent, dir >= 0 ? 1 : -1);
+        train.lookAt(trainTarget);
+      }
+    };
+    root.add(metroRoot);
+    return metroRoot;
+  };
+
+  const fallbackStationSpecs: MetroStationSpec[] = MRT_LINE_6_STATIONS.map((station) => {
     const world = coordinatesToWorld(station.lat, station.lon);
-    return new THREE.Vector3(world.x, 18, world.y);
+    return { label: station.label, x: world.x, z: world.y };
   });
-  const metroCurve = new THREE.CatmullRomCurve3(metroPoints, false, "centripetal", 0.28);
-  const guidewayMaterial = new THREE.MeshStandardMaterial({ color: 0xc9c7bd, roughness: 0.78 });
-  const metroRed = new THREE.MeshStandardMaterial({ color: 0xb72e36, roughness: 0.58, metalness: 0.18 });
-  const metroGlass = new THREE.MeshPhysicalMaterial({ color: 0x365d68, roughness: 0.2, metalness: 0.18, clearcoat: 0.5 });
-  const metroSteel = new THREE.MeshStandardMaterial({ color: 0xd2d6d9, roughness: 0.42, metalness: 0.55 });
-  const RAIL_TOP_Y = 18.9;
-  const TRACK_OFFSET = 2.6;
-
-  // Box-girder guideway: a chain of rectangular boxes swept along the curve, resting on the piers.
-  const GIRDER_SAMPLES = 220;
-  let girderPrev = metroCurve.getPointAt(0);
-  for (let index = 1; index <= GIRDER_SAMPLES; index++) {
-    const point = metroCurve.getPointAt(index / GIRDER_SAMPLES);
-    const midX = (girderPrev.x + point.x) / 2;
-    const midY = (girderPrev.y + point.y) / 2;
-    const midZ = (girderPrev.z + point.z) / 2;
-    const dx = point.x - girderPrev.x;
-    const dz = point.z - girderPrev.z;
-    const segLength = Math.hypot(dx, dz) + 0.7;
-    const girder = addBox(metroRoot, [segLength, 2.4, 9.6], [midX, midY - 1.2, midZ], guidewayMaterial);
-    girder.rotation.y = Math.atan2(-dz, dx);
-    girderPrev = point;
-  }
-  // Two running rails sitting on top of the girder deck, offset perpendicular to the track (dual-track).
-  const RAIL_SAMPLES = 220;
-  for (const track of [-1, 1]) {
-    const railPoints: THREE.Vector3[] = [];
-    for (let index = 0; index <= RAIL_SAMPLES; index++) {
-      const u = index / RAIL_SAMPLES;
-      const p = metroCurve.getPointAt(u);
-      const t = metroCurve.getTangentAt(u);
-      const perpLength = Math.hypot(t.z, t.x) || 1;
-      railPoints.push(new THREE.Vector3(
-        p.x + (-t.z / perpLength) * track * TRACK_OFFSET,
-        RAIL_TOP_Y,
-        p.z + (t.x / perpLength) * track * TRACK_OFFSET,
-      ));
-    }
-    const railCurve = new THREE.CatmullRomCurve3(railPoints, false, "centripetal", 0.5);
-    metroRoot.add(new THREE.Mesh(new THREE.TubeGeometry(railCurve, RAIL_SAMPLES, 0.4, 5, false), metroRed));
-  }
-  for (let index = 1; index < 78; index++) {
-    const point = metroCurve.getPointAt(index / 78);
-    const pierHeight = Math.max(5, point.y - 0.5);
-    addCylinder(metroRoot, 2.4, 3.8, pierHeight, [point.x, pierHeight / 2, point.z], concrete, 8);
-    addBox(metroRoot, [18, 2.2, 4.2], [point.x, point.y - 3, point.z], concrete);
-  }
-
-  // Elevated station hall: platform deck, glazed sides, a vaulted (arch-profile) roof, and stair blocks to street level.
-  const stationCount = MRT_LINE_6_STATIONS.length;
-  const VAULT_RADIUS = 13;
-  const VAULT_RISE = 0.55;
-  const ROOF_BASE_Y = 11;
-  const stationVaultGeometry = new THREE.CylinderGeometry(VAULT_RADIUS, VAULT_RADIUS, 90, 20, 1, true, 0, Math.PI);
-  MRT_LINE_6_STATIONS.forEach((station, index) => {
-    const point = metroPoints[index];
-    const tangent = metroCurve.getTangentAt(index / (stationCount - 1));
-    const stationGroup = new THREE.Group();
-    stationGroup.name = `${station.label} MRT station`;
-    stationGroup.position.copy(point);
-    stationGroup.rotation.y = Math.atan2(-tangent.z, tangent.x);
-    // Platform deck (station long axis runs along local X, over the tracks).
-    addBox(stationGroup, [98, 3, 22], [0, 0.5, 0], concrete);
-    for (const side of [-1, 1]) addBox(stationGroup, [98, 0.35, 0.6], [0, 2.1, side * 10.4], metroRed);
-    // Supporting columns and glazed side walls up to the eaves.
-    for (const side of [-1, 1]) {
-      for (const x of [-40, -20, 0, 20, 40]) addBox(stationGroup, [1.8, ROOF_BASE_Y - 2, 1.8], [x, (ROOF_BASE_Y + 2) / 2, side * 11.4], concrete);
-      addBox(stationGroup, [90, ROOF_BASE_Y - 2, 0.4], [0, (ROOF_BASE_Y + 2) / 2, side * 11.4], metroGlass);
-    }
-    for (const end of [-1, 1]) addBox(stationGroup, [0.6, ROOF_BASE_Y - 2, 24], [end * 45, (ROOF_BASE_Y + 2) / 2, 0], metroGlass);
-    // Vaulted roof (half-cylinder arch), flattened a little, with a red line-colour accent along the eaves and ridge.
-    const vault = new THREE.Mesh(stationVaultGeometry, whiteStone);
-    vault.rotation.z = Math.PI / 2;
-    vault.position.y = ROOF_BASE_Y;
-    vault.scale.x = VAULT_RISE;
-    vault.castShadow = true;
-    vault.receiveShadow = true;
-    stationGroup.add(vault);
-    for (const side of [-1, 1]) addBox(stationGroup, [92, 0.9, 0.7], [0, ROOF_BASE_Y, side * VAULT_RADIUS], metroRed);
-    addBox(stationGroup, [92, 0.3, 1.2], [0, ROOF_BASE_Y + VAULT_RADIUS * VAULT_RISE, 0], metroRed);
-    // Two entrance stair blocks angling down to street level on either side.
-    for (const side of [-1, 1]) {
-      const run = 23;
-      const drop = 18;
-      const slope = Math.hypot(run, drop);
-      const stair = addBox(stationGroup, [8, 2.6, slope], [0, -drop / 2, side * (11 + run / 2)], concrete);
-      stair.rotation.x = side * Math.atan2(drop, run);
-      addBox(stationGroup, [10, 3, 6], [0, -drop + 0.5, side * (11 + run + 2)], paleConcrete);
-    }
-    metroRoot.add(stationGroup);
-    addLabel(point.clone().add(new THREE.Vector3(0, 42, 0)), `${station.label} · MRT 6`);
-  });
-
-  // Stainless-steel 6-car trainset, magenta/red Line-6 stripe, dark window band, rounded nose cabs at both ends.
-  const CAR_COUNT = 6;
-  const CAR_LEN = 19.8;
-  const CAR_PITCH = 21;
-  const CAR_W = 3;
-  const buildTrain = () => {
-    const train = new THREE.Group();
-    train.name = "MRT Line 6 trainset";
-    for (let car = 0; car < CAR_COUNT; car++) {
-      const z = (car - (CAR_COUNT - 1) / 2) * CAR_PITCH;
-      addBox(train, [CAR_W, 3.2, CAR_LEN], [0, 2.6, z], metroSteel);
-      addBox(train, [CAR_W + 0.04, 1.1, CAR_LEN - 2.4], [0, 3.1, z], darkGlass);
-      addBox(train, [CAR_W + 0.06, 0.55, CAR_LEN - 0.6], [0, 2.15, z], metroRed);
-      addBox(train, [CAR_W - 0.5, 0.5, CAR_LEN - 0.4], [0, 4.35, z], metroSteel);
-      addBox(train, [0.8, 0.22, CAR_LEN - 0.4], [0, 4.62, z], metroRed);
-      for (const b of [-1, 1]) addBox(train, [2.4, 0.9, 3.6], [0, 0.35, z + b * 6.4], recess);
-      // Nose cab detailing on the two end cars.
-      if (car === 0 || car === CAR_COUNT - 1) {
-        const dir = car === 0 ? -1 : 1;
-        const tip = z + dir * (CAR_LEN / 2);
-        addBox(train, [CAR_W - 0.4, 2.6, 1.4], [0, 2.4, tip - dir * 0.7], metroSteel);
-        const windshield = addBox(train, [CAR_W - 0.1, 2.2, 0.5], [0, 3.2, tip - dir * 0.9], darkGlass);
-        windshield.rotation.x = dir * 0.42;
-        addBox(train, [CAR_W - 0.2, 0.5, 0.35], [0, 1.9, tip - dir * 0.2], metroRed);
-      }
-    }
-    train.traverse((object) => { object.frustumCulled = false; });
-    return train;
+  const fallbackCenterline = fallbackStationSpecs.map((station) => new THREE.Vector3(station.x, METRO_DECK_Y, station.z));
+  let metroRoot = buildMetro(fallbackCenterline, fallbackStationSpecs);
+  // Swap the approximate hardcoded line for true OSM track geometry once it arrives.
+  scene.userData.rebuildMetro = (
+    lines: MapPoint[][],
+    osmStations: Array<{ id: number; name: string | null; point: MapPoint }>,
+  ) => {
+    const centerline = lines[0]?.map(([x, z]) => new THREE.Vector3(x, METRO_DECK_Y, z)) ?? [];
+    if (centerline.length < 2) return;
+    const specs = osmStations.map((station, index) => ({
+      label: station.name ?? `Station ${index + 1}`,
+      x: station.point[0],
+      z: station.point[1],
+    }));
+    disposeMetroGroup(metroRoot);
+    metroRoot = buildMetro(centerline, specs.length >= 2 ? specs : fallbackStationSpecs);
   };
-
-  // Precompute each station's arc-length position (u in [0,1]) so trains can stop at them.
-  const stationU = MRT_LINE_6_STATIONS.map((_, index) => {
-    const targetT = index / (stationCount - 1);
-    let lo = 0;
-    let hi = 1;
-    for (let k = 0; k < 30; k++) {
-      const mid = (lo + hi) / 2;
-      if (metroCurve.getUtoTmapping(mid, 0) < targetT) lo = mid;
-      else hi = mid;
-    }
-    return (lo + hi) / 2;
-  });
-  // Ping-pong stop sequence: run up the line stopping at each station, dwell at the terminus, run back down.
-  const stopSeq = [...stationU, ...stationU.slice(0, -1).reverse()];
-  const CRUISE = 0.04; // arc-fraction per second
-  const DWELL = 2.4; // seconds stopped at each station
-  const segDur = stopSeq.map((u, i) => Math.abs(stopSeq[(i + 1) % stopSeq.length] - u) / CRUISE);
-  const dirSign = stopSeq.map((u, i) => {
-    const next = stopSeq[(i + 1) % stopSeq.length] - u;
-    if (Math.abs(next) > 1e-6) return Math.sign(next);
-    const prev = u - stopSeq[(i - 1 + stopSeq.length) % stopSeq.length];
-    return Math.sign(prev) || 1;
-  });
-  const cycle = segDur.reduce((sum, d) => sum + d + DWELL, 0);
-  const runner = (time: number, phase: number) => {
-    let tp = (time + phase) % cycle;
-    if (tp < 0) tp += cycle;
-    let acc = 0;
-    for (let i = 0; i < stopSeq.length; i++) {
-      if (tp < acc + DWELL) return { u: stopSeq[i], dir: dirSign[i] };
-      acc += DWELL;
-      if (tp < acc + segDur[i]) {
-        const f = segDur[i] > 0 ? (tp - acc) / segDur[i] : 1;
-        const ease = f * f * (3 - 2 * f);
-        const next = stopSeq[(i + 1) % stopSeq.length];
-        return { u: stopSeq[i] + (next - stopSeq[i]) * ease, dir: dirSign[i] };
-      }
-      acc += segDur[i];
-    }
-    return { u: stopSeq[0], dir: dirSign[0] };
-  };
-
-  const TRAIN_COUNT = 3;
-  const trains = Array.from({ length: TRAIN_COUNT }, (_, i) => {
-    const train = buildTrain();
-    metroRoot.add(train);
-    return { train, phase: (cycle * i) / TRAIN_COUNT };
-  });
-  const trainPoint = new THREE.Vector3();
-  const trainTangent = new THREE.Vector3();
-  const trainPerp = new THREE.Vector3();
-  const trainTarget = new THREE.Vector3();
-  scene.userData.metroRailUpdate = (time: number) => {
-    for (const { train, phase } of trains) {
-      const { u, dir } = runner(time, phase);
-      const cu = Math.min(Math.max(u, 0), 1);
-      metroCurve.getPointAt(cu, trainPoint);
-      metroCurve.getTangentAt(cu, trainTangent);
-      trainPerp.set(-trainTangent.z, 0, trainTangent.x).normalize();
-      const side = dir >= 0 ? 1 : -1;
-      train.position.copy(trainPoint).addScaledVector(trainPerp, side * TRACK_OFFSET);
-      train.position.y = RAIL_TOP_Y;
-      trainTarget.copy(train.position).addScaledVector(trainTangent, dir >= 0 ? 1 : -1);
-      train.lookAt(trainTarget);
-    }
-  };
-  root.add(metroRoot);
 
   scene.add(root);
   scene.userData.landmarkColliders = colliders;
@@ -2862,7 +3206,7 @@ function polygonShape(points: MapPoint[]) {
 }
 
 async function mergeIntoMeshBatches(
-  group: THREE.Group,
+  group: THREE.Object3D,
   geometries: THREE.BufferGeometry[],
   material: THREE.Material,
   name: string,
@@ -2974,6 +3318,12 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
   await mergeIntoMeshBatches(root, waterLines, waterMaterial, "OSM waterways", isCancelled, false, 160, false);
 
   await addRoadNetworkMeshes(root, data.roads, "OSM", isCancelled);
+  // Hide the immediate fallback network the moment real OSM roads exist — both are
+  // built at identical elevations, so any overlap window z-fights badly.
+  if (data.roads.length > 0) {
+    const roadFallback = scene.userData.proceduralRoadFallback as THREE.Group | undefined;
+    if (roadFallback) roadFallback.visible = false;
+  }
 
   // Roads and water are ground-level features. Reject any building footprint that would
   // sit on top of them so extruded walls never occlude the asphalt or the lake surface.
@@ -3256,16 +3606,30 @@ export function BirdFlight() {
     scene.userData.proceduralRoadFallback = immediateRoadFallback;
     void addRoadNetworkMeshes(immediateRoadFallback, fallbackRoads, "Immediate fallback", () => disposed);
     const mapRequestStartedAt = performance.now();
-    void fetch("/api/osm")
-      .then(async (response) => {
+    // Live Overpass data first, but never hang on it: the deployed worker can stall
+    // upstream indefinitely, so time the request out and fall back to the bundled
+    // snapshot before resorting to the sparse procedural grid.
+    const fetchMapData = async (): Promise<OsmMapData> => {
+      try {
+        const response = await fetch("/api/osm", { signal: AbortSignal.timeout(35_000) });
         if (!response.ok) throw new Error(`Map request failed with ${response.status}`);
         return await response.json() as OsmMapData;
-      })
+      } catch (liveError) {
+        const snapshot = await fetch("/dhaka-map.json", { signal: AbortSignal.timeout(20_000) });
+        if (!snapshot.ok) throw liveError;
+        return await snapshot.json() as OsmMapData;
+      }
+    };
+    void fetchMapData()
       .then(async (data) => {
         if (disposed) return;
         const mapBuildStartedAt = performance.now();
         const osmColliders = await addOpenStreetMapWorld(scene, data, () => disposed);
         if (!osmColliders) throw new Error("OpenStreetMap response contained no usable buildings");
+        const rebuildMetro = scene.userData.rebuildMetro as
+          | ((lines: MapPoint[][], stations: NonNullable<OsmMapData["metroStations"]>) => void)
+          | undefined;
+        if (rebuildMetro && data.metroLines?.length) rebuildMetro(data.metroLines, data.metroStations ?? []);
         const landmarkColliders = scene.userData.landmarkColliders as BuildingCollider[] | undefined ?? [];
         const proceduralColliders = await addProceduralDistrictTiles(
           scene,
@@ -3274,15 +3638,21 @@ export function BirdFlight() {
           crow.position,
           () => disposed,
         );
-        buildingColliders.splice(0, buildingColliders.length, ...osmColliders, ...proceduralColliders, ...landmarkColliders);
+        // Rebuild in place (the array identity is captured elsewhere) without
+        // spreading: spread-as-arguments overflows the call stack past ~120k items.
+        buildingColliders.length = 0;
+        for (const group of [osmColliders, proceduralColliders, landmarkColliders]) {
+          for (const collider of group) buildingColliders.push(collider);
+        }
         buildingColliderGrid = await buildColliderGridAsync(buildingColliders, () => disposed);
         if (disposed) return;
         renderer.domElement.dataset.mapRequestMs = (performance.now() - mapRequestStartedAt).toFixed(1);
         renderer.domElement.dataset.mapBuildMs = (performance.now() - mapBuildStartedAt).toFixed(1);
         setMapStatus("live");
       })
-      .catch(async () => {
+      .catch(async (error: unknown) => {
         if (disposed) return;
+        console.error("Live map build failed; using procedural fallback", error);
         if (!(scene.userData.proceduralDistrictTiles as ProceduralDistrictTile[] | undefined)?.length) {
           const emptyMap: OsmMapData = {
             source: "OpenStreetMap",
@@ -3299,7 +3669,7 @@ export function BirdFlight() {
             () => disposed,
           );
           if (disposed) return;
-          buildingColliders.push(...proceduralColliders);
+          for (const collider of proceduralColliders) buildingColliders.push(collider);
           buildingColliderGrid = await buildColliderGridAsync(buildingColliders, () => disposed);
         }
         setMapStatus("fallback");
@@ -3310,8 +3680,12 @@ export function BirdFlight() {
 
     const crow = new THREE.Group();
     crow.name = "PlayerCrow";
-    const spawnWorld = coordinatesToWorld(23.7595, 90.4105);
-    crow.position.set(spawnWorld.x, DEFAULT_FLIGHT_ALTITUDE, spawnWorld.y);
+    const spawnParams = new URLSearchParams(window.location.search);
+    const spawnLat = Number(spawnParams.get("lat")) || 23.7595;
+    const spawnLon = Number(spawnParams.get("lon")) || 90.4105;
+    const spawnAlt = Number(spawnParams.get("alt")) || DEFAULT_FLIGHT_ALTITUDE;
+    const spawnWorld = coordinatesToWorld(spawnLat, spawnLon);
+    crow.position.set(spawnWorld.x, spawnAlt, spawnWorld.y);
     scene.add(crow);
     const airflowVfx = createAirflowVfx(crow);
     const weatherVfx = createWeatherVfx(scene, renderer, sky, hemisphere, sun, skyFill, reducedMotion);
@@ -3371,6 +3745,7 @@ export function BirdFlight() {
 
     let maxFrameMs = 0;
     let longFrames = 0;
+    if (import.meta.env.DEV) (window as BirdFlightWindow & { __scene?: THREE.Scene }).__scene = scene;
     (window as BirdFlightWindow).__birdFlightDiagnostics = () => {
       const trafficSimulation = scene.userData.trafficSimulation as TrafficSimulation | null | undefined;
       return {
@@ -3395,7 +3770,7 @@ export function BirdFlight() {
       "ArrowDown", "ArrowLeft", "ArrowRight", "ArrowUp",
       "ControlLeft", "ControlRight", "ShiftLeft", "ShiftRight",
     ]);
-    let yaw = 0.15;
+    let yaw = Number(new URLSearchParams(window.location.search).get("yaw")) || 0.15;
     let yawRate = 0;
     let pitch = 0;
     let roll = 0;
@@ -3482,7 +3857,8 @@ export function BirdFlight() {
           restingRef.current = true;
           setResting(true);
           crow.position.copy(nearestPerch.position).add(new THREE.Vector3(0, 1.28, 0));
-          yaw = nearestPerch.heading;
+          // Treetops have no meaningful facing; settle in the direction flown.
+          yaw = nearestPerch.kind === "tree" ? yaw : nearestPerch.heading;
           yawRate = 0;
           pitch = 0;
           roll = 0;
@@ -3644,9 +4020,25 @@ export function BirdFlight() {
       if (!restingRef.current && !pausedRef.current) {
         for (const perch of scene.userData.perches as Perch[]) {
           const distance = crow.position.distanceTo(perch.position);
-          if (distance < 27 && distance < nearestDistance) {
+          if (distance < LANDMARK_LANDING_RADIUS && distance < nearestDistance) {
             nearestPerch = perch;
             nearestDistance = distance;
+          }
+        }
+        const treePerchGrid = scene.userData.treePerchGrid as Map<string, Perch[]> | undefined;
+        if (treePerchGrid) {
+          const cellX = Math.floor(crow.position.x / TREE_PERCH_CELL_SIZE);
+          const cellZ = Math.floor(crow.position.z / TREE_PERCH_CELL_SIZE);
+          for (let offsetX = -1; offsetX <= 1; offsetX++) {
+            for (let offsetZ = -1; offsetZ <= 1; offsetZ++) {
+              for (const perch of treePerchGrid.get(`${cellX + offsetX}:${cellZ + offsetZ}`) ?? []) {
+                const distance = crow.position.distanceTo(perch.position);
+                if (distance < TREE_LANDING_RADIUS && distance < nearestDistance) {
+                  nearestPerch = perch;
+                  nearestDistance = distance;
+                }
+              }
+            }
           }
         }
       }
@@ -3743,14 +4135,17 @@ export function BirdFlight() {
       }
       flightAudio.setFlight(speed, crow.position.y);
       if (compassRef.current) {
+        // Forward is (-sin yaw, 0, -cos yaw), so the true compass bearing
+        // (clockwise from north) is -yaw — using +yaw mirrors east and west.
         const headings = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
-        const headingIndex = Math.round((((yaw % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2)) / (Math.PI / 4)) % 8;
+        const bearing = ((-yaw % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+        const headingIndex = Math.round(bearing / (Math.PI / 4)) % 8;
         compassRef.current.textContent = headings[headingIndex];
       }
       if (mapBirdRef.current) {
         mapBirdRef.current.style.left = `${50 + clamp(crow.position.x / FLIGHT_EXTENT.x, -1, 1) * 43}%`;
         mapBirdRef.current.style.top = `${50 + clamp(crow.position.z / FLIGHT_EXTENT.z, -1, 1) * 43}%`;
-        mapBirdRef.current.style.transform = `translate(-50%, -50%) rotate(${yaw}rad)`;
+        mapBirdRef.current.style.transform = `translate(-50%, -50%) rotate(${-yaw}rad)`;
       }
 
       renderer.render(scene, camera);
@@ -4054,7 +4449,7 @@ export function BirdFlight() {
               <div><dt>C</dt><dd>Switch camera</dd></div>
               <div><dt>L</dt><dd>Inspect next landmark</dd></div>
             <div><dt>P / Esc</dt><dd>Pause / resume flight</dd></div>
-            <div><dt>E</dt><dd>Land / take off at a perch</dd></div>
+            <div><dt>E</dt><dd>Land / take off at a perch or treetop</dd></div>
             <div><dt>♫</dt><dd>Nature ambience: birds, leaves, water, and insects</dd></div>
             <div><dt>R / [ ]</dt><dd>Radio power / tune station</dd></div>
           </dl>

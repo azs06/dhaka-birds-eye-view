@@ -27,12 +27,20 @@ const BUILDINGS_PER_CELL = 16;
 const MAX_BUILDINGS = 5_200;
 const RELATION_ID_OFFSET = 1_000_000_000_000;
 const MAX_ROADS = 2_600;
+// Dhaka MRT tracks are mapped in OSM with metro-family railway values. Station
+// nodes are matched to the joined line by proximity so mainline (Bangladesh
+// Railway) stations never leak into the metro payload.
+const METRO_RAILWAY_KINDS = new Set(["subway", "light_rail", "monorail", "metro"]);
+const METRO_STATION_MATCH_METRES = 150;
+const MIN_METRO_LINE_METRES = 1_000;
 
 type OsmPoint = { lat: number; lon: number };
 type OsmElement = {
   id: number;
   type: "way" | "node" | "relation";
   tags?: Record<string, string>;
+  lat?: number;
+  lon?: number;
   geometry?: OsmPoint[];
   members?: Array<{
     type: "way" | "node" | "relation";
@@ -116,6 +124,58 @@ function relationOuterRings(element: OsmElement) {
   }
 
   return rings;
+}
+
+function polylineLength(points: WorldPoint[]) {
+  let length = 0;
+  for (let index = 1; index < points.length; index++) {
+    length += Math.hypot(points[index][0] - points[index - 1][0], points[index][1] - points[index - 1][1]);
+  }
+  return length;
+}
+
+/** Chain open railway ways (arbitrary order/direction) into continuous polylines by shared endpoints. */
+function joinRailPolylines(segments: WorldPoint[][]): WorldPoint[][] {
+  const pool = segments.filter((points) => points.length >= 2).map((points) => [...points]);
+  const lines: WorldPoint[][] = [];
+  while (pool.length > 0) {
+    const line = pool.pop()!;
+    let joined = true;
+    while (joined) {
+      joined = false;
+      for (let index = 0; index < pool.length; index++) {
+        const segment = pool[index];
+        if (pointsMeet(line[line.length - 1], segment[0])) line.push(...segment.slice(1));
+        else if (pointsMeet(line[line.length - 1], segment[segment.length - 1])) line.push(...segment.slice(0, -1).reverse());
+        else if (pointsMeet(line[0], segment[segment.length - 1])) line.unshift(...segment.slice(0, -1));
+        else if (pointsMeet(line[0], segment[0])) line.unshift(...segment.slice(1).reverse());
+        else continue;
+        pool.splice(index, 1);
+        joined = true;
+        break;
+      }
+    }
+    lines.push(line);
+  }
+  return lines.sort((a, b) => polylineLength(b) - polylineLength(a));
+}
+
+function distanceToPolylineSquared(point: WorldPoint, line: WorldPoint[]) {
+  let best = Infinity;
+  for (let index = 1; index < line.length; index++) {
+    const [x1, z1] = line[index - 1];
+    const [x2, z2] = line[index];
+    const dx = x2 - x1;
+    const dz = z2 - z1;
+    const lengthSquared = dx * dx + dz * dz;
+    const t = lengthSquared > 0
+      ? Math.min(1, Math.max(0, ((point[0] - x1) * dx + (point[1] - z1) * dz) / lengthSquared))
+      : 0;
+    const px = x1 + dx * t - point[0];
+    const pz = z1 + dz * t - point[1];
+    best = Math.min(best, px * px + pz * pz);
+  }
+  return best;
 }
 
 function polygonArea(points: WorldPoint[]) {
@@ -253,7 +313,7 @@ async function fetchOsmMapApi(bounds: number[]) {
         const tag = xmlAttributes(tagMatch[1]);
         if (tag.k) tags[tag.k] = tag.v ?? "";
       }
-      if (!tags.building && !tags.highway && tags.natural !== "water" && !tags.waterway) continue;
+      if (!tags.building && !tags.highway && !tags.railway && tags.natural !== "water" && !tags.waterway) continue;
       const geometry = Array.from(body.matchAll(/<nd\b([^>]*)\/>/g))
         .map((nodeMatch) => nodes.get(xmlAttributes(nodeMatch[1]).ref))
         .filter((point): point is OsmPoint => Boolean(point));
@@ -383,6 +443,16 @@ export async function GET() {
       way["waterway"](${bbox});
     );out geom qt;` };
   });
+  // The metro network is a handful of lightweight ways — fetch it in one dedicated
+  // full-bounds query so the joined line never depends on every road tile succeeding.
+  const metroBbox = `${BOUNDS.south},${BOUNDS.west},${BOUNDS.north},${BOUNDS.east}`;
+  tiles.push({
+    bounds: [BOUNDS.south, BOUNDS.west, BOUNDS.north, BOUNDS.east],
+    query: `[out:json][timeout:25];(
+      way["railway"~"^(subway|light_rail|monorail|metro)$"](${metroBbox});
+      node["railway"="station"](${metroBbox});
+    );out geom qt;`,
+  });
 
   try {
     const osm = await fetchOverpass(tiles);
@@ -431,6 +501,30 @@ export async function GET() {
       })
       .filter((road): road is NonNullable<typeof road> => Boolean(road)));
 
+    const metroSegments = elements
+      .filter((element) => element.type === "way" && METRO_RAILWAY_KINDS.has(element.tags?.railway ?? ""))
+      .map((element) => cleanGeometry(element))
+      .filter((points): points is WorldPoint[] => Boolean(points));
+    const metroLines = joinRailPolylines(metroSegments)
+      .filter((line) => polylineLength(line) >= MIN_METRO_LINE_METRES)
+      .slice(0, 4);
+    const stationMatchSquared = METRO_STATION_MATCH_METRES * METRO_STATION_MATCH_METRES;
+    const stationNodes = elements.filter((element) => element.type === "node"
+      && element.tags?.railway === "station"
+      && Number.isFinite(element.lat)
+      && Number.isFinite(element.lon));
+    // Prefer explicitly metro-tagged stations (station=subway etc.); Dhaka's are all
+    // tagged that way, and it keeps stray untagged duplicates (e.g. a second
+    // "Shahbag Metro Rail Station" node) out. Proximity is the fallback filter.
+    const metroTaggedNodes = stationNodes.filter((element) => METRO_RAILWAY_KINDS.has(element.tags?.station ?? ""));
+    const metroStations = (metroTaggedNodes.length >= 2 ? metroTaggedNodes : stationNodes)
+      .map((element) => ({
+        id: element.id,
+        name: element.tags?.["name:en"] ?? element.tags?.name ?? null,
+        point: toWorld({ lat: element.lat!, lon: element.lon! }),
+      }))
+      .filter((station) => metroLines.some((line) => distanceToPolylineSquared(station.point, line) <= stationMatchSquared));
+
     const water = elements.flatMap((element) => {
       const isWaterArea = element.tags?.natural === "water";
       if (!isWaterArea && !element.tags?.waterway) return [];
@@ -453,6 +547,8 @@ export async function GET() {
       buildings,
       roads,
       water,
+      metroLines,
+      metroStations,
     }, {
       headers: {
         "Cache-Control": "public, max-age=900, s-maxage=3600, stale-while-revalidate=86400",
