@@ -134,7 +134,11 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(mapRoute, /BUILDINGS_PER_CELL = 16/);
   assert.match(mapRoute, /MAX_BUILDINGS = 5_200/);
   assert.match(mapRoute, /spatiallySampleBuildings/);
-  assert.match(mapRoute, /spatiallySampleRoads/);
+  assert.match(mapRoute, /topologicallySampleRoads/);
+  assert.match(mapRoute, /connectedRoads\.length === 2/);
+  assert.match(mapRoute, /roadPriority\(roads\[connectedRoads\[0\]\]\.kind\)/);
+  assert.match(mapRoute, /missingRequiredTiles\.length > 0/);
+  assert.match(mapRoute, /required tiles missing/);
   assert.match(component, /TRAFFIC_ROUTE_SAMPLE_RATIO = 0\.5/);
   assert.match(component, /TRAFFIC_MAX_VEHICLES = 320/);
   assert.match(component, /TRAFFIC_BASE_TICK_HZ = 10/);
@@ -184,4 +188,35 @@ test("building collision recovery lets a perched crow climb clear on takeoff", (
 
   assert.equal(position.x, 0);
   assert.ok(position.y > 79.5, `expected takeoff to clear the roof collider, got ${position.y}`);
+});
+
+test("bundled Dhaka roads preserve connected major corridors", async () => {
+  const snapshot = JSON.parse(await readFile(new URL("../public/dhaka-map.json", import.meta.url), "utf8"));
+  const roads = snapshot.roads ?? [];
+  const pointKey = ([x, z]) => `${Math.round(x * 10)}:${Math.round(z * 10)}`;
+  const pointOccurrences = new Map();
+  for (const road of roads) {
+    for (const point of road.points) {
+      const key = pointKey(point);
+      pointOccurrences.set(key, (pointOccurrences.get(key) ?? 0) + 1);
+    }
+  }
+
+  const majorKinds = new Set(["motorway", "trunk", "primary", "secondary"]);
+  let majorInteriorEndpoints = 0;
+  let unmatchedMajorInteriorEndpoints = 0;
+  for (const road of roads.filter((entry) => majorKinds.has(entry.kind))) {
+    for (const point of [road.points[0], road.points.at(-1)]) {
+      if (Math.abs(point[0]) >= 11_000 || Math.abs(point[1]) >= 13_800) continue;
+      majorInteriorEndpoints++;
+      if (pointOccurrences.get(pointKey(point)) === 1) unmatchedMajorInteriorEndpoints++;
+    }
+  }
+
+  assert.equal(roads.length, 2_600);
+  assert.ok(majorInteriorEndpoints > 500, "expected a substantial major-road network");
+  assert.ok(
+    unmatchedMajorInteriorEndpoints / majorInteriorEndpoints < 0.05,
+    `too many major roads terminate inside the map: ${unmatchedMajorInteriorEndpoints}/${majorInteriorEndpoints}`,
+  );
 });

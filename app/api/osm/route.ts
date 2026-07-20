@@ -39,6 +39,7 @@ type OsmElement = {
   id: number;
   type: "way" | "node" | "relation";
   tags?: Record<string, string>;
+  nodes?: number[];
   lat?: number;
   lon?: number;
   geometry?: OsmPoint[];
@@ -253,26 +254,158 @@ function spatiallySampleBuildings<T extends { id: number; points: WorldPoint[]; 
   return selected;
 }
 
-function spatiallySampleRoads<T extends { id: number; points: WorldPoint[]; kind: string }>(roads: T[]) {
-  const cellSize = 600;
-  const roadsPerCell = 9;
+type RoadCandidate = {
+  id: number;
+  points: WorldPoint[];
+  nodeIds?: number[];
+  kind: string;
+  name: string | null;
+};
+
+function roadNodeKeys(road: RoadCandidate) {
+  if (road.nodeIds?.length === road.points.length) return road.nodeIds.map((id) => `n:${id}`);
+  // The OSM map-API fallback is parsed locally and older bundled snapshots do not
+  // carry node ids. A decimetre coordinate key still preserves exact shared joins.
+  return road.points.map(([x, z]) => `p:${Math.round(x * 10)}:${Math.round(z * 10)}`);
+}
+
+/**
+ * Keep complete OSM corridors instead of sampling individual ways. OSM splits one
+ * logical street into separate ways at intersections and tag changes; independently
+ * dropping those ways is what produced the abrupt mid-road endings in the scene.
+ */
+function topologicallySampleRoads(roads: RoadCandidate[]) {
+  if (roads.length <= MAX_ROADS) return roads;
+
   const majorRoads = new Set(["motorway", "trunk", "primary", "secondary"]);
-  const cells = new Map<string, T[]>();
-  for (const road of roads) {
-    const middle = road.points[Math.floor(road.points.length / 2)];
-    const key = `${Math.floor(middle[0] / cellSize)}:${Math.floor(middle[1] / cellSize)}`;
-    const cell = cells.get(key);
-    if (cell) cell.push(road);
-    else cells.set(key, [road]);
+  const roadPriority = (kind: string) => majorRoads.has(kind) ? 0 : kind === "tertiary" ? 1 : 2;
+  const nodeKeys = roads.map(roadNodeKeys);
+  const nodeToRoads = new Map<string, number[]>();
+  for (let roadIndex = 0; roadIndex < roads.length; roadIndex++) {
+    for (const key of new Set(nodeKeys[roadIndex])) {
+      const entries = nodeToRoads.get(key);
+      if (entries) entries.push(roadIndex);
+      else nodeToRoads.set(key, [roadIndex]);
+    }
   }
 
-  const candidates = Array.from(cells.entries())
-    .sort(([a], [b]) => a.localeCompare(b))
-    .flatMap(([, cell]) => cell
-      .sort((a, b) => Number(majorRoads.has(b.kind)) - Number(majorRoads.has(a.kind)) || a.id - b.id)
-      .slice(0, roadsPerCell));
-  if (candidates.length <= MAX_ROADS) return candidates;
-  return Array.from({ length: MAX_ROADS }, (_, index) => candidates[Math.floor(index * candidates.length / MAX_ROADS)]);
+  // Union ways only through degree-two continuation nodes. Every selected group
+  // therefore ends at a real junction/dead-end rather than at an arbitrary OSM split.
+  const parents = roads.map((_, index) => index);
+  const find = (index: number): number => {
+    let root = index;
+    while (parents[root] !== root) root = parents[root];
+    while (parents[index] !== index) {
+      const next = parents[index];
+      parents[index] = root;
+      index = next;
+    }
+    return root;
+  };
+  const union = (a: number, b: number) => {
+    const rootA = find(a);
+    const rootB = find(b);
+    if (rootA !== rootB) parents[Math.max(rootA, rootB)] = Math.min(rootA, rootB);
+  };
+  for (const connectedRoads of nodeToRoads.values()) {
+    if (connectedRoads.length === 2
+      && roadPriority(roads[connectedRoads[0]].kind) === roadPriority(roads[connectedRoads[1]].kind)) {
+      union(connectedRoads[0], connectedRoads[1]);
+    }
+  }
+
+  type Corridor = {
+    id: number;
+    roadIndexes: number[];
+    homeCell: string;
+    priority: number;
+  };
+  const groupedRoads = new Map<number, number[]>();
+  for (let roadIndex = 0; roadIndex < roads.length; roadIndex++) {
+    const root = find(roadIndex);
+    const entries = groupedRoads.get(root);
+    if (entries) entries.push(roadIndex);
+    else groupedRoads.set(root, [roadIndex]);
+  }
+  const corridors: Corridor[] = Array.from(groupedRoads.values()).map((roadIndexes, corridorIndex) => {
+    let sumX = 0;
+    let sumZ = 0;
+    let points = 0;
+    let priority = 2;
+    for (const roadIndex of roadIndexes) {
+      const road = roads[roadIndex];
+      priority = Math.min(priority, roadPriority(road.kind));
+      for (const [x, z] of road.points) {
+        sumX += x;
+        sumZ += z;
+        points++;
+      }
+    }
+    return {
+      id: corridorIndex,
+      roadIndexes,
+      homeCell: `${Math.floor((sumX / points) / 600)}:${Math.floor((sumZ / points) / 600)}`,
+      priority,
+    };
+  });
+
+  const roadToCorridor = new Map<number, number>();
+  for (const corridor of corridors) {
+    for (const roadIndex of corridor.roadIndexes) roadToCorridor.set(roadIndex, corridor.id);
+  }
+  const neighbours = corridors.map(() => new Set<number>());
+  for (const connectedRoads of nodeToRoads.values()) {
+    const connectedCorridors = new Set(connectedRoads.map((roadIndex) => roadToCorridor.get(roadIndex)!));
+    for (const corridorId of connectedCorridors) {
+      for (const neighbourId of connectedCorridors) {
+        if (corridorId !== neighbourId) neighbours[corridorId].add(neighbourId);
+      }
+    }
+  }
+
+  const selected = new Set<number>();
+  const cellCounts = new Map<string, number>();
+  let selectedRoads = 0;
+  const addCorridor = (corridor: Corridor) => {
+    selected.add(corridor.id);
+    selectedRoads += corridor.roadIndexes.length;
+    cellCounts.set(corridor.homeCell, (cellCounts.get(corridor.homeCell) ?? 0) + corridor.roadIndexes.length);
+  };
+
+  // Major corridors define the recognizable citywide skeleton and are lightweight
+  // enough to retain in full. Local streets then grow outward from that skeleton.
+  for (const corridor of corridors.filter((entry) => entry.priority === 0).sort((a, b) => a.id - b.id)) {
+    addCorridor(corridor);
+  }
+
+  const frontier = new Set<number>();
+  const addNeighbours = (corridorId: number) => {
+    for (const neighbourId of neighbours[corridorId]) {
+      if (!selected.has(neighbourId)) frontier.add(neighbourId);
+    }
+  };
+  for (const corridorId of selected) addNeighbours(corridorId);
+
+  while (selectedRoads < MAX_ROADS) {
+    const pool = frontier.size > 0
+      ? Array.from(frontier, (id) => corridors[id])
+      : corridors.filter((corridor) => !selected.has(corridor.id));
+    const candidates = pool
+      .filter((corridor) => selectedRoads + corridor.roadIndexes.length <= MAX_ROADS)
+      .sort((a, b) =>
+        (cellCounts.get(a.homeCell) ?? 0) - (cellCounts.get(b.homeCell) ?? 0)
+        || a.priority - b.priority
+        || a.id - b.id);
+    const next = candidates[0];
+    if (!next) break;
+    frontier.delete(next.id);
+    addCorridor(next);
+    addNeighbours(next.id);
+  }
+
+  return corridors
+    .filter((corridor) => selected.has(corridor.id))
+    .flatMap((corridor) => corridor.roadIndexes.map((roadIndex) => roads[roadIndex]));
 }
 
 function xmlAttributes(source: string) {
@@ -314,14 +447,18 @@ async function fetchOsmMapApi(bounds: number[]) {
         if (tag.k) tags[tag.k] = tag.v ?? "";
       }
       if (!tags.building && !tags.highway && !tags.railway && tags.natural !== "water" && !tags.waterway) continue;
-      const geometry = Array.from(body.matchAll(/<nd\b([^>]*)\/>/g))
-        .map((nodeMatch) => nodes.get(xmlAttributes(nodeMatch[1]).ref))
+      const nodeRefs = Array.from(body.matchAll(/<nd\b([^>]*)\/>/g))
+        .map((nodeMatch) => xmlAttributes(nodeMatch[1]).ref)
+        .filter(Boolean);
+      const geometry = nodeRefs
+        .map((nodeRef) => nodes.get(nodeRef))
         .filter((point): point is OsmPoint => Boolean(point));
       if (geometry.length < 2) continue;
       elements.push({
         id: Number(wayAttributes.id),
         type: "way",
         tags,
+        nodes: nodeRefs.map(Number),
         geometry,
       });
     }
@@ -358,7 +495,7 @@ async function requestOverpass(query: string, preferredEndpoint = 0) {
   throw lastError instanceof Error ? lastError : new Error("OpenStreetMap data is unavailable");
 }
 
-async function fetchOverpass(tiles: Array<{ bounds: number[]; query: string }>) {
+async function fetchOverpass(tiles: Array<{ bounds: number[]; query: string; required?: boolean }>) {
   if (cachedOsm && Date.now() < cachedUntil) return cachedOsm;
   if (!inFlightRequest) {
     inFlightRequest = Promise.allSettled(tiles.map(async (tile, index) => {
@@ -372,7 +509,10 @@ async function fetchOverpass(tiles: Array<{ bounds: number[]; query: string }>) 
         const successful = results
           .filter((result): result is PromiseFulfilledResult<OsmResponse> => result.status === "fulfilled")
           .map((result) => result.value);
-        if (successful.length === 0) throw new Error("OpenStreetMap data is unavailable");
+        const missingRequiredTiles = results.filter((result, index) => result.status === "rejected" && tiles[index].required !== false);
+        if (missingRequiredTiles.length > 0) {
+          throw new Error(`OpenStreetMap returned an incomplete map (${missingRequiredTiles.length} required tiles missing)`);
+        }
         const elements = new Map<string, OsmElement>();
         for (const osm of successful) {
           for (const element of osm.elements ?? []) elements.set(`${element.type}:${element.id}`, element);
@@ -431,7 +571,7 @@ export async function GET() {
     const fallbackBounds = coreSouth < coreNorth && coreWest < coreEast
       ? [coreSouth, coreWest, coreNorth, coreEast]
       : bounds;
-    return { bounds: fallbackBounds, query: `[out:json][timeout:25];(
+    return { bounds: fallbackBounds, required: true, query: `[out:json][timeout:25];(
       ${coreBuildingQuery}
       way["building"]["name"](${bbox});
       way["building"]["height"](${bbox});
@@ -448,6 +588,7 @@ export async function GET() {
   const metroBbox = `${BOUNDS.south},${BOUNDS.west},${BOUNDS.north},${BOUNDS.east}`;
   tiles.push({
     bounds: [BOUNDS.south, BOUNDS.west, BOUNDS.north, BOUNDS.east],
+    required: false,
     query: `[out:json][timeout:25];(
       way["railway"~"^(subway|light_rail|monorail|metro)$"](${metroBbox});
       node["railway"="station"](${metroBbox});
@@ -487,7 +628,7 @@ export async function GET() {
       name: building.name,
     }));
 
-    const roads = spatiallySampleRoads(elements
+    const roads = topologicallySampleRoads(elements
       .filter((element) => element.type === "way" && element.tags?.highway)
       .map((element) => {
         const points = cleanGeometry(element);
@@ -495,11 +636,18 @@ export async function GET() {
         return {
           id: element.id,
           points,
+          nodeIds: element.nodes,
           kind: element.tags?.highway ?? "road",
           name: element.tags?.name ?? null,
         };
       })
-      .filter((road): road is NonNullable<typeof road> => Boolean(road)));
+      .filter((road): road is NonNullable<typeof road> => Boolean(road)))
+      .map((road) => ({
+        id: road.id,
+        points: road.points,
+        kind: road.kind,
+        name: road.name,
+      }));
 
     const metroSegments = elements
       .filter((element) => element.type === "way" && METRO_RAILWAY_KINDS.has(element.tags?.railway ?? ""))
