@@ -3567,7 +3567,11 @@ export function BirdFlight() {
     mount.appendChild(renderer.domElement);
 
     const sky = new Sky();
-    sky.scale.setScalar(15_000);
+    // Keep the complete sky cube inside the camera's far plane. It follows the
+    // camera below, so the bird can never reach or leave its finite bounds.
+    sky.scale.setScalar(8_000);
+    sky.renderOrder = -100;
+    sky.frustumCulled = false;
     const skyUniforms = sky.material.uniforms;
     skyUniforms.turbidity.value = 5.8;
     skyUniforms.rayleigh.value = 3.15;
@@ -4148,6 +4152,7 @@ export function BirdFlight() {
         mapBirdRef.current.style.transform = `translate(-50%, -50%) rotate(${-yaw}rad)`;
       }
 
+      sky.position.copy(camera.position);
       renderer.render(scene, camera);
       diagnosticFrame++;
       if (diagnosticFrame % 30 === 0) {
