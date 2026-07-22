@@ -5,7 +5,7 @@ const CACHE_TTL_MS = 5 * 60 * 1_000;
 type WeatherMode = "clear" | "cloudy" | "fog" | "drizzle" | "rain" | "storm";
 type OpenMeteoResponse = {
   current?: {
-    time?: string;
+    time?: number;
     temperature_2m?: number;
     apparent_temperature?: number;
     is_day?: number;
@@ -18,12 +18,18 @@ type OpenMeteoResponse = {
     wind_direction_10m?: number;
     wind_gusts_10m?: number;
   };
+  daily?: {
+    sunrise?: number[];
+    sunset?: number[];
+  };
 };
 
 type WeatherPayload = {
   source: "Open-Meteo";
   fetchedAt: string;
   observedAt: string;
+  sunriseAt: string;
+  sunsetAt: string;
   mode: WeatherMode;
   label: string;
   weatherCode: number;
@@ -77,6 +83,8 @@ async function fetchWeather() {
     "wind_gusts_10m",
   ].join(","));
   url.searchParams.set("timezone", "Asia/Dhaka");
+  url.searchParams.set("daily", "sunrise,sunset");
+  url.searchParams.set("timeformat", "unixtime");
   url.searchParams.set("forecast_days", "1");
 
   const controller = new AbortController();
@@ -89,7 +97,9 @@ async function fetchWeather() {
     if (!response.ok) throw new Error(`Weather provider responded with ${response.status}`);
     const data = await response.json() as OpenMeteoResponse;
     const current = data.current;
-    if (!current?.time || typeof current.weather_code !== "number") {
+    const sunrise = data.daily?.sunrise?.[0];
+    const sunset = data.daily?.sunset?.[0];
+    if (!current?.time || typeof current.weather_code !== "number" || !sunrise || !sunset) {
       throw new Error("Weather provider returned no current conditions");
     }
     const weatherCode = finiteNumber(current.weather_code);
@@ -97,7 +107,9 @@ async function fetchWeather() {
     return {
       source: "Open-Meteo",
       fetchedAt: new Date().toISOString(),
-      observedAt: current.time,
+      observedAt: new Date(current.time * 1_000).toISOString(),
+      sunriseAt: new Date(sunrise * 1_000).toISOString(),
+      sunsetAt: new Date(sunset * 1_000).toISOString(),
       ...description,
       weatherCode,
       isDay: current.is_day === 1,

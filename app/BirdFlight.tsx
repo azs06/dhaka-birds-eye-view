@@ -54,6 +54,8 @@ type WeatherSnapshot = {
   source: "Open-Meteo";
   fetchedAt: string;
   observedAt: string;
+  sunriseAt: string;
+  sunsetAt: string;
   mode: WeatherMode;
   label: string;
   weatherCode: number;
@@ -189,6 +191,8 @@ const DEFAULT_WEATHER: WeatherSnapshot = {
   source: "Open-Meteo",
   fetchedAt: "",
   observedAt: "",
+  sunriseAt: "",
+  sunsetAt: "",
   mode: "cloudy",
   label: "Weather loading",
   weatherCode: 2,
@@ -332,6 +336,49 @@ function weatherIcon(mode: WeatherMode, isDay: boolean) {
   if (mode === "fog") return "≋";
   if (mode === "cloudy") return "☁";
   return isDay ? "☀" : "☾";
+}
+
+const DHAKA_SKY_LOCATION = { lat: 23.7715, lon: 90.4165 };
+
+function smoothRange(value: number, start: number, end: number) {
+  const amount = clamp((value - start) / Math.max(end - start, Number.EPSILON), 0, 1);
+  return amount * amount * (3 - 2 * amount);
+}
+
+function solarPosition(at: Date) {
+  const julianDay = at.getTime() / 86_400_000 + 2_440_587.5;
+  const daysSinceJ2000 = julianDay - 2_451_545;
+  const meanLongitude = THREE.MathUtils.degToRad((280.46 + 0.9856474 * daysSinceJ2000) % 360);
+  const meanAnomaly = THREE.MathUtils.degToRad((357.528 + 0.9856003 * daysSinceJ2000) % 360);
+  const eclipticLongitude = meanLongitude
+    + THREE.MathUtils.degToRad(1.915) * Math.sin(meanAnomaly)
+    + THREE.MathUtils.degToRad(0.02) * Math.sin(2 * meanAnomaly);
+  const obliquity = THREE.MathUtils.degToRad(23.439 - 0.0000004 * daysSinceJ2000);
+  const rightAscension = Math.atan2(Math.cos(obliquity) * Math.sin(eclipticLongitude), Math.cos(eclipticLongitude));
+  const declination = Math.asin(Math.sin(obliquity) * Math.sin(eclipticLongitude));
+  const siderealDegrees = (280.46061837 + 360.98564736629 * daysSinceJ2000 + DHAKA_SKY_LOCATION.lon) % 360;
+  const hourAngle = THREE.MathUtils.degToRad(((siderealDegrees - THREE.MathUtils.radToDeg(rightAscension) + 540) % 360) - 180);
+  const latitude = THREE.MathUtils.degToRad(DHAKA_SKY_LOCATION.lat);
+  const elevation = Math.asin(
+    Math.sin(latitude) * Math.sin(declination)
+    + Math.cos(latitude) * Math.cos(declination) * Math.cos(hourAngle),
+  );
+  const azimuth = Math.atan2(
+    Math.sin(hourAngle),
+    Math.cos(hourAngle) * Math.sin(latitude) - Math.tan(declination) * Math.cos(latitude),
+  ) + Math.PI;
+  return { elevation, azimuth };
+}
+
+function liveDaylightAmount(weather: WeatherSnapshot, now: number, solarElevation: number) {
+  const sunrise = Date.parse(weather.sunriseAt);
+  const sunset = Date.parse(weather.sunsetAt);
+  if (!Number.isFinite(sunrise) || !Number.isFinite(sunset) || sunrise >= sunset) {
+    return smoothRange(THREE.MathUtils.radToDeg(solarElevation), -6, 7);
+  }
+  const dawn = smoothRange(now, sunrise - 35 * 60_000, sunrise + 25 * 60_000);
+  const dusk = 1 - smoothRange(now, sunset - 25 * 60_000, sunset + 35 * 60_000);
+  return Math.min(dawn, dusk);
 }
 
 function buildColliderGrid(colliders: BuildingCollider[]) {
@@ -780,8 +827,19 @@ function createWeatherVfx(
   let windZ = 0;
   let lightningClock = 4 + random() * 4;
   let lightningPulse = 0;
+  let currentWeather = DEFAULT_WEATHER;
+  let daylightRefreshClock = 0;
+  const sunDirection = new THREE.Vector3();
+  const nightColor = new THREE.Color();
+  const dayColor = new THREE.Color();
+  const twilightColor = new THREE.Color(0xc47c68);
+  const blendedBackground = new THREE.Color();
+  const sunColor = new THREE.Color();
+  const highSunColor = new THREE.Color(0xffefd1);
+  const overcastSunColor = new THREE.Color(0xd6e5e5);
 
   const apply = (weather: WeatherSnapshot) => {
+    currentWeather = weather;
     mode = weather.mode;
     const cloudAmount = clamp(weather.cloudCover / 100, 0, 1);
     const raining = mode === "drizzle" || mode === "rain" || mode === "storm";
@@ -803,17 +861,25 @@ function createWeatherVfx(
     windX = Math.sin(windToward) * 12 * windScale;
     windZ = Math.cos(windToward) * 12 * windScale;
 
-    const isNight = !weather.isDay;
-    const background = isNight
-      ? mode === "storm" ? 0x10212a : mode === "rain" ? 0x142933 : 0x17313d
-      : mode === "fog" ? 0xa4ad91
-        : mode === "storm" ? 0x49656b
-          : mode === "rain" ? 0x6f9695
-            : mode === "cloudy" ? 0x86aaa0
-              : 0x91c7c0;
-    scene.background = new THREE.Color(background);
+    const now = Date.now();
+    const solar = solarPosition(new Date(now));
+    const solarElevation = THREE.MathUtils.radToDeg(solar.elevation);
+    const daylight = liveDaylightAmount(weather, now, solar.elevation);
+    const isNight = daylight < 0.08;
+    const twilight = 1 - Math.abs(daylight * 2 - 1);
+    const daylightStrength = smoothRange(daylight, 0.04, 0.92);
+    const nightHex = mode === "storm" ? 0x0d1822 : mode === "rain" ? 0x10232e : 0x122b3c;
+    const dayHex = mode === "fog" ? 0xa4ad91
+      : mode === "storm" ? 0x49656b
+        : mode === "rain" ? 0x6f9695
+          : mode === "cloudy" ? 0x86aaa0
+            : 0x91c7c0;
+    nightColor.setHex(nightHex);
+    dayColor.setHex(dayHex);
+    blendedBackground.copy(nightColor).lerp(twilightColor, twilight * (1 - cloudAmount * 0.55)).lerp(dayColor, daylightStrength);
+    scene.background = blendedBackground;
     if (scene.fog instanceof THREE.FogExp2) {
-      scene.fog.color.set(background);
+      scene.fog.color.copy(blendedBackground);
       scene.fog.density = mode === "fog"
         ? 0.00135
         : mode === "storm"
@@ -823,27 +889,39 @@ function createWeatherVfx(
             : 0.00024 + cloudAmount * 0.00018;
     }
 
-    sky.visible = weather.isDay;
-    stars.visible = isNight && cloudAmount < 0.62 && !raining && mode !== "fog";
-    starMaterial.opacity = clamp(0.92 - cloudAmount, 0.25, 0.82);
+    const horizontal = Math.cos(solar.elevation);
+    sunDirection.set(
+      Math.sin(solar.azimuth) * horizontal,
+      Math.sin(solar.elevation),
+      -Math.cos(solar.azimuth) * horizontal,
+    ).normalize();
+    sky.visible = solarElevation > -7;
+    stars.visible = daylight < 0.32 && cloudAmount < 0.72 && !raining && mode !== "fog";
+    starMaterial.opacity = clamp((0.82 - cloudAmount) * (1 - daylight / 0.32), 0, 0.82);
     const skyUniforms = sky.material.uniforms;
+    skyUniforms.sunPosition.value.copy(sunDirection);
+    renderer.domElement.dataset.cloudCover = weather.cloudCover.toFixed(0);
+    renderer.domElement.dataset.daylightAmount = daylight.toFixed(3);
+    renderer.domElement.dataset.sunElevation = solarElevation.toFixed(2);
+    renderer.domElement.dataset.sunAzimuth = THREE.MathUtils.radToDeg(solar.azimuth).toFixed(2);
     skyUniforms.turbidity.value = 3.8 + cloudAmount * 10 + (raining ? 4 : 0);
     skyUniforms.rayleigh.value = 3.4 - cloudAmount * 2.35;
     skyUniforms.mieCoefficient.value = 0.0035 + cloudAmount * 0.016;
     skyUniforms.mieDirectionalG.value = 0.82;
 
-    renderer.toneMappingExposure = isNight
-      ? 1
-      : mode === "clear" ? 1.02
-        : mode === "cloudy" ? 0.9
-          : 0.76;
-    hemisphere.intensity = isNight ? 1.42 : 1.8 - cloudAmount * 0.82;
-    hemisphere.color.set(isNight ? 0x91abc1 : mode === "rain" || mode === "storm" ? 0xb8d0d4 : 0xe8f3ee);
-    hemisphere.groundColor.set(isNight ? 0x34483d : 0x5d6c58);
-    sun.intensity = isNight ? 0.82 : mode === "clear" ? 3.35 : mode === "cloudy" ? 1.25 : 0.46;
-    sun.color.set(isNight ? 0x8ba8c7 : mode === "rain" || mode === "storm" ? 0xd6e5e5 : 0xffd6a0);
-    skyFill.intensity = isNight ? 0.92 : 0.48 + cloudAmount * 0.22;
-    skyFill.color.set(isNight ? 0x45617b : 0x9bc8d2);
+    renderer.toneMappingExposure = THREE.MathUtils.lerp(0.72, mode === "clear" ? 1.02 : mode === "cloudy" ? 0.9 : 0.76, daylight);
+    hemisphere.intensity = THREE.MathUtils.lerp(0.36, 1.8 - cloudAmount * 0.82, daylight);
+    hemisphere.color.set(isNight ? 0x7893ad : mode === "rain" || mode === "storm" ? 0xb8d0d4 : 0xe8f3ee);
+    hemisphere.groundColor.set(isNight ? 0x182923 : 0x5d6c58);
+    const sunVisibility = smoothRange(solarElevation, -5, 8) * (1 - cloudAmount * 0.72);
+    sun.intensity = (mode === "clear" ? 3.35 : mode === "cloudy" ? 1.45 : 0.58) * sunVisibility;
+    sunColor.set(0xff965e).lerp(highSunColor, smoothRange(solarElevation, 2, 28));
+    sunColor.lerp(overcastSunColor, clamp(cloudAmount * 0.55 + (raining ? 0.28 : 0), 0, 0.82));
+    sun.color.copy(sunColor);
+    sun.position.copy(sunDirection).multiplyScalar(1_200);
+    sun.target.position.set(0, 0, 0);
+    skyFill.intensity = THREE.MathUtils.lerp(0.28, 0.48 + cloudAmount * 0.28, daylight);
+    skyFill.color.set(isNight ? 0x45617b : twilight > 0.35 ? 0xc99b8e : 0x9bc8d2);
 
     const clouds = scene.userData.clouds as THREE.Group[] | undefined ?? [];
     const visibleClouds = mode === "fog"
@@ -865,6 +943,11 @@ function createWeatherVfx(
   return {
     apply,
     update(dt, anchor, paused) {
+      daylightRefreshClock -= dt;
+      if (daylightRefreshClock <= 0) {
+        daylightRefreshClock = 30;
+        apply(currentWeather);
+      }
       rain.position.copy(anchor);
       stars.position.set(anchor.x, 0, anchor.z);
       if (!paused && rain.visible) {
@@ -3577,8 +3660,9 @@ export function BirdFlight() {
     skyUniforms.rayleigh.value = 3.15;
     skyUniforms.mieCoefficient.value = 0.0035;
     skyUniforms.mieDirectionalG.value = 0.84;
-    const sunPosition = new THREE.Vector3().setFromSphericalCoords(1, THREE.MathUtils.degToRad(63), THREE.MathUtils.degToRad(232));
-    skyUniforms.sunPosition.value.copy(sunPosition);
+    // The sky cube scale and camera-follow below preserve the clipping fix;
+    // live weather applies the solar vector and atmosphere after setup.
+    skyUniforms.sunPosition.value.set(0, 1, 0);
     scene.add(sky);
 
     const hemisphere = new THREE.HemisphereLight(0xe8f3ee, 0x5d6c58, 1.8);

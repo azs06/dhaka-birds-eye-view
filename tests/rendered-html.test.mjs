@@ -108,8 +108,17 @@ test("keeps the finished flight experience free of starter preview code", async 
   }
   assert.match(weatherRoute, /api\.open-meteo\.com\/v1\/forecast/);
   assert.match(weatherRoute, /cloud_cover/);
+  assert.match(weatherRoute, /daily", "sunrise,sunset/);
+  assert.match(weatherRoute, /timeformat", "unixtime/);
   assert.match(weatherRoute, /wind_direction_10m/);
   assert.match(weatherRoute, /stale-while-revalidate=600/);
+  assert.match(component, /function solarPosition/);
+  assert.match(component, /function liveDaylightAmount/);
+  assert.match(component, /sky\.scale\.setScalar\(8_000\)/);
+  assert.match(component, /sky\.position\.copy\(camera\.position\)/);
+  assert.match(component, /skyUniforms\.sunPosition\.value\.copy\(sunDirection\)/);
+  assert.match(component, /dataset\.daylightAmount/);
+  assert.match(component, /dataset\.sunElevation/);
   assert.match(component, /const BRAKE_SPEED = 18/);
   assert.match(component, /const DEFAULT_FLIGHT_ALTITUDE = 130/);
   assert.match(component, /const MAX_FLIGHT_ALTITUDE = 650/);
