@@ -830,11 +830,13 @@ function createWeatherVfx(
   let currentWeather = DEFAULT_WEATHER;
   let daylightRefreshClock = 0;
   const sunDirection = new THREE.Vector3();
+  const moonDirection = new THREE.Vector3();
   const nightColor = new THREE.Color();
   const dayColor = new THREE.Color();
   const twilightColor = new THREE.Color(0xc47c68);
   const blendedBackground = new THREE.Color();
   const sunColor = new THREE.Color();
+  const moonColor = new THREE.Color(0x9fc7ed);
   const highSunColor = new THREE.Color(0xffefd1);
   const overcastSunColor = new THREE.Color(0xd6e5e5);
 
@@ -868,6 +870,7 @@ function createWeatherVfx(
     const isNight = daylight < 0.08;
     const twilight = 1 - Math.abs(daylight * 2 - 1);
     const daylightStrength = smoothRange(daylight, 0.04, 0.92);
+    const nightStrength = 1 - smoothRange(daylight, 0.025, 0.24);
     const nightHex = mode === "storm" ? 0x0d1822 : mode === "rain" ? 0x10232e : 0x122b3c;
     const dayHex = mode === "fog" ? 0xa4ad91
       : mode === "storm" ? 0x49656b
@@ -880,13 +883,16 @@ function createWeatherVfx(
     scene.background = blendedBackground;
     if (scene.fog instanceof THREE.FogExp2) {
       scene.fog.color.copy(blendedBackground);
-      scene.fog.density = mode === "fog"
+      const weatherFogDensity = mode === "fog"
         ? 0.00135
         : mode === "storm"
           ? 0.00082
           : mode === "rain"
             ? 0.00064
             : 0.00024 + cloudAmount * 0.00018;
+      // At night, dense same-colour fog erases the ground before the player can
+      // read it. Games retain aerial perspective but extend the useful sightline.
+      scene.fog.density = weatherFogDensity * THREE.MathUtils.lerp(0.72, 1, daylightStrength);
     }
 
     const horizontal = Math.cos(solar.elevation);
@@ -909,19 +915,40 @@ function createWeatherVfx(
     skyUniforms.mieCoefficient.value = 0.0035 + cloudAmount * 0.016;
     skyUniforms.mieDirectionalG.value = 0.82;
 
-    renderer.toneMappingExposure = THREE.MathUtils.lerp(0.72, mode === "clear" ? 1.02 : mode === "cloudy" ? 0.9 : 0.76, daylight);
-    hemisphere.intensity = THREE.MathUtils.lerp(0.36, 1.8 - cloudAmount * 0.82, daylight);
+    const nightExposure = mode === "storm" ? 0.88 : mode === "rain" ? 0.92 : 0.98;
+    renderer.toneMappingExposure = THREE.MathUtils.lerp(
+      nightExposure,
+      mode === "clear" ? 1.02 : mode === "cloudy" ? 0.9 : 0.76,
+      daylightStrength,
+    );
+    hemisphere.intensity = THREE.MathUtils.lerp(
+      0.82 - cloudAmount * 0.12,
+      1.8 - cloudAmount * 0.82,
+      daylightStrength,
+    );
     hemisphere.color.set(isNight ? 0x7893ad : mode === "rain" || mode === "storm" ? 0xb8d0d4 : 0xe8f3ee);
-    hemisphere.groundColor.set(isNight ? 0x182923 : 0x5d6c58);
+    hemisphere.groundColor.set(isNight ? 0x263c36 : 0x5d6c58);
     const sunVisibility = smoothRange(solarElevation, -5, 8) * (1 - cloudAmount * 0.72);
-    sun.intensity = (mode === "clear" ? 3.35 : mode === "cloudy" ? 1.45 : 0.58) * sunVisibility;
+    const daylightKey = (mode === "clear" ? 3.35 : mode === "cloudy" ? 1.45 : 0.58) * sunVisibility;
+    // A readable game night still has a cool key light. Reuse the one shadowed
+    // directional light as moonlight instead of adding costly local shadow lights.
+    const moonVisibility = nightStrength * (1 - cloudAmount * 0.5);
+    const moonlightKey = (mode === "storm" ? 0.72 : mode === "rain" ? 0.88 : 1.35) * moonVisibility;
+    sun.intensity = Math.max(daylightKey, moonlightKey);
     sunColor.set(0xff965e).lerp(highSunColor, smoothRange(solarElevation, 2, 28));
     sunColor.lerp(overcastSunColor, clamp(cloudAmount * 0.55 + (raining ? 0.28 : 0), 0, 0.82));
-    sun.color.copy(sunColor);
-    sun.position.copy(sunDirection).multiplyScalar(1_200);
+    sun.color.copy(moonColor).lerp(sunColor, daylightStrength);
+    moonDirection.set(-sunDirection.x, 0.62, -sunDirection.z).normalize();
+    sun.position.copy(moonDirection).lerp(sunDirection, daylightStrength).normalize().multiplyScalar(1_200);
     sun.target.position.set(0, 0, 0);
-    skyFill.intensity = THREE.MathUtils.lerp(0.28, 0.48 + cloudAmount * 0.28, daylight);
+    skyFill.intensity = THREE.MathUtils.lerp(0.58, 0.48 + cloudAmount * 0.28, daylightStrength);
     skyFill.color.set(isNight ? 0x45617b : twilight > 0.35 ? 0xc99b8e : 0x9bc8d2);
+    renderer.domElement.dataset.nightReadability = nightStrength.toFixed(3);
+
+    const nightGlowMaterials = scene.userData.nightGlowMaterials as THREE.MeshStandardMaterial[] | undefined ?? [];
+    for (const material of nightGlowMaterials) {
+      material.emissiveIntensity = THREE.MathUtils.lerp(material.userData.nightGlowIntensity ?? 0.7, 0, daylightStrength);
+    }
 
     const clouds = scene.userData.clouds as THREE.Group[] | undefined ?? [];
     const visibleClouds = mode === "fog"
@@ -2932,7 +2959,16 @@ function addCity(scene: THREE.Scene) {
   scene.userData.waterRibbons = waterRibbons;
 
   const roadMaterial = new THREE.MeshStandardMaterial({ color: 0x303a38, roughness: 0.97 });
-  const lineMaterial = new THREE.MeshStandardMaterial({ color: 0xd9c277, roughness: 0.9 });
+  const lineMaterial = new THREE.MeshStandardMaterial({
+    color: 0xd9c277,
+    roughness: 0.9,
+    emissive: 0x8b641e,
+    emissiveIntensity: 0,
+  });
+  lineMaterial.userData.nightGlowIntensity = 0.32;
+  const nightGlowMaterials = scene.userData.nightGlowMaterials as THREE.MeshStandardMaterial[] | undefined ?? [];
+  if (!scene.userData.nightGlowMaterials) scene.userData.nightGlowMaterials = nightGlowMaterials;
+  nightGlowMaterials.push(lineMaterial);
   const concreteMaterial = new THREE.MeshStandardMaterial({ color: 0xb9af99, roughness: 0.96 });
   const curbGeometry = new THREE.BoxGeometry(2200, 1.4, 3.2);
   for (const z of [-285, 285]) {
@@ -3098,7 +3134,16 @@ function addCity(scene: THREE.Scene) {
     }
   }
 
-  const windowMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.26, metalness: 0.24, vertexColors: true });
+  const windowMaterial = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    roughness: 0.26,
+    metalness: 0.24,
+    vertexColors: true,
+    emissive: 0xffb45e,
+    emissiveIntensity: 0,
+  });
+  windowMaterial.userData.nightGlowIntensity = 0.78;
+  nightGlowMaterials.push(windowMaterial);
   const windowMesh = new THREE.InstancedMesh(unitBox, windowMaterial, windows.length);
   windowMesh.name = "Building windows";
   const matrix = new THREE.Matrix4();

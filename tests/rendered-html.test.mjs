@@ -119,6 +119,10 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(component, /skyUniforms\.sunPosition\.value\.copy\(sunDirection\)/);
   assert.match(component, /dataset\.daylightAmount/);
   assert.match(component, /dataset\.sunElevation/);
+  assert.match(component, /dataset\.nightReadability/);
+  assert.match(component, /const nightExposure = mode === "storm" \? 0\.88/);
+  assert.match(component, /const moonlightKey =/);
+  assert.match(component, /nightGlowIntensity = 0\.78/);
   assert.match(component, /const BRAKE_SPEED = 18/);
   assert.match(component, /const DEFAULT_FLIGHT_ALTITUDE = 130/);
   assert.match(component, /const MAX_FLIGHT_ALTITUDE = 650/);
