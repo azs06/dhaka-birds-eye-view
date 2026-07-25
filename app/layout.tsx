@@ -8,6 +8,8 @@ const plexMono = IBM_Plex_Mono({ variable: "--font-mono", weight: ["400", "500",
 export const metadata: Metadata = {
   title: "Bird's Eye View — Fly over Dhaka",
   description: "Take wing as a living, animated crow and explore a stylized Dhaka from above.",
+  // Without an explicit icon the browser probes /favicon.ico and 404s on load.
+  icons: { icon: [{ url: "/favicon.svg", type: "image/svg+xml" }] },
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

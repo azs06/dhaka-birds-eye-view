@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import type { PointerEvent as ReactPointerEvent } from "react";
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
@@ -10,8 +11,30 @@ import { resolveBuildingCollision } from "./flight-collision.mjs";
 import { DHAKA_LANDMARK_FOOTPRINTS, type LandmarkFootprintPart } from "./dhaka-landmark-footprints";
 
 type CameraMode = "CHASE" | "BIRD'S EYE";
+// Discrete flight verbs, shared by the keyboard handler and the touch HUD so both
+// input methods drive one implementation instead of two that can drift apart.
+type FlightActions = {
+  flap: () => void;
+  togglePerch: () => void;
+  toggleCamera: () => void;
+  cycleInspection: () => void;
+  releaseInspection: () => boolean;
+  setHold: (code: string, held: boolean) => void;
+  setAxes: (turn: number, climb: number) => void;
+  /** Move the bird to a launch site while the title screen is still up. */
+  spawnAt: (lat: number, lon: number, alt: number) => void;
+  /** Current spot in the sky, for building a shareable link back to it. */
+  readView: () => { lat: number; lon: number; alt: number; yaw: number };
+};
 type BuildingCollider = { x: number; z: number; halfWidth: number; halfDepth: number; top: number };
-type Perch = { position: THREE.Vector3; label: string; heading: number; kind?: "landmark" | "tree" };
+type Perch = {
+  position: THREE.Vector3;
+  label: string;
+  heading: number;
+  kind?: "landmark" | "tree";
+  /** Floating ring above this perch, so the approach target can be lit up. */
+  marker?: THREE.Group;
+};
 type AreaLandmark = {
   label: string;
   shortLabel: string;
@@ -92,6 +115,14 @@ type BirdFlightWindow = Window & {
     mapBuildMs: number | null;
     trafficVehicles: number;
     trafficTickHz: number;
+    /** Live landing-approach state, for tuning the flare without a debugger. */
+    landing: {
+      speed: number;
+      perch: string | null;
+      distance: number;
+      committed: boolean;
+      position: { x: number; y: number; z: number };
+    };
   };
 };
 type FlightAudio = {
@@ -128,8 +159,13 @@ type AirflowVfx = {
 type WeatherVfx = {
   apply: (weather: WeatherSnapshot) => void;
   update: (dt: number, anchor: THREE.Vector3, paused: boolean) => void;
+  /** Horizontal air movement in world units per second, for pushing the bird. */
+  readWind: (target: THREE.Vector3) => THREE.Vector3;
+  /** Local Dhaka hour to render the sky at, or null to follow the real clock. */
+  setSkyHour: (hour: number | null) => void;
   dispose: () => void;
 };
+type SkyPreset = { id: string; label: string; hour: number | null };
 type TrafficSimulation = {
   update: (dt: number, frameMs: number) => void;
   dispose: () => void;
@@ -167,8 +203,23 @@ const MAX_FLIGHT_ALTITUDE = 650;
 const CEILING_EASE_DEPTH = 90;
 const MIN_CEILING_CLIMB_SPEED = 1.8;
 // Landing reach: landmark perches are big rooftop targets, treetops are tighter.
-const LANDMARK_LANDING_RADIUS = 27;
-const TREE_LANDING_RADIUS = 20;
+const LANDMARK_LANDING_RADIUS = 34;
+const TREE_LANDING_RADIUS = 26;
+// A crow spots its perch long before it reaches it and spends the last stretch
+// bleeding off speed. Cruise is 44 m/s, so an unassisted bird crossed the old
+// 27 m capture sphere in about a second — far too little to react. These three
+// radii give the approach a shape: notice, flare, then land.
+const LANDING_APPROACH_RADIUS = 200;
+const LANDING_FLARE_RADIUS = 70;
+// Speeds held at the edge of the approach cone and at the perch itself.
+const LANDING_APPROACH_SPEED = 27;
+const LANDING_FLARE_SPEED = 12;
+// Only perches inside this forward cone count as an approach target, so merely
+// passing a rooftop never grabs the throttle.
+const LANDING_APPROACH_COS = 0.5;
+// Committed landings fly themselves in; these bound how that glide behaves.
+const LANDING_COMMIT_SPEED = 21;
+const LANDING_CAPTURE_DISTANCE = 4.5;
 // Tree perches are spatially hashed so the per-frame nearest-perch search only
 // touches the 3x3 cells around the bird instead of every tree in the city.
 const TREE_PERCH_CELL_SIZE = 160;
@@ -185,8 +236,29 @@ const TRAFFIC_BASE_TICK_HZ = 10;
 const TRAFFIC_THROTTLED_TICK_HZ = 5;
 const TRAFFIC_LONG_FRAME_MS = 34;
 const TRAFFIC_MAX_CATCH_UP_STEPS = 2;
+// Shadow refresh cadence in frames. The world is static enough that every frame
+// is pure waste, but the crow and the streaming district tiles do move, so this
+// trades a twelfth of the shadow-pass cost for a shadow that still tracks.
+const SHADOW_REFRESH_FRAMES = 12;
+// The rain streaks use the raw wind vector; the bird uses a fraction of it so a
+// stiff Dhaka breeze is a drift you correct for, never a fight you cannot win.
+const WIND_DRIFT_SCALE = 0.34;
+// Hours chosen against Dhaka's actual solar day (sunrise ~05:15, sunset ~18:45)
+// so each preset lands on a genuinely distinct sun elevation rather than a
+// nominally different clock reading.
+const SKY_PRESETS: SkyPreset[] = [
+  { id: "live", label: "LIVE", hour: null },
+  { id: "dawn", label: "DAWN", hour: 5.7 },
+  { id: "noon", label: "NOON", hour: 12.5 },
+  { id: "golden", label: "GOLDEN", hour: 18.1 },
+  { id: "dusk", label: "DUSK", hour: 18.9 },
+  { id: "night", label: "NIGHT", hour: 22 },
+];
 const FLIGHT_AMBIENCE_GAIN = 0.28;
-const RADIO_DUCKED_AMBIENCE_GAIN = 0.24;
+// Ducking has to be heard, not just computed: 0.28 -> 0.24 is about 1.3 dB, which
+// is below the threshold most listeners notice. 0.12 is a clear ~7 dB step down,
+// so the radio actually comes forward when a station is playing.
+const RADIO_DUCKED_AMBIENCE_GAIN = 0.12;
 const DEFAULT_WEATHER: WeatherSnapshot = {
   source: "Open-Meteo",
   fetchedAt: "",
@@ -210,7 +282,7 @@ const RADIO_STATIONS: RadioStation[] = [
     id: "monsoon",
     name: "Monsoon Drift",
     frequency: "BEV 00.1",
-    tagline: "Slow rain · warm air · no interruptions",
+    tagline: "Soft rain · distant chimes · no interruptions",
   },
   {
     id: "foorti",
@@ -307,6 +379,15 @@ const DHAKA_LANDMARKS: DhakaLandmark[] = [
   { label: "Hazrat Shahjalal Airport", shortLabel: "DAC", lat: 23.84343, lon: 90.39784, altitude: 48, heading: -0.56, kind: "airport", minimap: true },
 ];
 
+// Launch sites offered on the title screen. Picking one moves the attract-mode
+// bird immediately, so the choice previews itself behind the panel.
+const LAUNCH_SITES = [
+  { id: "sangsad", short: "JSB", label: "Sangsad Bhaban", lat: 23.7622884, lon: 90.3785482, alt: 175 },
+  { id: "old-dhaka", short: "AHM", label: "Old Dhaka", lat: 23.7084768, lon: 90.4055988, alt: 150 },
+  { id: "hatirjheel", short: "HJL", label: "Hatirjheel", lat: 23.771125, lon: 90.4133385, alt: 140 },
+  { id: "airport", short: "DAC", label: "Shahjalal Airport", lat: 23.84343, lon: 90.39784, alt: 195 },
+] as const;
+
 const MRT_LINE_6_STATIONS = [
   { label: "Uttara North", lat: 23.87125, lon: 90.39818 },
   { label: "Pallabi", lat: 23.82556, lon: 90.36681 },
@@ -321,12 +402,55 @@ const MRT_LINE_6_STATIONS = [
   { label: "Motijheel", lat: 23.72743, lon: 90.42048 },
 ];
 
+// Flight keys are captured on `window`, so they fire even while a HUD control has
+// focus. Blanket-ignoring every key while a control is focused is too blunt — it
+// would kill "press P to resume" the moment the pause dialog focuses its own
+// resume button. Instead, work out which keys the focused control legitimately
+// owns and surrender only those.
+type FocusClaim = "none" | "text" | "slider" | "activatable";
+const SLIDER_CLAIMED_KEYS = new Set([
+  "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown",
+]);
+const ACTIVATION_CLAIMED_KEYS = new Set(["Space", "Enter"]);
+
+function focusedControlClaim(target: EventTarget | null): FocusClaim {
+  if (!(target instanceof Element)) return "none";
+  const control = target.closest(
+    "input, textarea, select, button, a[href], [contenteditable='true'], [role='slider'], [role='button']",
+  );
+  if (!control) return "none";
+  if (control instanceof HTMLInputElement) return control.type === "range" ? "slider" : "text";
+  if (control.getAttribute("role") === "slider") return "slider";
+  if (control instanceof HTMLTextAreaElement || control instanceof HTMLSelectElement) return "text";
+  if (control.getAttribute("contenteditable") === "true") return "text";
+  return "activatable";
+}
+
+/** True when the focused control, not the flight, should receive this key. */
+function focusedControlClaimsKey(claim: FocusClaim, code: string) {
+  // Escape is the universal dismiss key and is never surrendered.
+  if (code === "Escape") return false;
+  if (claim === "text") return true;
+  if (claim === "slider") return SLIDER_CLAIMED_KEYS.has(code);
+  if (claim === "activatable") return ACTIVATION_CLAIMED_KEYS.has(code);
+  return false;
+}
+
 function coordinatesToWorld(lat: number, lon: number) {
   const metresPerLongitude = 111_320 * Math.cos(MAP_CENTER.lat * Math.PI / 180);
   return new THREE.Vector2(
     (lon - MAP_CENTER.lon) * metresPerLongitude,
     -(lat - MAP_CENTER.lat) * 110_540,
   );
+}
+
+/** Inverse of coordinatesToWorld, for turning a spot in the sky back into a link. */
+function worldToCoordinates(x: number, z: number) {
+  const metresPerLongitude = 111_320 * Math.cos(MAP_CENTER.lat * Math.PI / 180);
+  return {
+    lat: MAP_CENTER.lat - z / 110_540,
+    lon: MAP_CENTER.lon + x / metresPerLongitude,
+  };
 }
 
 function weatherIcon(mode: WeatherMode, isDay: boolean) {
@@ -368,6 +492,17 @@ function solarPosition(at: Date) {
     Math.cos(hourAngle) * Math.sin(latitude) - Math.tan(declination) * Math.cos(latitude),
   ) + Math.PI;
   return { elevation, azimuth };
+}
+
+// Dhaka keeps a fixed UTC+6 offset with no daylight saving, so a local hour maps
+// to an absolute instant without any timezone database.
+const DHAKA_UTC_OFFSET_MS = 6 * 3_600_000;
+
+/** Absolute epoch ms for a given local Dhaka hour on the reference day. */
+function dhakaInstantAtHour(hour: number, reference = Date.now()) {
+  const localNow = reference + DHAKA_UTC_OFFSET_MS;
+  const localDayStart = Math.floor(localNow / 86_400_000) * 86_400_000;
+  return localDayStart + hour * 3_600_000 - DHAKA_UTC_OFFSET_MS;
 }
 
 function liveDaylightAmount(weather: WeatherSnapshot, now: number, solarElevation: number) {
@@ -829,6 +964,7 @@ function createWeatherVfx(
   let lightningPulse = 0;
   let currentWeather = DEFAULT_WEATHER;
   let daylightRefreshClock = 0;
+  let skyHourOverride: number | null = null;
   const sunDirection = new THREE.Vector3();
   const moonDirection = new THREE.Vector3();
   const nightColor = new THREE.Color();
@@ -863,7 +999,10 @@ function createWeatherVfx(
     windX = Math.sin(windToward) * 12 * windScale;
     windZ = Math.cos(windToward) * 12 * windScale;
 
-    const now = Date.now();
+    // Visitors otherwise only ever see whatever hour it happens to be in Dhaka.
+    // The override re-times the whole sky — sun vector, colour, stars, exposure —
+    // by moving the instant every downstream calculation reads from.
+    const now = skyHourOverride === null ? Date.now() : dhakaInstantAtHour(skyHourOverride);
     const solar = solarPosition(new Date(now));
     const solarElevation = THREE.MathUtils.radToDeg(solar.elevation);
     const daylight = liveDaylightAmount(weather, now, solar.elevation);
@@ -901,9 +1040,14 @@ function createWeatherVfx(
       Math.sin(solar.elevation),
       -Math.cos(solar.azimuth) * horizontal,
     ).normalize();
-    sky.visible = solarElevation > -7;
-    stars.visible = daylight < 0.32 && cloudAmount < 0.72 && !raining && mode !== "fog";
-    starMaterial.opacity = clamp((0.82 - cloudAmount) * (1 - daylight / 0.32), 0, 0.82);
+    // The Preetham sky model is only defined for a sun above the horizon; past
+    // sunset it collapses the whole dome to black and hides the twilight gradient
+    // that scene.background is already computing. Hand over as the sun sets.
+    sky.visible = solarElevation > -1.2;
+    // Stars fade in from late dusk rather than snapping on, so the zenith is
+    // never an empty black field while the horizon is still lit.
+    stars.visible = daylight < 0.52 && cloudAmount < 0.72 && !raining && mode !== "fog";
+    starMaterial.opacity = clamp((0.82 - cloudAmount) * (1 - daylight / 0.52), 0, 0.82);
     const skyUniforms = sky.material.uniforms;
     skyUniforms.sunPosition.value.copy(sunDirection);
     renderer.domElement.dataset.cloudCover = weather.cloudCover.toFixed(0);
@@ -934,13 +1078,19 @@ function createWeatherVfx(
     // directional light as moonlight instead of adding costly local shadow lights.
     const moonVisibility = nightStrength * (1 - cloudAmount * 0.5);
     const moonlightKey = (mode === "storm" ? 0.72 : mode === "rain" ? 0.88 : 1.35) * moonVisibility;
-    sun.intensity = Math.max(daylightKey, moonlightKey);
+    // Between sunset and true night the sun key has faded but the moon key has
+    // not arrived yet, which left civil twilight — the best-looking hour of the
+    // day — darker than midnight. Fill that gap with the scattered sky itself.
+    const twilightKey = twilight * (mode === "storm" ? 0.4 : mode === "rain" ? 0.55 : 1.05) * (1 - cloudAmount * 0.45);
+    sun.intensity = Math.max(daylightKey, moonlightKey, twilightKey);
     sunColor.set(0xff965e).lerp(highSunColor, smoothRange(solarElevation, 2, 28));
     sunColor.lerp(overcastSunColor, clamp(cloudAmount * 0.55 + (raining ? 0.28 : 0), 0, 0.82));
     sun.color.copy(moonColor).lerp(sunColor, daylightStrength);
     moonDirection.set(-sunDirection.x, 0.62, -sunDirection.z).normalize();
     sun.position.copy(moonDirection).lerp(sunDirection, daylightStrength).normalize().multiplyScalar(1_200);
     sun.target.position.set(0, 0, 0);
+    // The key light just moved, so the cached static shadow map is now stale.
+    renderer.shadowMap.needsUpdate = true;
     skyFill.intensity = THREE.MathUtils.lerp(0.58, 0.48 + cloudAmount * 0.28, daylightStrength);
     skyFill.color.set(isNight ? 0x45617b : twilight > 0.35 ? 0xc99b8e : 0x9bc8d2);
     renderer.domElement.dataset.nightReadability = nightStrength.toFixed(3);
@@ -949,6 +1099,10 @@ function createWeatherVfx(
     for (const material of nightGlowMaterials) {
       material.emissiveIntensity = THREE.MathUtils.lerp(material.userData.nightGlowIntensity ?? 0.7, 0, daylightStrength);
     }
+    // Windows come on through dusk and fade out at dawn. Overcast and rain
+    // scatter the glow, so the city reads slightly brighter through cloud.
+    NIGHT_WINDOW_GLOW.value = (1 - daylightStrength) * (1.15 + cloudAmount * 0.35);
+    NIGHT_WINDOW_TINT.value.setHex(mode === "fog" ? 0xffd2a4 : 0xffc074);
 
     const clouds = scene.userData.clouds as THREE.Group[] | undefined ?? [];
     const visibleClouds = mode === "fog"
@@ -969,6 +1123,15 @@ function createWeatherVfx(
 
   return {
     apply,
+    readWind(target) {
+      // windX/windZ already carry live speed and bearing for the rain streaks;
+      // the bird rides the same air mass so the two always agree on screen.
+      return target.set(windX, 0, windZ);
+    },
+    setSkyHour(hour) {
+      skyHourOverride = hour;
+      apply(currentWeather);
+    },
     update(dt, anchor, paused) {
       daylightRefreshClock -= dt;
       if (daylightRefreshClock <= 0) {
@@ -1129,6 +1292,7 @@ async function addRoadNetworkMeshes(
   roads: OsmMapData["roads"],
   name: string,
   isCancelled: () => boolean,
+  scene?: THREE.Scene,
 ) {
   const majorRoads = new Set(["motorway", "trunk", "primary", "secondary"]);
   const localRoads = new Set(["tertiary", "residential", "unclassified", "service"]);
@@ -1206,10 +1370,31 @@ async function addRoadNetworkMeshes(
   for (let index = 0; index < surfaces.length; index++) {
     await mergeIntoMeshBatches(parent, surfaces[index], roadMaterials[index], `${name} roads ${index}`, isCancelled, false, 280, false);
   }
+  // Road markings are the only continuous line work in the city, so lifting them
+  // at night traces every corridor from the air the way real street lighting does.
+  const centerLineMaterial = new THREE.MeshStandardMaterial({
+    color: 0xe0bd62,
+    roughness: 0.86,
+    emissive: 0xffb347,
+    emissiveIntensity: 0,
+  });
+  centerLineMaterial.userData.nightGlowIntensity = 0.92;
+  const edgeLineMaterial = new THREE.MeshStandardMaterial({
+    color: 0xe5deca,
+    roughness: 0.9,
+    emissive: 0xfff0c8,
+    emissiveIntensity: 0,
+  });
+  edgeLineMaterial.userData.nightGlowIntensity = 0.58;
+  if (scene) {
+    const nightGlowMaterials = (scene.userData.nightGlowMaterials as THREE.MeshStandardMaterial[] | undefined) ?? [];
+    if (!scene.userData.nightGlowMaterials) scene.userData.nightGlowMaterials = nightGlowMaterials;
+    nightGlowMaterials.push(centerLineMaterial, edgeLineMaterial);
+  }
   await mergeIntoMeshBatches(
     parent,
     centerLines,
-    new THREE.MeshStandardMaterial({ color: 0xe0bd62, roughness: 0.86 }),
+    centerLineMaterial,
     `${name} center lines`,
     isCancelled,
     false,
@@ -1219,7 +1404,7 @@ async function addRoadNetworkMeshes(
   await mergeIntoMeshBatches(
     parent,
     edgeLines,
-    new THREE.MeshStandardMaterial({ color: 0xe5deca, roughness: 0.9 }),
+    edgeLineMaterial,
     `${name} edge lines`,
     isCancelled,
     false,
@@ -1228,12 +1413,88 @@ async function addRoadNetworkMeshes(
   );
 }
 
+// Every building in the world funnels into a handful of shared materials — four
+// merged OSM batches, three procedural-tile instance buckets, three immediate-mass
+// buckets. Adding real window geometry across ±12 km is impossible, but a
+// procedural window grid evaluated in the fragment shader costs no geometry, no
+// draw calls, and no extra materials, and it works identically for merged meshes
+// and InstancedMesh because it is driven entirely by world position and normal.
+const NIGHT_WINDOW_GLOW = { value: 0 };
+const NIGHT_WINDOW_TINT = { value: new THREE.Color(0xffc074) };
+
+function applyNightWindows(material: THREE.MeshStandardMaterial, density = 0.5) {
+  const densityUniform = { value: density };
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.bevNightGlow = NIGHT_WINDOW_GLOW;
+    shader.uniforms.bevWindowTint = NIGHT_WINDOW_TINT;
+    shader.uniforms.bevWindowDensity = densityUniform;
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        "#include <common>",
+        `#include <common>
+varying vec3 bevWorldPos;
+varying vec3 bevWorldNormal;`,
+      )
+      // `begin_vertex` is where `transformed` first exists, and `objectNormal`
+      // has already been set by `beginnormal_vertex` above it.
+      .replace(
+        "#include <begin_vertex>",
+        `#include <begin_vertex>
+#ifdef USE_INSTANCING
+  bevWorldPos = ( modelMatrix * instanceMatrix * vec4( transformed, 1.0 ) ).xyz;
+  bevWorldNormal = normalize( mat3( modelMatrix ) * mat3( instanceMatrix ) * objectNormal );
+#else
+  bevWorldPos = ( modelMatrix * vec4( transformed, 1.0 ) ).xyz;
+  bevWorldNormal = normalize( mat3( modelMatrix ) * objectNormal );
+#endif`,
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        "#include <common>",
+        `#include <common>
+varying vec3 bevWorldPos;
+varying vec3 bevWorldNormal;
+uniform float bevNightGlow;
+uniform float bevWindowDensity;
+uniform vec3 bevWindowTint;`,
+      )
+      // `totalEmissiveRadiance` is already declared and populated at this point,
+      // so window light adds on top of whatever emissive the material had.
+      .replace(
+        "#include <emissivemap_fragment>",
+        `#include <emissivemap_fragment>
+if ( bevNightGlow > 0.001 ) {
+  float bevWall = 1.0 - smoothstep( 0.30, 0.58, abs( bevWorldNormal.y ) );
+  // Roofs and the first storey stay dark: lit windows start above street level.
+  float bevStorey = smoothstep( 3.0, 7.0, bevWorldPos.y );
+  if ( bevWall * bevStorey > 0.001 ) {
+    // Read the facade along whichever horizontal axis it faces.
+    float bevAcross = abs( bevWorldNormal.x ) > abs( bevWorldNormal.z ) ? bevWorldPos.z : bevWorldPos.x;
+    vec2 bevCell = vec2( bevAcross / 4.6, bevWorldPos.y / 3.75 );
+    vec2 bevId = floor( bevCell );
+    vec2 bevUv = fract( bevCell );
+    float bevPane = step( 0.17, bevUv.x ) * step( bevUv.x, 0.70 )
+      * step( 0.24, bevUv.y ) * step( bevUv.y, 0.76 );
+    // Stable per-window hash so a given window keeps its state frame to frame.
+    float bevNoise = fract( sin( dot( bevId, vec2( 37.31, 271.9 ) ) ) * 43758.5453 );
+    float bevLit = step( 1.0 - bevWindowDensity, bevNoise );
+    float bevWarmth = 0.55 + 0.75 * fract( bevNoise * 17.13 );
+    totalEmissiveRadiance += bevWindowTint * ( bevPane * bevLit * bevWall * bevStorey * bevWarmth * bevNightGlow );
+  }
+}`,
+      );
+  };
+  // Patched and unpatched standard materials must not share a compiled program.
+  material.customProgramCacheKey = () => `bev-night-windows-${density}`;
+  return material;
+}
+
 function addImmediateCityMass(scene: THREE.Scene, roads: OsmMapData["roads"]) {
   const group = new THREE.Group();
   group.name = "Immediate Greater Dhaka city mass";
   const geometry = new THREE.BoxGeometry(1, 1, 1);
   const materials = [0xc4b99f, 0xa9b3aa, 0xb47e69].map(
-    (color) => new THREE.MeshStandardMaterial({ color, roughness: 0.94, metalness: 0.01 }),
+    (color) => applyNightWindows(new THREE.MeshStandardMaterial({ color, roughness: 0.94, metalness: 0.01 }), 0.46),
   );
   const transforms: THREE.Matrix4[][] = [[], [], []];
   const districtCenters = AREA_LANDMARKS.map((landmark) => {
@@ -1340,7 +1601,7 @@ async function addProceduralDistrictTiles(
   const foliageGeometry = new THREE.IcosahedronGeometry(1, 1);
   const trunkGeometry = new THREE.CylinderGeometry(0.5, 0.72, 1, 6);
   const materials = [0xc9bda3, 0xaeb8ae, 0xb9826d].map(
-    (color) => new THREE.MeshStandardMaterial({ color, roughness: 0.9, metalness: 0.01 }),
+    (color) => applyNightWindows(new THREE.MeshStandardMaterial({ color, roughness: 0.9, metalness: 0.01 }), 0.5),
   );
   const roofMaterial = new THREE.MeshStandardMaterial({ color: 0x59655f, roughness: 0.94 });
   const trunkMaterial = new THREE.MeshStandardMaterial({ color: 0x6b5140, roughness: 1 });
@@ -1388,7 +1649,7 @@ async function addProceduralDistrictTiles(
   if (data.roads.length === 0 && !scene.userData.proceduralRoadFallback) {
     const roadFallback = new THREE.Group();
     roadFallback.name = "Greater Dhaka procedural road fallback";
-    await addRoadNetworkMeshes(roadFallback, roads, "Fallback", isCancelled);
+    await addRoadNetworkMeshes(roadFallback, roads, "Fallback", isCancelled, scene);
     scene.add(roadFallback);
     scene.userData.proceduralRoadFallback = roadFallback;
   }
@@ -1741,13 +2002,19 @@ function createFlightAudio(): FlightAudio {
     waterSource.connect(waterFilter).connect(waterGain).connect(master);
     waterSource.start();
 
-    const cityTone = context.createOscillator();
-    cityTone.type = "sine";
-    cityTone.frequency.value = 73;
+    // A pitched oscillator reads as an electrical hum when it never stops.
+    // Use a very soft, filtered noise bed for distant city air instead.
+    const cityBed = context.createBufferSource();
+    cityBed.buffer = makeNoise(context, 8.6, 0.975);
+    cityBed.loop = true;
+    const cityFilter = context.createBiquadFilter();
+    cityFilter.type = "lowpass";
+    cityFilter.frequency.value = 210;
+    cityFilter.Q.value = 0.25;
     cityGain = context.createGain();
-    cityGain.gain.value = 0.008;
-    cityTone.connect(cityGain).connect(master);
-    cityTone.start();
+    cityGain.gain.value = 0.006;
+    cityBed.connect(cityFilter).connect(cityGain).connect(master);
+    cityBed.start();
 
     natureGain = context.createGain();
     natureGain.gain.value = 0.72;
@@ -1772,22 +2039,6 @@ function createFlightAudio(): FlightAudio {
     breezeDepth.gain.value = 0.009;
     breezePulse.connect(breezeDepth).connect(rustleGain.gain);
     breezePulse.start();
-
-    const crickets = context.createOscillator();
-    crickets.type = "sine";
-    crickets.frequency.value = 3_780;
-    const cricketGain = context.createGain();
-    cricketGain.gain.value = 0.0017;
-    crickets.connect(cricketGain).connect(natureGain);
-    crickets.start();
-
-    const cricketPulse = context.createOscillator();
-    cricketPulse.type = "square";
-    cricketPulse.frequency.value = 7.2;
-    const cricketDepth = context.createGain();
-    cricketDepth.gain.value = 0.0014;
-    cricketPulse.connect(cricketDepth).connect(cricketGain.gain);
-    cricketPulse.start();
 
     const breath = context.createOscillator();
     breath.type = "sine";
@@ -1830,12 +2081,20 @@ function createFlightAudio(): FlightAudio {
       if (!context || !master) return;
       master.gain.cancelScheduledValues(context.currentTime);
       master.gain.setTargetAtTime(0, context.currentTime, 0.22);
+      // Silencing the master still leaves the call scheduler spinning up
+      // oscillators nobody can hear, and a queued call would fire the instant
+      // the flight resumes.
+      if (birdCallTimer) {
+        window.clearTimeout(birdCallTimer);
+        birdCallTimer = 0;
+      }
     },
     resume() {
       if (!enabled || !context || !master) return;
       void context.resume();
       master.gain.cancelScheduledValues(context.currentTime);
       master.gain.setTargetAtTime(activeGain(), context.currentTime, 0.35);
+      if (!birdCallTimer) scheduleBirdCall();
     },
     flap() {
       if (!enabled || !context || !master || !flapBuffer) return;
@@ -1886,12 +2145,12 @@ function createFlightRadio(onStatus: (status: RadioStatus) => void): FlightRadio
   let volume = 0.58;
   let context: AudioContext | null = null;
   let synthMaster: GainNode | null = null;
-  let chordOscillators: OscillatorNode[] = [];
-  let chordTimer = 0;
+  let melodyTimer = 0;
+  let melodyStep = 0;
 
-  const stopChordTimer = () => {
-    if (chordTimer) window.clearInterval(chordTimer);
-    chordTimer = 0;
+  const stopGentleMelody = () => {
+    if (melodyTimer) window.clearTimeout(melodyTimer);
+    melodyTimer = 0;
   };
 
   const fadeSynth = (target: number) => {
@@ -1901,12 +2160,79 @@ function createFlightRadio(onStatus: (status: RadioStatus) => void): FlightRadio
     synthMaster.gain.setTargetAtTime(target, now, target > 0 ? 1.6 : 0.22);
   };
 
-  const tuneChord = (root: number) => {
-    if (!context) return;
-    const ratios = [1, 1.25, 1.5];
-    chordOscillators.forEach((oscillator, index) => {
-      oscillator.frequency.setTargetAtTime(root * ratios[index], context!.currentTime, 3.8);
-    });
+  // Two bare sines an octave apart read as a test tone. A sub, a fifth and an
+  // occasional struck chime give the phrase a body and a decay that sound played
+  // rather than generated, while still leaving real silence between phrases.
+  const GENTLE_VOICES = [
+    { ratio: 0.5, peak: 0.011, attack: 1.9, release: 8.4, pan: -0.12 },
+    { ratio: 1, peak: 0.017, attack: 1.3, release: 7.4, pan: 0.16 },
+    { ratio: 1.5, peak: 0.007, attack: 2.3, release: 6.8, pan: -0.34 },
+    { ratio: 2, peak: 0.005, attack: 1.6, release: 6.1, pan: 0.31 },
+  ];
+
+  const playGentleNote = () => {
+    if (!context || !synthMaster || !enabled || currentStation?.stream) return;
+    // A pentatonic-leaning line: every pair of notes is consonant, so the phrases
+    // never resolve anywhere uncomfortable no matter which order they arrive in.
+    const roots = [196, 220, 261.63, 174.61, 196, 233.08, 220, 146.83];
+    const root = roots[melodyStep % roots.length];
+    melodyStep++;
+    const now = context.currentTime;
+    const direction = melodyStep % 2 === 0 ? -1 : 1;
+
+    for (const voice of GENTLE_VOICES) {
+      const oscillator = context.createOscillator();
+      oscillator.type = "sine";
+      oscillator.frequency.value = root * voice.ratio;
+      // A few cents of drift keeps the sustained voices from beating perfectly.
+      oscillator.detune.value = (melodyStep % 3 - 1) * 3.5;
+      const envelope = context.createGain();
+      envelope.gain.setValueAtTime(0.0001, now);
+      envelope.gain.exponentialRampToValueAtTime(voice.peak, now + voice.attack);
+      envelope.gain.exponentialRampToValueAtTime(0.0001, now + voice.release);
+      const panner = context.createStereoPanner();
+      panner.pan.value = voice.pan * direction;
+      oscillator.connect(envelope).connect(panner).connect(synthMaster);
+      oscillator.onended = () => {
+        oscillator.disconnect();
+        envelope.disconnect();
+        panner.disconnect();
+      };
+      oscillator.start(now);
+      oscillator.stop(now + voice.release + 0.1);
+    }
+
+    // The station promises distant chimes, so roughly every third phrase strikes
+    // one: fast attack, long tail, well above the pad so it reads as a bell.
+    if (melodyStep % 3 === 1) {
+      const chime = context.createOscillator();
+      chime.type = "sine";
+      chime.frequency.value = root * 6;
+      const chimeEnvelope = context.createGain();
+      const strikeAt = now + 1.1;
+      chimeEnvelope.gain.setValueAtTime(0.0001, strikeAt);
+      chimeEnvelope.gain.exponentialRampToValueAtTime(0.0045, strikeAt + 0.02);
+      chimeEnvelope.gain.exponentialRampToValueAtTime(0.0001, strikeAt + 5.2);
+      const chimePan = context.createStereoPanner();
+      chimePan.pan.value = -0.42 * direction;
+      chime.connect(chimeEnvelope).connect(chimePan).connect(synthMaster);
+      chime.onended = () => {
+        chime.disconnect();
+        chimeEnvelope.disconnect();
+        chimePan.disconnect();
+      };
+      chime.start(strikeAt);
+      chime.stop(strikeAt + 5.3);
+    }
+  };
+
+  const scheduleGentleMelody = (delay = 900) => {
+    stopGentleMelody();
+    melodyTimer = window.setTimeout(() => {
+      melodyTimer = 0;
+      playGentleNote();
+      if (enabled && !currentStation?.stream) scheduleGentleMelody(6_200 + Math.random() * 3_600);
+    }, delay);
   };
 
   const initializeRelaxingStation = () => {
@@ -1930,36 +2256,13 @@ function createFlightRadio(onStatus: (status: RadioStatus) => void): FlightRadio
     rain.buffer = noiseBuffer;
     rain.loop = true;
     const rainFilter = context.createBiquadFilter();
-    rainFilter.type = "bandpass";
-    rainFilter.frequency.value = 950;
-    rainFilter.Q.value = 0.42;
+    rainFilter.type = "lowpass";
+    rainFilter.frequency.value = 1_050;
+    rainFilter.Q.value = 0.18;
     const rainGain = context.createGain();
-    rainGain.gain.value = 0.085;
+    rainGain.gain.value = 0.042;
     rain.connect(rainFilter).connect(rainGain).connect(synthMaster);
     rain.start();
-
-    chordOscillators = [0, 1, 2].map((index) => {
-      const oscillator = context!.createOscillator();
-      oscillator.type = index === 0 ? "sine" : "triangle";
-      oscillator.frequency.value = [110, 137.5, 165][index];
-      const gain = context!.createGain();
-      gain.gain.value = [0.055, 0.024, 0.018][index];
-      oscillator.connect(gain).connect(synthMaster!);
-      oscillator.start();
-      return oscillator;
-    });
-
-  };
-
-  const beginChordDrift = () => {
-    stopChordTimer();
-    const roots = [110, 98, 123.47, 103.83];
-    let chordIndex = 0;
-    tuneChord(roots[chordIndex]);
-    chordTimer = window.setInterval(() => {
-      chordIndex = (chordIndex + 1) % roots.length;
-      tuneChord(roots[chordIndex]);
-    }, 12_000);
   };
 
   const clearLiveAudio = () => {
@@ -1987,12 +2290,13 @@ function createFlightRadio(onStatus: (status: RadioStatus) => void): FlightRadio
       currentStation = station;
       clearLiveAudio();
       fadeSynth(0);
-      stopChordTimer();
+      stopGentleMelody();
       onStatus("buffering");
       if (!station.stream) {
         initializeRelaxingStation();
         void context?.resume();
-        beginChordDrift();
+        melodyStep = 0;
+        scheduleGentleMelody();
         fadeSynth(volume * 0.72);
         onStatus("playing");
         return;
@@ -2009,21 +2313,21 @@ function createFlightRadio(onStatus: (status: RadioStatus) => void): FlightRadio
       enabled = false;
       clearLiveAudio();
       fadeSynth(0);
-      stopChordTimer();
+      stopGentleMelody();
       onStatus("off");
     },
     pause() {
       if (!enabled) return;
       liveAudio.pause();
       fadeSynth(0);
-      stopChordTimer();
+      stopGentleMelody();
       onStatus("paused");
     },
     async resume() {
       if (!enabled || !currentStation) return;
       if (!currentStation.stream) {
         void context?.resume();
-        beginChordDrift();
+        scheduleGentleMelody();
         fadeSynth(volume * 0.72);
         onStatus("playing");
         return;
@@ -2043,7 +2347,7 @@ function createFlightRadio(onStatus: (status: RadioStatus) => void): FlightRadio
     dispose() {
       enabled = false;
       clearLiveAudio();
-      stopChordTimer();
+      stopGentleMelody();
       if (context) void context.close();
     },
   };
@@ -2213,6 +2517,9 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
   };
 
   const partBounds = new Map<number, { minX: number; maxX: number; minZ: number; maxZ: number; height: number }>();
+  // Bounding boxes are enough to hang a dome or a spire off, but banding and wall
+  // voids have to follow the actual wall line, so keep the polygons too.
+  const partOutlines = new Map<number, MapPoint[]>();
   const allBounds = new Map<DhakaLandmark["kind"], { minX: number; maxX: number; minZ: number; maxZ: number; top: number }>();
 
   for (const landmark of DHAKA_LANDMARKS) {
@@ -2248,6 +2555,7 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
       const partMinZ = Math.min(...zs);
       const partMaxZ = Math.max(...zs);
       partBounds.set(part.osmId, { minX: partMinX, maxX: partMaxX, minZ: partMinZ, maxZ: partMaxZ, height: part.height });
+      partOutlines.set(part.osmId, points);
       if (part.role !== "ground" && part.role !== "water") {
         minX = Math.min(minX, partMinX);
         maxX = Math.max(maxX, partMaxX);
@@ -2304,9 +2612,20 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
         height: part.height,
       };
     };
+    // The wall line of one part, re-centred on that part so a mesh built from it
+    // can be positioned and scaled about its own middle.
+    const outline = (osmId: number) => {
+      const points = partOutlines.get(osmId);
+      const part = partBounds.get(osmId);
+      if (!points || !part) return null;
+      const centreX = (part.minX + part.maxX) / 2;
+      const centreZ = (part.minZ + part.maxZ) / 2;
+      return points.map(([x, z]) => [x - centreX, z - centreZ] as MapPoint);
+    };
     return {
       group,
       anchor,
+      outline,
       width: Math.max(8, bounds.maxX - bounds.minX),
       depth: Math.max(8, bounds.maxZ - bounds.minZ),
       top: bounds.top > 0 ? bounds.top : landmark.altitude,
@@ -2314,7 +2633,7 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
   };
 
   for (const landmark of DHAKA_LANDMARKS) {
-    const { group, anchor, width, depth, top } = detailGroup(landmark);
+    const { group, anchor, outline, width, depth, top } = detailGroup(landmark);
 
     if (landmark.kind === "church") {
       const tower = anchor(983631140);
@@ -2387,24 +2706,153 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
         addBox(group, [4, 6, 4], [mass.x, mass.height + 5.5, mass.z], accent);
       }
     } else if (landmark.kind === "parliament") {
-      const drum = anchor(443037035);
-      if (drum) {
-        addCylinder(group, Math.min(drum.width, drum.depth) * 0.34, Math.min(drum.width, drum.depth) * 0.44, 8, [drum.x, drum.height + 4, drum.z], concrete, 8);
+      // Kahn's citadel is three concentric rings the OSM outlines already carry:
+      // a 34 m block ring, a 42 m star, and the 46 m octagonal assembly chamber at
+      // the centre. The massing was never the problem — what was missing is
+      // everything that makes it readable from the air: white marble banding on
+      // raw grey concrete, the giant geometric voids punched through the outer
+      // walls, the crowned chamber, and the water it is always photographed across.
+      const citadel = anchor(24448328);
+      const star = anchor(443036732);
+      const chamber = anchor(443037035);
+
+      // Marble banding at every pour line. One triangulation is cloned up the
+      // elevation, so a dozen stripes cost one extrusion rather than a dozen.
+      const bandPart = (osmId: number, top: number) => {
+        const local = outline(osmId);
+        const seat = anchor(osmId);
+        if (!local || !seat) return;
+        const geometry = new THREE.ExtrudeGeometry(polygonShape(local), {
+          depth: 0.8,
+          bevelEnabled: false,
+          curveSegments: 1,
+        });
+        geometry.rotateX(-Math.PI / 2);
+        for (let y = 4.4; y < top - 1.5; y += 4.4) {
+          const band = new THREE.Mesh(geometry, whiteStone);
+          band.position.set(seat.x, y, seat.z);
+          // Standing each band slightly proud of the wall is what catches the
+          // light. Scaling about the part centroid keeps it parallel to every face.
+          band.scale.set(1.005, 1, 1.005);
+          band.receiveShadow = true;
+          group.add(band);
+        }
+      };
+      bandPart(24448328, 34);
+      bandPart(443036732, 42);
+      bandPart(443037035, 46);
+
+      if (citadel) {
+        const local = outline(24448328);
+        if (local) {
+          // Walk the real wall line for the point furthest along each face normal,
+          // so every void lands flat on a wall instead of floating off a corner.
+          const wallPoint = (dirX: number, dirZ: number) => {
+            let best = local[0];
+            let bestDot = -Infinity;
+            for (const point of local) {
+              const dot = point[0] * dirX + point[1] * dirZ;
+              if (dot > bestDot) {
+                bestDot = dot;
+                best = point;
+              }
+            }
+            return best;
+          };
+          const diagonal = Math.SQRT1_2;
+          const voids: Array<[number, number, number, number]> = [
+            // direction x, direction z, radius, cross-section segments
+            [0, -1, 13, 44], [0, 1, 13, 44],
+            [-1, 0, 12, 3], [1, 0, 12, 3],
+            [-diagonal, -diagonal, 10, 4], [diagonal, -diagonal, 10, 4],
+            [-diagonal, diagonal, 10, 4], [diagonal, diagonal, 10, 4],
+          ];
+          const wallNormal = new THREE.Vector3();
+          const wallTangent = new THREE.Vector3();
+          const wallUp = new THREE.Vector3(0, 1, 0);
+          const wallBasis = new THREE.Matrix4();
+          for (const [dirX, dirZ, radius, segments] of voids) {
+            const edge = wallPoint(dirX, dirZ);
+            // A shallow prism sunk into the wall on its normal, dark inside, so the
+            // openings read as holes at flying height instead of as the radius-8
+            // decals that used to vanish above a hundred metres. Only a sliver
+            // stands proud — any more and they look bolted on rather than cut.
+            const opening = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius, 4, segments), recess);
+            wallNormal.set(dirX, 0, dirZ).normalize();
+            wallTangent.crossVectors(wallUp, wallNormal).normalize();
+            wallBasis.makeBasis(wallTangent, wallNormal, wallUp);
+            opening.quaternion.setFromRotationMatrix(wallBasis);
+            // Spin the cross-section a quarter turn so triangles and squares sit
+            // on a flat edge with a vertex up, the way Kahn cut them.
+            opening.rotateY(Math.PI / 2);
+            // Pulling the seat back off the extreme vertex keeps the diagonal
+            // openings on a wall face instead of hanging off a corner.
+            opening.position.set(citadel.x + edge[0] * 0.93, 17.5, citadel.z + edge[1] * 0.93);
+            group.add(opening);
+          }
+        }
+
+        // A stone apron for the podium the citadel stands on. Crescent Lake is
+        // already in the OSM water layer, so there is no synthetic ring here —
+        // laying one down would just double the real thing.
+        const plaza = new THREE.Mesh(new THREE.CircleGeometry(92, 40), paleConcrete);
+        plaza.rotation.x = -Math.PI / 2;
+        plaza.position.set(citadel.x, -0.1, citadel.z);
+        plaza.receiveShadow = true;
+        group.add(plaza);
       }
-      const ring = anchor(443036732);
-      if (ring) {
-        // Louis Kahn's signature geometric voids, sunk flush into the assembly drum walls.
-        const cutout = (radius: number, segments: number, x: number, y: number, z: number, alongX: boolean) => {
-          const disk = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius, 1.6, segments), recess);
-          disk.position.set(x, y, z);
-          if (alongX) disk.rotation.z = Math.PI / 2;
-          else disk.rotation.x = Math.PI / 2;
-          group.add(disk);
-        };
-        cutout(8, 32, ring.x, ring.height * 0.55, ring.z - ring.depth * 0.5, false);
-        cutout(8, 32, ring.x, ring.height * 0.55, ring.z + ring.depth * 0.5, false);
-        cutout(7, 3, ring.x - ring.width * 0.5, ring.height * 0.52, ring.z, true);
-        cutout(7, 3, ring.x + ring.width * 0.5, ring.height * 0.52, ring.z, true);
+
+      if (star) {
+        // Deep light slots between the peripheral blocks, which is what gives the
+        // ring its vertical rhythm rather than reading as one unbroken slab.
+        for (let slot = 0; slot < 8; slot++) {
+          const angle = (slot / 8) * Math.PI * 2 + Math.PI / 8;
+          const reach = Math.min(star.width, star.depth) * 0.5;
+          const shadowSlot = new THREE.Mesh(unitBox, recess);
+          shadowSlot.scale.set(1.7, 40, 5.5);
+          shadowSlot.position.set(star.x + Math.cos(angle) * reach, 20, star.z + Math.sin(angle) * reach);
+          shadowSlot.rotation.y = -angle;
+          group.add(shadowSlot);
+        }
+      }
+
+      if (chamber) {
+        const radius = Math.min(chamber.width, chamber.depth) * 0.5;
+        // Octagonal clerestory drum over the assembly chamber.
+        addCylinder(group, radius * 0.94, radius, 8.5, [chamber.x, chamber.height + 4.2, chamber.z], concrete, 8);
+        // Kahn crowned the chamber with a folded parabolic shell. Lathing the
+        // parabola over eight segments gives both the curve and the fold in one
+        // geometry; the fins around the drum supply the umbrella ribbing.
+        const profile: THREE.Vector2[] = [];
+        const shellRadius = radius * 1.06;
+        for (let step = 0; step <= 10; step++) {
+          const shellR = shellRadius * (1 - step / 10);
+          profile.push(new THREE.Vector2(shellR, 10.5 * (1 - (shellR / shellRadius) ** 2)));
+        }
+        // Flat normals are what turn eight lathe segments into eight visible
+        // folds. Smooth-shaded it just reads as a dome, which is the one shape
+        // this roof is famously not.
+        const shellGeometry = new THREE.LatheGeometry(profile, 8).toNonIndexed();
+        shellGeometry.computeVertexNormals();
+        const shell = new THREE.Mesh(shellGeometry, whiteStone);
+        shell.position.set(chamber.x, chamber.height + 8.4, chamber.z);
+        shell.castShadow = true;
+        group.add(shell);
+        for (let fin = 0; fin < 8; fin++) {
+          const angle = (fin / 8) * Math.PI * 2 + Math.PI / 8;
+          const blade = new THREE.Mesh(unitBox, whiteStone);
+          blade.scale.set(1.7, 9, 3.6);
+          blade.position.set(
+            chamber.x + Math.cos(angle) * radius * 0.95,
+            chamber.height + 4.4,
+            chamber.z + Math.sin(angle) * radius * 0.95,
+          );
+          blade.rotation.y = -angle;
+          blade.castShadow = true;
+          group.add(blade);
+        }
+        // Light monitor at the apex.
+        addCylinder(group, radius * 0.19, radius * 0.27, 4.6, [chamber.x, chamber.height + 20.4, chamber.z], whiteStone, 8);
       }
     } else if (landmark.kind === "lalbagh-fort") {
       const grounds = anchor(624024881);
@@ -3300,6 +3748,7 @@ function addCity(scene: THREE.Scene) {
     marker.add(shimmer);
     scene.add(marker);
     perchMarkers.push(marker);
+    perch.marker = marker;
   }
   scene.userData.perches = perches;
   scene.userData.perchMarkers = perchMarkers;
@@ -3445,7 +3894,7 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
   await mergeIntoMeshBatches(root, waterAreas, waterMaterial, "OSM water areas", isCancelled, false, 160, false);
   await mergeIntoMeshBatches(root, waterLines, waterMaterial, "OSM waterways", isCancelled, false, 160, false);
 
-  await addRoadNetworkMeshes(root, data.roads, "OSM", isCancelled);
+  await addRoadNetworkMeshes(root, data.roads, "OSM", isCancelled, scene);
   // Hide the immediate fallback network the moment real OSM roads exist — both are
   // built at identical elevations, so any overlap window z-fights badly.
   if (data.roads.length > 0) {
@@ -3550,8 +3999,10 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
     });
     await yieldIfNeeded(isCancelled);
   }
+  // These four merged batches are the real Dhaka the player flies over, so they
+  // carry the window lighting that makes the city legible after dark.
   const buildingMaterials = [0xcdbfa5, 0xb5bdb3, 0xc28f76, 0x9daa9d].map(
-    (color) => new THREE.MeshStandardMaterial({ color, roughness: 0.88, metalness: 0.01 }),
+    (color) => applyNightWindows(new THREE.MeshStandardMaterial({ color, roughness: 0.88, metalness: 0.01 }), 0.54),
   );
   // Nearby procedural towers and landmarks provide local shadows. Keeping the
   // four citywide merged meshes out of the shadow pass avoids redrawing the
@@ -3581,6 +4032,159 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
   return colliders;
 }
 
+// Both of these read browser-only state that must not differ between the server
+// render and hydration. useSyncExternalStore serves the server snapshot first and
+// then swaps in the real value, which avoids both a mismatch and a cascading
+// setState-inside-an-effect.
+const COARSE_POINTER_QUERY = "(pointer: coarse), (hover: none)";
+
+function subscribeToPointerKind(onChange: () => void) {
+  const query = window.matchMedia(COARSE_POINTER_QUERY);
+  query.addEventListener("change", onChange);
+  return () => query.removeEventListener("change", onChange);
+}
+
+function readTouchPreference() {
+  // `?touch=1` forces the on-screen controls on (useful on hybrid laptops and for
+  // testing); `?touch=0` forces them off.
+  const override = new URLSearchParams(window.location.search).get("touch");
+  if (override === "1") return true;
+  if (override === "0") return false;
+  return window.matchMedia(COARSE_POINTER_QUERY).matches;
+}
+
+function noopSubscribe() {
+  return () => {};
+}
+
+function readSkyPresetFromUrl() {
+  const requested = new URLSearchParams(window.location.search).get("sky");
+  return SKY_PRESETS.some((preset) => preset.id === requested) ? requested as string : "live";
+}
+
+const TOUCH_STICK_RADIUS = 52;
+const TOUCH_STICK_DEADZONE = 0.14;
+
+/**
+ * Analog steering pad for touchscreens. It reports a continuous [-1, 1] pair
+ * rather than synthesised key presses so the flight model gets proportional
+ * banking and climb, which a four-way keypad cannot express.
+ */
+function TouchStick({ onAxes }: { onAxes: (turn: number, climb: number) => void }) {
+  const padRef = useRef<HTMLDivElement>(null);
+  const knobRef = useRef<HTMLDivElement>(null);
+  const pointerIdRef = useRef<number | null>(null);
+
+  const applyOffset = useCallback((offsetX: number, offsetY: number) => {
+    const distance = Math.hypot(offsetX, offsetY);
+    const limit = distance > TOUCH_STICK_RADIUS ? TOUCH_STICK_RADIUS / distance : 1;
+    const clampedX = offsetX * limit;
+    const clampedY = offsetY * limit;
+    if (knobRef.current) knobRef.current.style.transform = `translate(${clampedX}px, ${clampedY}px)`;
+    const normalizedX = clampedX / TOUCH_STICK_RADIUS;
+    const normalizedY = clampedY / TOUCH_STICK_RADIUS;
+    // Rescale past the deadzone so the very first responsive input is gentle
+    // instead of jumping straight to 14% deflection.
+    const shape = (value: number) => {
+      const magnitude = Math.abs(value);
+      if (magnitude < TOUCH_STICK_DEADZONE) return 0;
+      return Math.sign(value) * ((magnitude - TOUCH_STICK_DEADZONE) / (1 - TOUCH_STICK_DEADZONE));
+    };
+    // Left on screen is a left bank, and screen-up is a climb, so Y inverts.
+    onAxes(-shape(normalizedX), -shape(normalizedY));
+  }, [onAxes]);
+
+  const release = useCallback(() => {
+    pointerIdRef.current = null;
+    if (knobRef.current) knobRef.current.style.transform = "";
+    if (padRef.current) padRef.current.dataset.active = "false";
+    onAxes(0, 0);
+  }, [onAxes]);
+
+  const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (pointerIdRef.current !== null) return;
+    pointerIdRef.current = event.pointerId;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.currentTarget.dataset.active = "true";
+    const bounds = event.currentTarget.getBoundingClientRect();
+    applyOffset(event.clientX - (bounds.left + bounds.width / 2), event.clientY - (bounds.top + bounds.height / 2));
+  };
+
+  const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (pointerIdRef.current !== event.pointerId) return;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    applyOffset(event.clientX - (bounds.left + bounds.width / 2), event.clientY - (bounds.top + bounds.height / 2));
+  };
+
+  const onPointerEnd = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (pointerIdRef.current !== event.pointerId) return;
+    release();
+  };
+
+  // A stick left deflected while the component unmounts would steer forever.
+  useEffect(() => () => onAxes(0, 0), [onAxes]);
+
+  return (
+    <div
+      ref={padRef}
+      className="touch-stick"
+      data-active="false"
+      role="application"
+      aria-label="Flight steering pad: drag to bank and to climb or dive"
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerEnd}
+      onPointerCancel={onPointerEnd}
+    >
+      <i className="touch-stick-axis" aria-hidden="true" />
+      <div ref={knobRef} className="touch-stick-knob" aria-hidden="true" />
+    </div>
+  );
+}
+
+/** Press-and-hold button that maps a touch to a sustained flight key. */
+function TouchHoldButton({
+  label,
+  hint,
+  onHold,
+  className = "",
+}: {
+  label: string;
+  hint: string;
+  onHold: (held: boolean) => void;
+  className?: string;
+}) {
+  const activePointer = useRef<number | null>(null);
+  const end = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (activePointer.current !== event.pointerId) return;
+    activePointer.current = null;
+    event.currentTarget.dataset.held = "false";
+    onHold(false);
+  };
+  return (
+    <button
+      type="button"
+      className={`touch-button ${className}`.trim()}
+      data-held="false"
+      aria-label={hint}
+      onPointerDown={(event) => {
+        activePointer.current = event.pointerId;
+        event.currentTarget.setPointerCapture(event.pointerId);
+        event.currentTarget.dataset.held = "true";
+        onHold(true);
+      }}
+      onPointerUp={end}
+      onPointerCancel={end}
+      // Releasing outside the button must still release the key.
+      onLostPointerCapture={() => {
+        if (activePointer.current === null) return;
+        activePointer.current = null;
+        onHold(false);
+      }}
+    >{label}</button>
+  );
+}
+
 export function BirdFlight() {
   const mountRef = useRef<HTMLDivElement>(null);
   const speedRef = useRef<HTMLSpanElement>(null);
@@ -3592,6 +4196,7 @@ export function BirdFlight() {
   const mapBirdRef = useRef<HTMLDivElement>(null);
   const perchPromptRef = useRef<HTMLDivElement>(null);
   const perchLabelRef = useRef<HTMLSpanElement>(null);
+  const perchRangeRef = useRef<HTMLElement>(null);
   const flyingRef = useRef(false);
   const pausedRef = useRef(false);
   const restingRef = useRef(false);
@@ -3599,19 +4204,41 @@ export function BirdFlight() {
   const audioRef = useRef<FlightAudio | null>(null);
   const radioRef = useRef<FlightRadio | null>(null);
   const focusLandmarkRef = useRef<(kind: DhakaLandmark["kind"] | null) => boolean>(() => false);
+  const flightActionsRef = useRef<FlightActions | null>(null);
+  const setSkyHourRef = useRef<(hour: number | null) => void>(() => {});
+  const resumeButtonRef = useRef<HTMLButtonElement>(null);
+  // Escape has to know what is currently on screen, but the world effect never
+  // re-runs. A ref kept fresh by a tiny effect bridges that gap.
+  const dismissOverlayRef = useRef<() => boolean>(() => false);
   const [flying, setFlying] = useState(false);
   const [paused, setPaused] = useState(false);
   const [resting, setResting] = useState(false);
   const [cameraMode, setCameraMode] = useState<CameraMode>("CHASE");
+  const [inspecting, setInspecting] = useState(false);
   const [controlsOpen, setControlsOpen] = useState(false);
   const [soundOn, setSoundOn] = useState(false);
   const [radioOpen, setRadioOpen] = useState(false);
   const [radioStatus, setRadioStatus] = useState<RadioStatus>("off");
   const [radioStationIndex, setRadioStationIndex] = useState(0);
   const [radioVolume, setRadioVolume] = useState(0.58);
+  // A coarse pointer with no hover means there is no mouse, which is exactly when
+  // the keyboard-only HUD is useless and the thumb controls have to appear.
+  const touchDevice = useSyncExternalStore(subscribeToPointerKind, readTouchPreference, () => false);
   const [mapStatus, setMapStatus] = useState<MapStatus>("loading");
+  const [launchSiteId, setLaunchSiteId] = useState<string | null>(null);
   const [weatherStatus, setWeatherStatus] = useState<WeatherStatus>("loading");
   const [weather, setWeather] = useState<WeatherSnapshot>(DEFAULT_WEATHER);
+  // A shared link can pin the sky; once the player picks an hour their choice wins.
+  const urlSkyPresetId = useSyncExternalStore(noopSubscribe, readSkyPresetFromUrl, () => "live");
+  const [chosenSkyPresetId, setChosenSkyPresetId] = useState<string | null>(null);
+  const skyPresetId = chosenSkyPresetId ?? urlSkyPresetId;
+  const [skyOpen, setSkyOpen] = useState(false);
+  const [shareState, setShareState] = useState<"idle" | "copied" | "failed">("idle");
+  const [sharedLink, setSharedLink] = useState("");
+  // With an hour pinned, the sun/moon glyph has to follow the rendered sky rather
+  // than the live observation, or the HUD contradicts the window.
+  const skyPresetHour = SKY_PRESETS.find((preset) => preset.id === skyPresetId)?.hour ?? null;
+  const skyIsDay = skyPresetHour === null ? weather.isDay : skyPresetHour > 5.4 && skyPresetHour < 18.7;
   const selectedRadioStation = RADIO_STATIONS[radioStationIndex];
 
   const tuneRadio = useCallback((stationIndex: number) => {
@@ -3646,6 +4273,30 @@ export function BirdFlight() {
     audioRef.current?.setRadioDucking(radioStatus === "playing" || radioStatus === "buffering");
   }, [radioStatus]);
 
+  // The pause overlay is a modal dialog, so keyboard focus has to move into it.
+  useEffect(() => {
+    if (paused) resumeButtonRef.current?.focus();
+  }, [paused]);
+
+  // Topmost-first dismissal order, so Escape always removes exactly one layer.
+  useEffect(() => {
+    dismissOverlayRef.current = () => {
+      if (radioOpen) {
+        setRadioOpen(false);
+        return true;
+      }
+      if (skyOpen) {
+        setSkyOpen(false);
+        return true;
+      }
+      if (controlsOpen) {
+        setControlsOpen(false);
+        return true;
+      }
+      return false;
+    };
+  }, [controlsOpen, radioOpen, skyOpen]);
+
   useEffect(() => {
     if (!flying) return;
     if (paused) radioRef.current?.pause();
@@ -3654,8 +4305,9 @@ export function BirdFlight() {
 
   useEffect(() => {
     const onRadioKey = (event: KeyboardEvent) => {
-      const target = event.target as HTMLElement | null;
-      if (target?.matches("input, textarea, select, [contenteditable='true']")) return;
+      // `event.target` is only an Element when a DOM node has focus; it is the
+      // window itself for synthetic events, so feature-test before matching.
+      if (focusedControlClaimsKey(focusedControlClaim(event.target), event.code)) return;
       if (event.code === "KeyR" && !event.repeat) {
         event.preventDefault();
         toggleRadio();
@@ -3678,21 +4330,41 @@ export function BirdFlight() {
     if (!mount) return;
     const flightAudio = createFlightAudio();
     audioRef.current = flightAudio;
-    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const reducedMotionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+    // Read live: a player can flip the OS setting without reloading the flight.
+    let reducedMotion = reducedMotionQuery.matches;
+    const onReducedMotionChange = (event: MediaQueryListEvent) => {
+      reducedMotion = event.matches;
+    };
+    reducedMotionQuery.addEventListener("change", onReducedMotionChange);
+    const lowPowerDevice = window.matchMedia("(pointer: coarse)").matches
+      && Math.min(window.innerWidth, window.innerHeight) < 820;
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x91c7c0);
     scene.fog = new THREE.FogExp2(0x91b8a8, 0.00028);
     const camera = new THREE.PerspectiveCamera(58, mount.clientWidth / mount.clientHeight, 0.5, 8000);
-    const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+    // Phones pay for MSAA and a 2048² shadow map in both fill rate and memory, and
+    // they are exactly the devices that cannot afford either. Detect them once.
+    const renderer = new THREE.WebGLRenderer({ antialias: !lowPowerDevice, powerPreference: "high-performance" });
     renderer.setSize(mount.clientWidth, mount.clientHeight);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, lowPowerDevice ? 1.25 : 1.5));
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFShadowMap;
+    // The city never moves and the sun steps only every 30s, so re-rendering ~2M
+    // triangles into the shadow map at 60Hz buys almost nothing. It is not fully
+    // static though — the crow casts a shadow and district tiles stream in and
+    // out of visibility — so refresh on demand plus a low steady cadence rather
+    // than freezing it outright.
+    renderer.shadowMap.autoUpdate = false;
+    renderer.shadowMap.needsUpdate = true;
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1;
     mount.appendChild(renderer.domElement);
+    const requestShadowUpdate = () => {
+      renderer.shadowMap.needsUpdate = true;
+    };
 
     const sky = new Sky();
     // Keep the complete sky cube inside the camera's far plane. It follows the
@@ -3715,7 +4387,7 @@ export function BirdFlight() {
     const sun = new THREE.DirectionalLight(0xffd6a0, 3.35);
     sun.position.set(-400, 650, 280);
     sun.castShadow = true;
-    sun.shadow.mapSize.set(2048, 2048);
+    sun.shadow.mapSize.set(lowPowerDevice ? 1024 : 2048, lowPowerDevice ? 1024 : 2048);
     sun.shadow.camera.left = -3400;
     sun.shadow.camera.right = 3400;
     sun.shadow.camera.top = 3800;
@@ -3737,7 +4409,7 @@ export function BirdFlight() {
     immediateRoadFallback.name = "Immediate Greater Dhaka road network";
     scene.add(immediateRoadFallback);
     scene.userData.proceduralRoadFallback = immediateRoadFallback;
-    void addRoadNetworkMeshes(immediateRoadFallback, fallbackRoads, "Immediate fallback", () => disposed);
+    void addRoadNetworkMeshes(immediateRoadFallback, fallbackRoads, "Immediate fallback", () => disposed, scene);
     const mapRequestStartedAt = performance.now();
     // Live Overpass data first, but never hang on it: the deployed worker can stall
     // upstream indefinitely, so time the request out and fall back to the bundled
@@ -3781,6 +4453,9 @@ export function BirdFlight() {
         if (disposed) return;
         renderer.domElement.dataset.mapRequestMs = (performance.now() - mapRequestStartedAt).toFixed(1);
         renderer.domElement.dataset.mapBuildMs = (performance.now() - mapBuildStartedAt).toFixed(1);
+        // New geometry needs one shadow pass now that the map is no longer redrawn
+        // into the shadow camera on every frame.
+        requestShadowUpdate();
         setMapStatus("live");
       })
       .catch(async (error: unknown) => {
@@ -3805,6 +4480,7 @@ export function BirdFlight() {
           for (const collider of proceduralColliders) buildingColliders.push(collider);
           buildingColliderGrid = await buildColliderGridAsync(buildingColliders, () => disposed);
         }
+        requestShadowUpdate();
         setMapStatus("fallback");
       })
       .catch(() => {
@@ -3823,6 +4499,11 @@ export function BirdFlight() {
     const airflowVfx = createAirflowVfx(crow);
     const weatherVfx = createWeatherVfx(scene, renderer, sky, hemisphere, sun, skyFill, reducedMotion);
     weatherVfx.apply(DEFAULT_WEATHER);
+    setSkyHourRef.current = (hour) => weatherVfx.setSkyHour(hour);
+    // A shared link can pin the sky, so "look at Dhaka at golden hour" survives
+    // being sent to someone in another timezone.
+    const initialPreset = SKY_PRESETS.find((preset) => preset.id === readSkyPresetFromUrl());
+    if (initialPreset) weatherVfx.setSkyHour(initialPreset.hour);
     const weatherController = new AbortController();
     const loadWeather = () => {
       void fetch("/api/weather", { signal: weatherController.signal })
@@ -3894,6 +4575,13 @@ export function BirdFlight() {
         mapBuildMs: Number.parseFloat(renderer.domElement.dataset.mapBuildMs ?? "") || null,
         trafficVehicles: trafficSimulation?.vehicleCount ?? 0,
         trafficTickHz: trafficSimulation?.tickHz ?? 0,
+        landing: {
+          speed,
+          perch: (landingCommit ?? approachPerch ?? nearestPerch)?.label ?? null,
+          distance: Math.round(approachDistance),
+          committed: landingCommit !== null,
+          position: { x: crow.position.x, y: crow.position.y, z: crow.position.z },
+        },
       };
     };
 
@@ -3914,11 +4602,18 @@ export function BirdFlight() {
     let lastFrame = performance.now();
     let elapsedTime = 0;
     let diagnosticFrame = 0;
+    let shadowFrame = 0;
+    // Touch steering is continuous, unlike the keyboard's on/off axes, so it is
+    // kept separate and only used when the keys are idle.
+    let pointerTurn = 0;
+    let pointerClimb = 0;
     const desiredCamera = new THREE.Vector3();
     const desiredTarget = new THREE.Vector3();
     const forward = new THREE.Vector3();
     const horizontalForward = new THREE.Vector3();
     const previousPosition = new THREE.Vector3();
+    const cameraOffset = new THREE.Vector3();
+    const windDrift = new THREE.Vector3();
     const targetQuat = new THREE.Quaternion();
     const euler = new THREE.Euler(0, 0, 0, "YXZ");
     const cameraTarget = new THREE.Vector3();
@@ -3939,83 +4634,197 @@ export function BirdFlight() {
     };
     focusLandmarkRef.current = focusLandmark;
     let nearestPerch: Perch | null = null;
+    // The perch the bird is currently lined up on. Distinct from nearestPerch:
+    // this one is picked from a wide forward cone and drives the automatic
+    // flare, while nearestPerch is strictly "close enough to sit down on".
+    let approachPerch: Perch | null = null;
+    let approachDistance = 0;
+    // Set once the player commits to a landing; the bird then flies itself in.
+    let landingCommit: Perch | null = null;
+    const perchDelta = new THREE.Vector3();
+    const perchFlat = new THREE.Vector3();
+
+    // Every discrete flight action lives here so the keyboard handler and the
+    // on-screen touch controls drive exactly the same code path.
+    const flapWings = () => {
+      if (!flyingRef.current || pausedRef.current || restingRef.current) return;
+      flapKick = 1;
+      cameraKick = 1;
+      const flapLiftScale = THREE.MathUtils.smoothstep(
+        MAX_FLIGHT_ALTITUDE - crow.position.y,
+        0,
+        CEILING_EASE_DEPTH,
+      );
+      verticalSpeed = Math.min(22, verticalSpeed + 8.5 * flapLiftScale);
+      speed = Math.max(BRAKE_SPEED, speed - 1.6);
+      flightAudio.flap();
+    };
+    const settleOnPerch = (perch: Perch) => {
+      restingRef.current = true;
+      setResting(true);
+      landingCommit = null;
+      crow.position.copy(perch.position);
+      crow.position.y += 1.28;
+      // Treetops have no meaningful facing; settle in the direction flown.
+      yaw = perch.kind === "tree" ? yaw : perch.heading;
+      yawRate = 0;
+      pitch = 0;
+      roll = 0;
+      speed = 0;
+      verticalSpeed = 0;
+    };
+    const togglePerch = () => {
+      if (!flyingRef.current || pausedRef.current) return;
+      if (restingRef.current) {
+        restingRef.current = false;
+        setResting(false);
+        landingCommit = null;
+        crow.position.y += 5;
+        speed = 34;
+        verticalSpeed = 9;
+        pitch = 0.2;
+        flapKick = 1;
+        cameraKick = 1;
+        flightAudio.flap();
+      } else if (landingCommit) {
+        // Second press waves off the approach and hands control straight back.
+        landingCommit = null;
+      } else if (nearestPerch) {
+        settleOnPerch(nearestPerch);
+      } else if (approachPerch) {
+        // Too far to sit down but lined up on the perch: commit, and the bird
+        // flies the rest of the approach itself. This is the difference between
+        // threading a 34 m sphere at speed and simply choosing to land.
+        landingCommit = approachPerch;
+      }
+    };
+    const toggleCameraMode = () => {
+      focusLandmark(null);
+      setInspecting(false);
+      const next: CameraMode = cameraModeRef.current === "CHASE" ? "BIRD'S EYE" : "CHASE";
+      cameraModeRef.current = next;
+      setCameraMode(next);
+    };
+    const cycleInspection = () => {
+      inspectionIndex = (inspectionIndex + 1) % DHAKA_LANDMARKS.length;
+      focusLandmark(DHAKA_LANDMARKS[inspectionIndex].kind);
+      setInspecting(true);
+    };
+    // Landmark inspection parks the camera away from the bird, so it needs an
+    // explicit way out or the player is stranded watching a building.
+    const releaseInspection = () => {
+      if (!inspectionTarget) return false;
+      focusLandmark(null);
+      inspectionIndex = -1;
+      setInspecting(false);
+      return true;
+    };
+    const setFlightPaused = (nextPaused: boolean) => {
+      if (!flyingRef.current || pausedRef.current === nextPaused) return;
+      pausedRef.current = nextPaused;
+      setPaused(nextPaused);
+      if (nextPaused) flightAudio.pause();
+      else flightAudio.resume();
+    };
+    flightActionsRef.current = {
+      flap: flapWings,
+      togglePerch,
+      toggleCamera: toggleCameraMode,
+      cycleInspection,
+      releaseInspection,
+      setHold: (code, held) => {
+        if (held) keys.add(code);
+        else keys.delete(code);
+      },
+      setAxes: (turn, climb) => {
+        pointerTurn = turn;
+        pointerClimb = climb;
+      },
+      spawnAt: (lat, lon, alt) => {
+        const world = coordinatesToWorld(lat, lon);
+        crow.position.set(world.x, alt, world.y);
+        // Face the middle of the city so the attract orbit opens on the skyline
+        // rather than on the empty edge of the map.
+        yaw = Math.atan2(world.x, world.y);
+        yawRate = 0;
+        speed = CRUISE_SPEED;
+        verticalSpeed = 0;
+        landingCommit = null;
+        camera.position.copy(crow.position).add(new THREE.Vector3(10, 26, 26));
+        cameraTarget.copy(crow.position);
+      },
+      readView: () => ({
+        ...worldToCoordinates(crow.position.x, crow.position.z),
+        alt: crow.position.y,
+        yaw,
+      }),
+    };
 
     const onKeyDown = (event: KeyboardEvent) => {
+      // Hand a focused control the keys it owns — typing, slider arrows, Space to
+      // activate a button — but keep everything else, including Escape, for flight.
+      if (focusedControlClaimsKey(focusedControlClaim(event.target), event.code)) return;
       if (flightControlCodes.has(event.code) && flyingRef.current && !pausedRef.current) {
         keys.add(event.code);
       }
-      if (["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.code)) event.preventDefault();
-      if (event.code === "KeyC" && !event.repeat) {
-        focusLandmark(null);
-        const next: CameraMode = cameraModeRef.current === "CHASE" ? "BIRD'S EYE" : "CHASE";
-        cameraModeRef.current = next;
-        setCameraMode(next);
+      // Only cancel scroll/activation defaults for keys this flight actually uses.
+      if (flyingRef.current && ["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.code)) {
+        event.preventDefault();
       }
-      if (event.code === "KeyL" && !event.repeat) {
-        inspectionIndex = (inspectionIndex + 1) % DHAKA_LANDMARKS.length;
-        focusLandmark(DHAKA_LANDMARKS[inspectionIndex].kind);
+      if (event.code === "KeyC" && !event.repeat && flyingRef.current) toggleCameraMode();
+      if (event.code === "KeyL" && !event.repeat && flyingRef.current) cycleInspection();
+      if (event.code === "Escape" && !event.repeat) {
+        // Escape means "dismiss the thing in front of me". Panels first, then the
+        // inspection camera, and only then does it double as the pause key.
+        if (dismissOverlayRef.current()) {
+          event.preventDefault();
+          return;
+        }
+        if (releaseInspection()) {
+          event.preventDefault();
+          return;
+        }
       }
       if ((event.code === "KeyP" || event.code === "Escape") && !event.repeat && flyingRef.current) {
         event.preventDefault();
-        const nextPaused = !pausedRef.current;
-        pausedRef.current = nextPaused;
-        setPaused(nextPaused);
-        if (nextPaused) flightAudio.pause();
-        else flightAudio.resume();
+        setFlightPaused(!pausedRef.current);
       }
-      if (event.code === "Space" && !event.repeat && flyingRef.current && !pausedRef.current) {
-        flapKick = 1;
-        cameraKick = 1;
-        const flapLiftScale = THREE.MathUtils.smoothstep(
-          MAX_FLIGHT_ALTITUDE - crow.position.y,
-          0,
-          CEILING_EASE_DEPTH,
-        );
-        verticalSpeed = Math.min(22, verticalSpeed + 8.5 * flapLiftScale);
-        speed = Math.max(BRAKE_SPEED, speed - 1.6);
-        flightAudio.flap();
-      }
-      if (event.code === "KeyE" && !event.repeat && flyingRef.current && !pausedRef.current) {
-        if (restingRef.current) {
-          restingRef.current = false;
-          setResting(false);
-          crow.position.y += 5;
-          speed = 34;
-          verticalSpeed = 9;
-          pitch = 0.2;
-          flapKick = 1;
-          cameraKick = 1;
-          flightAudio.flap();
-        } else if (nearestPerch) {
-          restingRef.current = true;
-          setResting(true);
-          crow.position.copy(nearestPerch.position).add(new THREE.Vector3(0, 1.28, 0));
-          // Treetops have no meaningful facing; settle in the direction flown.
-          yaw = nearestPerch.kind === "tree" ? yaw : nearestPerch.heading;
-          yawRate = 0;
-          pitch = 0;
-          roll = 0;
-          speed = 0;
-          verticalSpeed = 0;
-        }
-      }
+      if (event.code === "Space" && !event.repeat) flapWings();
+      if (event.code === "KeyE" && !event.repeat) togglePerch();
     };
     const onKeyUp = (event: KeyboardEvent) => keys.delete(event.code);
     const clearFlightControls = () => keys.clear();
+    // A hidden tab still runs timers, so ambience and bird calls would keep
+    // playing from a tab the player has walked away from. Silence it, and only
+    // resume if the flight was not deliberately paused.
     const onVisibilityChange = () => {
-      if (document.visibilityState !== "visible") clearFlightControls();
+      if (document.visibilityState !== "visible") {
+        clearFlightControls();
+        flightAudio.pause();
+      } else if (!pausedRef.current) {
+        flightAudio.resume();
+      }
     };
     window.addEventListener("keydown", onKeyDown, { passive: false });
     window.addEventListener("keyup", onKeyUp);
     window.addEventListener("blur", clearFlightControls);
     document.addEventListener("visibilitychange", onVisibilityChange);
 
-    const onResize = () => {
-      camera.aspect = mount.clientWidth / mount.clientHeight;
+    // A ResizeObserver tracks the canvas box itself, so it also catches phone
+    // orientation flips and the browser chrome sliding in and out — and it
+    // coalesces to one callback per frame instead of firing on every resize event.
+    const applyViewportSize = () => {
+      const width = mount.clientWidth;
+      const height = mount.clientHeight;
+      if (width === 0 || height === 0) return;
+      camera.aspect = width / height;
       camera.updateProjectionMatrix();
-      renderer.setSize(mount.clientWidth, mount.clientHeight);
+      renderer.setSize(width, height);
+      requestShadowUpdate();
     };
-    window.addEventListener("resize", onResize);
+    const resizeObserver = new ResizeObserver(applyViewportSize);
+    resizeObserver.observe(mount);
+    window.addEventListener("orientationchange", applyViewportSize);
 
     camera.position.copy(crow.position).add(new THREE.Vector3(10, 13, 26));
     cameraTarget.copy(crow.position);
@@ -4033,10 +4842,31 @@ export function BirdFlight() {
       elapsedTime += dt;
       const active = flyingRef.current && !pausedRef.current && !restingRef.current;
       if (!active) clearFlightControls();
-      const turn = active ? (keys.has("KeyA") || keys.has("ArrowLeft") ? 1 : 0) - (keys.has("KeyD") || keys.has("ArrowRight") ? 1 : 0) : 0;
-      const climb = active ? (keys.has("KeyW") || keys.has("ArrowUp") ? 1 : 0) - (keys.has("KeyS") || keys.has("ArrowDown") ? 1 : 0) : 0;
+      const keyTurn = (keys.has("KeyA") || keys.has("ArrowLeft") ? 1 : 0) - (keys.has("KeyD") || keys.has("ArrowRight") ? 1 : 0);
+      const keyClimb = (keys.has("KeyW") || keys.has("ArrowUp") ? 1 : 0) - (keys.has("KeyS") || keys.has("ArrowDown") ? 1 : 0);
+      // Keys win when held; otherwise the touch stick supplies a continuous axis.
+      let turn = active ? (keyTurn || pointerTurn) : 0;
+      let climb = active ? (keyClimb || pointerClimb) : 0;
       const boost = active && (keys.has("ShiftLeft") || keys.has("ShiftRight"));
       const braking = active && (keys.has("ControlLeft") || keys.has("ControlRight") || keys.has("KeyQ"));
+
+      // A committed landing flies itself: the bird banks onto the perch and trims
+      // its sink so it arrives level with the rooftop instead of through it.
+      let guidedSink: number | null = null;
+      if (landingCommit && active) {
+        perchDelta.copy(landingCommit.position).sub(crow.position);
+        const flatDistance = Math.hypot(perchDelta.x, perchDelta.z);
+        // horizontalForward is (-sin yaw, 0, -cos yaw), so the heading that points
+        // at the perch inverts both components before the atan2.
+        const desiredYaw = Math.atan2(-perchDelta.x, -perchDelta.z);
+        const yawError = Math.atan2(Math.sin(desiredYaw - yaw), Math.cos(desiredYaw - yaw));
+        turn = clamp(yawError * 1.9, -1, 1);
+        climb = 0;
+        // Spread the remaining height gap over however long the ground distance
+        // will take at the current speed, so the descent is always on profile.
+        const timeToPerch = Math.max(0.5, flatDistance / Math.max(speed, 6));
+        guidedSink = clamp((perchDelta.y + 1.28) / timeToPerch, -18, 12);
+      }
 
       const targetYawRate = turn * (0.58 + speed / 180);
       yawRate = THREE.MathUtils.lerp(yawRate, targetYawRate, 1 - Math.pow(0.82, dt * 60));
@@ -4052,23 +4882,30 @@ export function BirdFlight() {
       );
       const altitudeHeadroom = MAX_FLIGHT_ALTITUDE - crow.position.y;
       const effectiveClimb = climb > 0 ? climb * ceilingClimbScale : climb;
+      // Keyboard climb is always ±1, so scaling by magnitude leaves key flight
+      // untouched while giving the touch stick a genuinely proportional climb.
+      const climbAmount = Math.abs(climb);
       const targetVerticalSpeed = !active
         ? (restingRef.current ? 0 : verticalSpeed)
-        : climb > 0
-          ? altitudeHeadroom <= 1
-            ? 0
-            : Math.max(
-                MIN_CEILING_CLIMB_SPEED,
-                (16 + speedAmountBeforeThrottle * 7) * ceilingClimbScale,
-              )
-          : climb < 0
-            ? -19
-            : -0.65;
-      const verticalResponse = climb === 0
-        ? 0.72
-        : climb > 0 && ceilingClimbScale < 1
-          ? THREE.MathUtils.lerp(4.6, 2.25, ceilingClimbScale)
-          : 2.25;
+        : guidedSink !== null
+          ? guidedSink
+          : climb > 0
+            ? altitudeHeadroom <= 1
+              ? 0
+              : Math.max(
+                  MIN_CEILING_CLIMB_SPEED,
+                  (16 + speedAmountBeforeThrottle * 7) * ceilingClimbScale * climbAmount,
+                )
+            : climb < 0
+              ? -19 * climbAmount
+              : -0.65;
+      const verticalResponse = guidedSink !== null
+        ? 3.1
+        : climb === 0
+          ? 0.72
+          : climb > 0 && ceilingClimbScale < 1
+            ? THREE.MathUtils.lerp(4.6, 2.25, ceilingClimbScale)
+            : 2.25;
       verticalSpeed = THREE.MathUtils.lerp(verticalSpeed, targetVerticalSpeed, 1 - Math.exp(-verticalResponse * dt));
 
       const trajectoryPitch = Math.atan2(verticalSpeed, Math.max(speed, 1));
@@ -4078,12 +4915,32 @@ export function BirdFlight() {
       roll = THREE.MathUtils.lerp(roll, targetRoll, 1 - Math.pow(0.8, dt * 60));
       const diveEnergy = clamp(-verticalSpeed * 0.68, 0, 13);
       const climbCost = clamp(verticalSpeed * 0.22, 0, 5.5);
+      const cruiseTarget = (boost ? BOOST_SPEED : CRUISE_SPEED) + diveEnergy - climbCost;
+      // How deep into the approach envelope the bird is: 0 at the outer radius,
+      // 1 once inside the flare. Holding BOOST opts out completely, so anyone who
+      // wants to blow past a landmark at full speed still can.
+      const approachBlend = active && approachPerch && !boost
+        ? 1 - THREE.MathUtils.smoothstep(approachDistance, LANDING_FLARE_RADIUS, LANDING_APPROACH_RADIUS)
+        : 0;
+      // Inside the flare the bird keeps shedding speed all the way down to the
+      // perch. This is the whole reason landing used to be so hard: nothing here
+      // had any idea a perch was ahead, so cruise speed carried straight through
+      // the capture sphere in about a second.
+      const closeness = 1 - THREE.MathUtils.smoothstep(approachDistance, LANDMARK_LANDING_RADIUS, LANDING_FLARE_RADIUS);
+      const flareTarget = THREE.MathUtils.lerp(
+        landingCommit ? LANDING_COMMIT_SPEED : LANDING_APPROACH_SPEED,
+        LANDING_FLARE_SPEED,
+        closeness,
+      );
+      const assistedTarget = THREE.MathUtils.lerp(cruiseTarget, flareTarget, approachBlend);
       const targetSpeed = !active
         ? (restingRef.current ? 0 : speed)
+        // Braking now bites below the old 18 m/s floor during an approach, so
+        // manually flying a landing is rewarded rather than capped.
         : braking
-          ? BRAKE_SPEED
-          : (boost ? BOOST_SPEED : CRUISE_SPEED) + diveEnergy - climbCost;
-      const throttleResponse = braking ? 4.6 : boost ? 2.2 : 1.55;
+          ? Math.min(BRAKE_SPEED, assistedTarget)
+          : assistedTarget;
+      const throttleResponse = braking ? 4.6 : boost ? 2.2 : THREE.MathUtils.lerp(1.55, 3.6, approachBlend);
       speed = THREE.MathUtils.lerp(speed, targetSpeed, 1 - Math.exp(-throttleResponse * dt));
 
       horizontalForward.set(-Math.sin(yaw), 0, -Math.cos(yaw));
@@ -4092,29 +4949,58 @@ export function BirdFlight() {
       if (active) {
         crow.position.addScaledVector(horizontalForward, speed * dt);
         crow.position.y += verticalSpeed * dt;
+        // The live wind already blows the rain and the clouds; letting it push the
+        // bird too is what turns the weather readout into something you can feel.
+        // Gusting is sampled from two detuned sines so it never repeats obviously.
+        weatherVfx.readWind(windDrift);
+        const gust = 1 + Math.sin(elapsedTime * 0.37) * 0.28 + Math.sin(elapsedTime * 1.13 + 2.1) * 0.14;
+        // Higher air is windier, and a crow low between buildings is sheltered.
+        const exposure = 0.35 + THREE.MathUtils.smoothstep(crow.position.y, 40, 420) * 0.65;
+        crow.position.addScaledVector(windDrift, WIND_DRIFT_SCALE * gust * exposure * dt);
       }
-      let collided = false;
-      if (!restingRef.current) {
-        for (const building of collisionCandidates(buildingColliderGrid, crow.position.x, crow.position.z)) {
+      // Deliberately no title-screen drift or yaw wander. The camera orbit below
+      // supplies all the motion, and moving the bird here would quietly walk a
+      // shared ?lat/?lon/?yaw link off its spot while the map finished loading.
+      const buildingAt = (x: number, y: number, z: number) => {
+        for (const building of collisionCandidates(buildingColliderGrid, x, z)) {
           if (
-            Math.abs(crow.position.x - building.x) < building.halfWidth &&
-            Math.abs(crow.position.z - building.z) < building.halfDepth &&
-            crow.position.y < building.top + 5.5
+            Math.abs(x - building.x) < building.halfWidth &&
+            Math.abs(z - building.z) < building.halfDepth &&
+            y < building.top + 5.5
           ) {
-            collided = true;
-            break;
+            return building;
           }
         }
-      }
-      if (collided) {
+        return null;
+      };
+      const struckBuilding = restingRef.current
+        ? null
+        : buildingAt(crow.position.x, crow.position.y, crow.position.z);
+      // A committed landing has to be able to cross the parapet of the very roof
+      // it is aiming at — otherwise the bird bounces off the building it is
+      // trying to sit on. Waive only the collider that actually holds the target
+      // perch; every other building in the city still stops it dead.
+      const landingThrough = struckBuilding !== null && landingCommit !== null
+        && Math.abs(landingCommit.position.x - struckBuilding.x) < struckBuilding.halfWidth + 2
+        && Math.abs(landingCommit.position.z - struckBuilding.z) < struckBuilding.halfDepth + 2;
+      if (struckBuilding && !landingThrough) {
         // Preserve any upward movement while rejecting the horizontal impact.
         // This lets takeoff clear a perch collider instead of restoring the
         // same below-roof position every frame and soft-locking the crow.
-        resolveBuildingCollision(crow.position, previousPosition);
+        // Passing the collider lets a glancing hit slide along the facade.
+        resolveBuildingCollision(crow.position, previousPosition, struckBuilding);
+        // Sliding preserves one axis, which at a concave corner can carry the
+        // crow straight into the neighbouring footprint. Only keep the slide if
+        // it actually landed in clear air; otherwise stop dead at the facade.
+        if (buildingAt(crow.position.x, crow.position.y, crow.position.z)) {
+          resolveBuildingCollision(crow.position, previousPosition);
+        }
         pitch = Math.max(pitch, 0.15);
         verticalSpeed = Math.max(5, verticalSpeed);
         cameraKick = 0.7;
-        speed = Math.max(28, speed * 0.82);
+        // Clipping a facade used to *accelerate* the bird to 28 m/s, which fought
+        // every landing flown at brake speed. Near a perch, keep the slow.
+        speed = Math.max(approachPerch ? LANDING_FLARE_SPEED : 28, speed * 0.82);
       }
       crow.position.y = Math.max(crow.position.y, MIN_FLIGHT_ALTITUDE);
       if (crow.position.y >= MAX_FLIGHT_ALTITUDE || (climb > 0 && crow.position.y >= MAX_FLIGHT_ALTITUDE - 1)) {
@@ -4129,6 +5015,12 @@ export function BirdFlight() {
         const homeYaw = Math.atan2(crow.position.x, crow.position.z);
         const angleDifference = Math.atan2(Math.sin(homeYaw - yaw), Math.cos(homeYaw - yaw));
         yaw += angleDifference * dt * 0.75;
+      }
+      // Contact. A guided approach ends by settling rather than by the player
+      // catching a window, so the landing lands.
+      if (landingCommit && active && crow.position.distanceTo(landingCommit.position) < LANDING_CAPTURE_DISTANCE) {
+        settleOnPerch(landingCommit);
+        flightAudio.flap();
       }
 
       euler.set(-pitch, yaw, roll);
@@ -4150,6 +5042,12 @@ export function BirdFlight() {
 
       nearestPerch = null;
       let nearestDistance = Number.POSITIVE_INFINITY;
+      // Approach targeting is deliberately limited to the named landmark perches.
+      // Treetops are everywhere, and letting them grab the throttle would mean
+      // the bird braking at random all the way across the city.
+      approachPerch = null;
+      approachDistance = 0;
+      let approachScore = Number.POSITIVE_INFINITY;
       if (!restingRef.current && !pausedRef.current) {
         for (const perch of scene.userData.perches as Perch[]) {
           const distance = crow.position.distanceTo(perch.position);
@@ -4157,7 +5055,27 @@ export function BirdFlight() {
             nearestPerch = perch;
             nearestDistance = distance;
           }
+          if (distance >= LANDING_APPROACH_RADIUS || distance >= approachScore) continue;
+          // Only count perches inside the forward cone, so flying past a rooftop
+          // never triggers a flare — you have to actually be heading at it.
+          perchFlat.copy(perch.position).sub(crow.position);
+          perchFlat.y = 0;
+          if (perchFlat.lengthSq() < 1e-4) {
+            approachPerch = perch;
+            approachScore = distance;
+            continue;
+          }
+          if (perchFlat.normalize().dot(horizontalForward) < LANDING_APPROACH_COS) continue;
+          approachPerch = perch;
+          approachScore = distance;
         }
+        // A committed landing owns the target until it lands or is waved off,
+        // even if the bird swings wide enough to leave the cone mid-approach.
+        if (landingCommit) {
+          approachPerch = landingCommit;
+          approachScore = crow.position.distanceTo(landingCommit.position);
+        }
+        approachDistance = approachPerch ? approachScore : 0;
         const treePerchGrid = scene.userData.treePerchGrid as Map<string, Perch[]> | undefined;
         if (treePerchGrid) {
           const cellX = Math.floor(crow.position.x / TREE_PERCH_CELL_SIZE);
@@ -4176,14 +5094,32 @@ export function BirdFlight() {
         }
       }
       if (perchPromptRef.current && perchLabelRef.current) {
+        const prompt = perchPromptRef.current;
+        const range = perchRangeRef.current;
         if (restingRef.current) {
-          perchPromptRef.current.dataset.visible = "true";
+          prompt.dataset.visible = "true";
+          prompt.dataset.state = "rest";
           perchLabelRef.current.textContent = "TAKE OFF";
+          if (range) range.textContent = "";
+        } else if (landingCommit) {
+          prompt.dataset.visible = "true";
+          prompt.dataset.state = "commit";
+          perchLabelRef.current.textContent = `LANDING · ${landingCommit.label.toUpperCase()}`;
+          if (range) range.textContent = `${Math.round(approachDistance)} M · E CANCELS`;
         } else if (nearestPerch) {
-          perchPromptRef.current.dataset.visible = "true";
+          prompt.dataset.visible = "true";
+          prompt.dataset.state = "ready";
           perchLabelRef.current.textContent = `LAND · ${nearestPerch.label.toUpperCase()}`;
+          if (range) range.textContent = "";
+        } else if (approachPerch) {
+          // Showing the closing range turns the approach into something the
+          // player can fly deliberately instead of a prompt that blinks past.
+          prompt.dataset.visible = "true";
+          prompt.dataset.state = "approach";
+          perchLabelRef.current.textContent = `LAND · ${approachPerch.label.toUpperCase()}`;
+          if (range) range.textContent = `${Math.round(approachDistance)} M`;
         } else {
-          perchPromptRef.current.dataset.visible = "false";
+          prompt.dataset.visible = "false";
         }
       }
 
@@ -4202,38 +5138,58 @@ export function BirdFlight() {
           ribbon.material.opacity = 0.105 + (wave + 1) * 0.055;
           ribbon.scale.y = 0.72 + (wave + 1) * 0.18;
         }
+        // Every ring in the city used to pulse identically, so nothing told you
+        // which one you were actually lined up on. The targeted perch now runs a
+        // faster, brighter, wider beat than the rest.
+        const targetMarker = (landingCommit ?? approachPerch ?? nearestPerch)?.marker ?? null;
         for (const marker of scene.userData.perchMarkers as THREE.Group[]) {
-          const pulse = Math.sin(markerTime * 1.8 + marker.userData.phase);
+          const focused = marker === targetMarker;
+          const pulse = Math.sin(markerTime * (focused ? 4.2 : 1.8) + marker.userData.phase);
           const settled = restingRef.current;
-          marker.position.y = marker.userData.baseY + (settled ? 0 : pulse * 0.28);
-          const markerScale = settled ? 0.86 : 1 + pulse * 0.08;
+          marker.position.y = marker.userData.baseY + (settled ? 0 : pulse * (focused ? 0.5 : 0.28));
+          const markerScale = settled ? 0.86 : (focused ? 1.5 : 1) + pulse * (focused ? 0.16 : 0.08);
           marker.scale.setScalar(markerScale);
-          marker.rotation.y += dt * 0.18;
+          marker.rotation.y += dt * (focused ? 0.9 : 0.18);
           for (const child of marker.children) {
             if (child instanceof THREE.Mesh && child.material instanceof THREE.MeshBasicMaterial) {
-              child.material.opacity = child.geometry.type === "CylinderGeometry"
+              const base = child.geometry.type === "CylinderGeometry"
                 ? (settled ? 0.06 : 0.13 + (pulse + 1) * 0.035)
                 : (settled ? 0.24 : 0.52 + (pulse + 1) * 0.08);
+              child.material.opacity = focused ? Math.min(1, base * 1.75) : base;
             }
           }
         }
       }
 
-      if (inspectionTarget) {
-        desiredCamera.copy(inspectionTarget).add(new THREE.Vector3(
-          inspectionCameraOffset,
-          Math.max(52, inspectionCameraOffset * 0.52),
-          inspectionCameraOffset,
-        ));
+      // Reuse one scratch vector: this block runs 60 times a second, and fresh
+      // Vector3s here were the only per-frame garbage left in the hot loop.
+      if (!flyingRef.current) {
+        // Attract mode. The title screen used to hold a single frozen chase frame;
+        // orbiting the drifting bird opens the game on a moving skyline instead,
+        // and the lerp below turns BEGIN FLIGHT into a swoop down into the chase.
+        const orbit = elapsedTime * 0.085;
+        desiredCamera.set(
+          crow.position.x + Math.cos(orbit) * 82,
+          crow.position.y + 27 + Math.sin(orbit * 0.7) * 9,
+          crow.position.z + Math.sin(orbit) * 82,
+        );
+        desiredTarget.copy(crow.position);
+      } else if (inspectionTarget) {
+        cameraOffset.set(inspectionCameraOffset, Math.max(52, inspectionCameraOffset * 0.52), inspectionCameraOffset);
+        desiredCamera.copy(inspectionTarget).add(cameraOffset);
         desiredTarget.copy(inspectionTarget);
       } else if (cameraModeRef.current === "CHASE") {
         const speedAmount = clamp((speed - BRAKE_SPEED) / (BOOST_SPEED - BRAKE_SPEED), 0, 1);
         const chaseDistance = 14.5 + speedAmount * 9;
-        desiredCamera.copy(crow.position).addScaledVector(forward, -chaseDistance).add(new THREE.Vector3(0, 6.4 - cameraKick * 1.5, 0));
-        desiredTarget.copy(crow.position).addScaledVector(forward, 13 + speedAmount * 10).add(new THREE.Vector3(0, 1.4 + verticalSpeed * 0.08, 0));
+        desiredCamera.copy(crow.position).addScaledVector(forward, -chaseDistance);
+        desiredCamera.y += 6.4 - cameraKick * 1.5;
+        desiredTarget.copy(crow.position).addScaledVector(forward, 13 + speedAmount * 10);
+        desiredTarget.y += 1.4 + verticalSpeed * 0.08;
       } else {
-        desiredCamera.copy(crow.position).addScaledVector(forward, 3.1).add(new THREE.Vector3(0, 1.2, 0));
-        desiredTarget.copy(crow.position).addScaledVector(forward, 42).add(new THREE.Vector3(0, 1, 0));
+        desiredCamera.copy(crow.position).addScaledVector(forward, 3.1);
+        desiredCamera.y += 1.2;
+        desiredTarget.copy(crow.position).addScaledVector(forward, 42);
+        desiredTarget.y += 1;
       }
       const speedAmount = clamp((speed - BRAKE_SPEED) / (BOOST_SPEED - BRAKE_SPEED), 0, 1);
       if (!reducedMotion) {
@@ -4282,6 +5238,12 @@ export function BirdFlight() {
       }
 
       sky.position.copy(camera.position);
+      // Shadow casters do still change — the crow moves, and district tiles are
+      // shown and hidden below — so refresh on a slow cadence. At 1-in-12 frames
+      // this keeps the crow's shadow tracking while costing a twelfth of the
+      // shadow-pass fill of the default every-frame behaviour.
+      shadowFrame++;
+      if (shadowFrame % SHADOW_REFRESH_FRAMES === 0) requestShadowUpdate();
       renderer.render(scene, camera);
       diagnosticFrame++;
       if (diagnosticFrame % 30 === 0) {
@@ -4290,11 +5252,18 @@ export function BirdFlight() {
         if (districtTiles && tileVisibilityRadius) {
           const visibilitySquared = tileVisibilityRadius ** 2;
           const visibilityAnchor = inspectionTarget ?? crow.position;
+          let visibilityChanged = false;
           for (const tile of districtTiles) {
             const dx = tile.centerX - visibilityAnchor.x;
             const dz = tile.centerZ - visibilityAnchor.z;
-            tile.group.visible = dx * dx + dz * dz < visibilitySquared;
+            const visible = dx * dx + dz * dz < visibilitySquared;
+            if (tile.group.visible !== visible) {
+              tile.group.visible = visible;
+              visibilityChanged = true;
+            }
           }
+          // A tile appearing or disappearing adds or removes shadow casters.
+          if (visibilityChanged) requestShadowUpdate();
         }
         renderer.domElement.dataset.calls = renderer.info.render.calls.toString();
         renderer.domElement.dataset.triangles = renderer.info.render.triangles.toString();
@@ -4312,32 +5281,97 @@ export function BirdFlight() {
     return () => {
       disposed = true;
       delete (window as BirdFlightWindow).__birdFlightDiagnostics;
+      delete (window as BirdFlightWindow & { __scene?: THREE.Scene }).__scene;
       focusLandmarkRef.current = () => false;
+      flightActionsRef.current = null;
       flightAudio.dispose();
       airflowVfx.dispose();
       weatherVfx.dispose();
       weatherController.abort();
       window.clearInterval(weatherRefresh);
+      setSkyHourRef.current = () => {};
       audioRef.current = null;
       cancelAnimationFrame(animation);
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("blur", clearFlightControls);
       document.removeEventListener("visibilitychange", onVisibilityChange);
-      window.removeEventListener("resize", onResize);
-      renderer.dispose();
-      scene.traverse((object) => {
-        if (object instanceof THREE.Mesh) {
-          object.geometry.dispose();
-          const materials = Array.isArray(object.material) ? object.material : [object.material];
-          materials.forEach((material) => material.dispose());
+      window.removeEventListener("orientationchange", applyViewportSize);
+      reducedMotionQuery.removeEventListener("change", onReducedMotionChange);
+      resizeObserver.disconnect();
+      // Materials hold GPU textures (canvas ground, sprite labels, window atlases)
+      // that survive material.dispose() unless released explicitly, and Sprites are
+      // not Meshes so the old Mesh-only walk skipped every label in the scene.
+      const releaseMaterial = (material: THREE.Material) => {
+        for (const value of Object.values(material)) {
+          if (value instanceof THREE.Texture) value.dispose();
         }
+        material.dispose();
+      };
+      scene.traverse((object) => {
+        if (object instanceof THREE.Mesh || object instanceof THREE.Points || object instanceof THREE.Line) {
+          object.geometry.dispose();
+        }
+        const material = (object as Partial<THREE.Mesh>).material;
+        if (!material) return;
+        if (Array.isArray(material)) material.forEach(releaseMaterial);
+        else releaseMaterial(material);
       });
-      mount.removeChild(renderer.domElement);
+      scene.clear();
+      renderer.dispose();
+      // Hand the WebGL context back immediately; browsers cap live contexts and
+      // silently kill the oldest one when a remount allocates another.
+      renderer.forceContextLoss();
+      renderer.domElement.remove();
     };
   }, []);
 
-  const beginFlight = async () => {
+  // Stable identities: TouchStick holds these in effects and would otherwise
+  // re-register (and zero the axes) on every parent render.
+  const setFlightAxes = useCallback((turn: number, climb: number) => {
+    flightActionsRef.current?.setAxes(turn, climb);
+  }, []);
+  const holdFlightKey = useCallback((code: string, held: boolean) => {
+    flightActionsRef.current?.setHold(code, held);
+  }, []);
+  const releaseInspectionCamera = useCallback(() => {
+    flightActionsRef.current?.releaseInspection();
+  }, []);
+  const chooseSkyPreset = useCallback((preset: SkyPreset) => {
+    setChosenSkyPresetId(preset.id);
+    setSkyHourRef.current(preset.hour);
+  }, []);
+
+  // The spawn parameters have always worked; nothing ever produced one. This
+  // turns the current spot in the sky into a link somebody else can open.
+  const shareView = useCallback(async () => {
+    const view = flightActionsRef.current?.readView();
+    if (!view) return;
+    const url = new URL(window.location.href);
+    url.search = "";
+    url.searchParams.set("lat", view.lat.toFixed(5));
+    url.searchParams.set("lon", view.lon.toFixed(5));
+    url.searchParams.set("alt", Math.round(view.alt).toString());
+    url.searchParams.set("yaw", view.yaw.toFixed(3));
+    if (skyPresetId !== "live") url.searchParams.set("sky", skyPresetId);
+    const link = url.toString();
+    try {
+      await navigator.clipboard.writeText(link);
+      setShareState("copied");
+    } catch {
+      // Clipboard access is denied in some browsers and every insecure origin.
+      setShareState("failed");
+      setSharedLink(link);
+    }
+  }, [skyPresetId]);
+
+  useEffect(() => {
+    if (shareState !== "copied") return;
+    const timer = window.setTimeout(() => setShareState("idle"), 2_600);
+    return () => window.clearTimeout(timer);
+  }, [shareState]);
+
+  const beginFlight = useCallback(async () => {
     flyingRef.current = true;
     pausedRef.current = false;
     restingRef.current = false;
@@ -4345,7 +5379,27 @@ export function BirdFlight() {
     setPaused(false);
     setResting(false);
     setSoundOn(await audioRef.current?.start() ?? false);
-  };
+  }, []);
+
+  const chooseLaunchSite = useCallback((site: (typeof LAUNCH_SITES)[number]) => {
+    setLaunchSiteId(site.id);
+    flightActionsRef.current?.spawnAt(site.lat, site.lon, site.alt);
+  }, []);
+
+  // Press-start, the way a title screen should answer. Enter or Space begins the
+  // flight without reaching for the mouse; the focus guard keeps it from firing
+  // twice when the BEGIN FLIGHT button itself already has focus.
+  useEffect(() => {
+    if (flying) return;
+    const onTitleKey = (event: KeyboardEvent) => {
+      if (event.code !== "Enter" && event.code !== "Space") return;
+      if (focusedControlClaim(event.target) !== "none") return;
+      event.preventDefault();
+      void beginFlight();
+    };
+    window.addEventListener("keydown", onTitleKey);
+    return () => window.removeEventListener("keydown", onTitleKey);
+  }, [flying, beginFlight]);
 
   const toggleSound = async () => {
     const enabled = await audioRef.current?.toggle() ?? false;
@@ -4365,7 +5419,7 @@ export function BirdFlight() {
   return (
     <main className="flight-shell">
       <div ref={mountRef} className="world" aria-label="Interactive hybrid flight map of central Dhaka" />
-      <div className="atmosphere" data-weather={weather.mode} data-daylight={weather.isDay ? "day" : "night"} />
+      <div className="atmosphere" data-weather={weather.mode} data-daylight={skyIsDay ? "day" : "night"} />
       <div ref={flightEffectRef} className="flight-dynamics" aria-hidden="true" />
       {!flying && <div className="folk-river-seal" aria-hidden="true">
         <span className="folk-sun" />
@@ -4382,7 +5436,7 @@ export function BirdFlight() {
         {!flying && <div className="header-center">
           <div className="location"><span className="pulse" /> GREATER DHAKA &amp; ITS RIVERS <b>23.7715° N</b></div>
           <div className={`weather-chip ${weatherStatus}`} title={`Feels like ${Math.round(weather.apparentTemperature)}°C · Wind ${Math.round(weather.windSpeed)} km/h`}>
-            <strong>{weatherIcon(weather.mode, weather.isDay)}</strong>
+            <strong>{weatherIcon(weather.mode, skyIsDay)}</strong>
             <span>{weather.label}</span>
             <b>{Math.round(weather.temperature)}°</b>
             <i>{weatherStatus === "live" ? "LIVE" : weatherStatus === "loading" ? "SYNC" : "OFFLINE"}</i>
@@ -4402,10 +5456,36 @@ export function BirdFlight() {
             aria-label="Open sky radio"
             aria-expanded={radioOpen}
           >◉</button>
+          <button
+            className={`icon-button sky-toggle${skyPresetId !== "live" ? " active" : ""}`}
+            onClick={() => setSkyOpen((value) => !value)}
+            aria-label="Choose time of day"
+            aria-expanded={skyOpen}
+          >◐</button>
           {flying && <button className={`icon-button pause-button${paused ? " active" : ""}`} onClick={togglePause} aria-label={paused ? "Resume flight" : "Pause flight"}>{paused ? "▶" : "Ⅱ"}</button>}
           <button className="icon-button" onClick={() => setControlsOpen((value) => !value)} aria-label="Show flight controls">?</button>
         </div>
       </header>
+
+      {skyOpen && (
+        <section className={`sky-panel${flying ? " in-flight" : ""}`} aria-label="Time of day">
+          <button className="radio-close" onClick={() => setSkyOpen(false)} aria-label="Close time of day">×</button>
+          <span className="eyebrow">SKY OVER DHAKA</span>
+          <p>The sun, stars, and city lights follow Dhaka&apos;s real clock. Borrow another hour to see the river basin at its best.</p>
+          <div className="sky-presets" role="group" aria-label="Time of day presets">
+            {SKY_PRESETS.map((preset) => (
+              <button
+                key={preset.id}
+                type="button"
+                className={preset.id === skyPresetId ? "selected" : ""}
+                aria-pressed={preset.id === skyPresetId}
+                onClick={() => chooseSkyPreset(preset)}
+              >{preset.label}</button>
+            ))}
+          </div>
+          <small>{skyPresetId === "live" ? "FOLLOWING LIVE DHAKA TIME" : "HELD AT A CHOSEN HOUR · WEATHER STAYS LIVE"}</small>
+        </section>
+      )}
 
       {radioOpen && (
         <section className={`radio-panel${flying ? " in-flight" : ""}`} aria-label="Sky radio player">
@@ -4475,7 +5555,7 @@ export function BirdFlight() {
       )}
 
       {flying && <div className={`weather-chip weather-flight ${weatherStatus}`} title={`Feels like ${Math.round(weather.apparentTemperature)}°C · Wind ${Math.round(weather.windSpeed)} km/h`}>
-        <strong>{weatherIcon(weather.mode, weather.isDay)}</strong>
+        <strong>{weatherIcon(weather.mode, skyIsDay)}</strong>
         <span>{weather.label}</span>
         <b>{Math.round(weather.temperature)}°</b>
         <i>{weatherStatus === "live" ? "LIVE" : weatherStatus === "loading" ? "SYNC" : "OFFLINE"}</i>
@@ -4549,9 +5629,41 @@ export function BirdFlight() {
 
           <div className="camera-chip"><span>CAMERA</span>{cameraMode}<kbd>C</kbd></div>
           <div className="perch-legend"><i /> AREA PERCH</div>
-          <div className="flight-hint"><kbd>W / S</kbd><span>CLIMB / DIVE</span><kbd>CTRL / Q</kbd><span>BRAKE</span><kbd>SHIFT</kbd><span>BOOST</span></div>
-          <div ref={perchPromptRef} className="perch-prompt" data-visible="false"><kbd>E</kbd><span ref={perchLabelRef}>LAND</span></div>
+          {!touchDevice && <div className="flight-hint"><kbd>W / S</kbd><span>CLIMB / DIVE</span><kbd>CTRL / Q</kbd><span>BRAKE</span><kbd>SHIFT</kbd><span>BOOST</span></div>}
+          <div ref={perchPromptRef} className="perch-prompt" data-visible="false" data-state="approach"><kbd>E</kbd><span ref={perchLabelRef}>LAND</span><i ref={perchRangeRef} className="perch-range" /></div>
+          {inspecting && (
+            <button type="button" className="inspect-exit" onClick={releaseInspectionCamera}>
+              <span>INSPECTING LANDMARK</span><b>RETURN TO BIRD</b>
+            </button>
+          )}
+
+          {touchDevice && (
+            <section className="touch-controls" aria-label="Touch flight controls">
+              <TouchStick onAxes={setFlightAxes} />
+              <div className="touch-actions">
+                <div className="touch-action-row">
+                  <TouchHoldButton label="BRAKE" hint="Hold to air-brake" onHold={(held) => holdFlightKey("KeyQ", held)} />
+                  <TouchHoldButton label="BOOST" hint="Hold to surge forward" className="touch-boost" onHold={(held) => holdFlightKey("ShiftLeft", held)} />
+                </div>
+                <div className="touch-action-row">
+                  <button type="button" className="touch-button touch-secondary" aria-label="Switch camera" onClick={() => flightActionsRef.current?.toggleCamera()}>CAM</button>
+                  <button type="button" className="touch-button touch-secondary" aria-label="Inspect next landmark" onClick={() => flightActionsRef.current?.cycleInspection()}>SITES</button>
+                  <button type="button" className="touch-button touch-secondary" aria-label="Land or take off" onClick={() => flightActionsRef.current?.togglePerch()}>{resting ? "FLY" : "LAND"}</button>
+                </div>
+                <button type="button" className="touch-button touch-flap" aria-label="Flap wings for lift" onPointerDown={() => flightActionsRef.current?.flap()}>FLAP</button>
+              </div>
+            </section>
+          )}
           {resting && <div className="resting-chip"><i /> RESTING · WATCHING DHAKA</div>}
+          <button type="button" className={`share-view ${shareState}`} onClick={shareView}>
+            {shareState === "copied" ? "LINK COPIED" : shareState === "failed" ? "COPY MANUALLY" : "SHARE THIS SPOT"}
+          </button>
+          {shareState === "failed" && (
+            <label className="share-fallback">
+              <span>COPY THIS LINK</span>
+              <input readOnly value={sharedLink} onFocus={(event) => event.target.select()} aria-label="Shareable link to this spot" />
+            </label>
+          )}
           <div className={`map-source ${mapStatus}`}>
             <i /> {mapStatus === "live" ? "OSM + PROCEDURAL + SAMPLED SIM TRAFFIC · " : mapStatus === "loading" ? "LOADING MAP + SIM TRAFFIC · " : "MAP + SIM TRAFFIC FALLBACK · "}
             <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">© OpenStreetMap contributors</a>
@@ -4564,8 +5676,37 @@ export function BirdFlight() {
           <span className="eyebrow">AN ILLUSTRATED FLIGHT THROUGH THE RIVER CITY</span>
           <h1>The sky<br />belongs to you.</h1>
           <p>Cross Greater Dhaka from Uttara and Mirpur to Old Dhaka, Keraniganj, Demra, and Purbachal—following the Buriganga, Turag, Balu, Shitalakshya, and the lakes between them.</p>
+          <div className="launch-select">
+            <span className="launch-label">LAUNCH SITE</span>
+            <div className="launch-options" role="group" aria-label="Choose a launch site">
+              {LAUNCH_SITES.map((site) => (
+                <button
+                  key={site.id}
+                  type="button"
+                  className={`launch-option${launchSiteId === site.id ? " active" : ""}`}
+                  aria-pressed={launchSiteId === site.id}
+                  onClick={() => chooseLaunchSite(site)}
+                >
+                  <b>{site.short}</b><span>{site.label}</span>
+                </button>
+              ))}
+            </div>
+          </div>
           <button onClick={beginFlight} className="primary-button"><span>BEGIN FLIGHT</span><b>→</b></button>
-          <div className="quick-controls"><span><kbd>WASD</kbd> STEER</span><span><kbd>CTRL / Q</kbd> BRAKE</span><span><kbd>SPACE</kbd> FLAP</span><span><kbd>C</kbd> CAMERA</span></div>
+          {!touchDevice && <p className="press-start" aria-hidden="true">OR PRESS <kbd>ENTER</kbd></p>}
+          <div className="title-stats">
+            <div><b>{DHAKA_LANDMARKS.length}</b><small>LANDMARKS</small></div>
+            <div><b>24</b><small>KM OF CITY</small></div>
+            <div><b>{skyPresetId === "live" ? "LIVE" : skyPresetId.toUpperCase()}</b><small>SKY</small></div>
+          </div>
+          <div className={`title-load ${mapStatus}`} role="status">
+            <i />{mapStatus === "live" ? "CITY LOADED · OSM + SIM TRAFFIC" : mapStatus === "loading" ? "BUILDING DHAKA FROM OPENSTREETMAP…" : "FLYING THE BUNDLED MAP SNAPSHOT"}
+          </div>
+          <div className="quick-controls">
+            {touchDevice
+              ? <><span>DRAG THE PAD TO STEER</span><span>TAP FLAP FOR LIFT</span><span>HOLD BOOST TO SURGE</span></>
+              : <><span><kbd>WASD</kbd> STEER</span><span><kbd>CTRL / Q</kbd> BRAKE</span><span><kbd>SPACE</kbd> FLAP</span><span><kbd>E</kbd> LAND</span></>}
+          </div>
         </section>
       )}
 
@@ -4575,32 +5716,58 @@ export function BirdFlight() {
           <span className="eyebrow">FLIGHT MANUAL</span>
           <h2>Move like a crow</h2>
           <dl>
-            <div><dt>W / S</dt><dd>Climb / dive</dd></div>
-            <div><dt>A / D</dt><dd>Bank left / right</dd></div>
-            <div><dt>Space</dt><dd>Flap for a burst of lift</dd></div>
-            <div><dt>Ctrl / Q</dt><dd>Air-brake into a slow glide</dd></div>
-            <div><dt>Shift</dt><dd>Accelerate into a high-speed surge</dd></div>
-              <div><dt>C</dt><dd>Switch camera</dd></div>
-              <div><dt>L</dt><dd>Inspect next landmark</dd></div>
-            <div><dt>P / Esc</dt><dd>Pause / resume flight</dd></div>
-            <div><dt>E</dt><dd>Land / take off at a perch or treetop</dd></div>
-            <div><dt>♫</dt><dd>Nature ambience: birds, leaves, water, and insects</dd></div>
+            {touchDevice
+              ? <>
+                  <div><dt>Pad</dt><dd>Drag to bank, climb, and dive</dd></div>
+                  <div><dt>Flap</dt><dd>Tap for a burst of lift</dd></div>
+                  <div><dt>Brake</dt><dd>Hold to fall into a slow glide</dd></div>
+                  <div><dt>Boost</dt><dd>Hold for a high-speed surge</dd></div>
+                  <div><dt>Cam</dt><dd>Switch between chase and first person</dd></div>
+                  <div><dt>Sites</dt><dd>Tour the landmarks one by one</dd></div>
+                  <div><dt>Land</dt><dd>Settle on a perch or treetop, then fly off</dd></div>
+                </>
+              : <>
+                  <div><dt>W / S</dt><dd>Climb / dive</dd></div>
+                  <div><dt>A / D</dt><dd>Bank left / right</dd></div>
+                  <div><dt>Space</dt><dd>Flap for a burst of lift</dd></div>
+                  <div><dt>Ctrl / Q</dt><dd>Air-brake into a slow glide</dd></div>
+                  <div><dt>Shift</dt><dd>Accelerate into a high-speed surge</dd></div>
+                  <div><dt>C</dt><dd>Switch camera</dd></div>
+                  <div><dt>L</dt><dd>Inspect next landmark</dd></div>
+                  <div><dt>P / Esc</dt><dd>Pause / resume flight</dd></div>
+                  <div><dt>E</dt><dd>Land / take off at a perch or treetop</dd></div>
+                </>}
+            <div><dt>Minimap</dt><dd>Tap a pink diamond to fly the camera to that landmark</dd></div>
+            <div><dt>◐</dt><dd>Hold the sky at dawn, noon, golden hour, or night</dd></div>
+            <div><dt>♫</dt><dd>Nature ambience: birds, leaves, water, and breeze</dd></div>
             <div><dt>R / [ ]</dt><dd>Radio power / tune station</dd></div>
           </dl>
         </section>
       )}
 
       {flying && paused && (
-        <section className="pause-overlay" role="dialog" aria-label="Flight paused">
+        <section className="pause-overlay" role="dialog" aria-modal="true" aria-label="Flight paused">
           <span className="eyebrow">FLIGHT SUSPENDED</span>
           <h2>Take a breath.</h2>
           <p>Your place in the sky is waiting.</p>
-          <button className="primary-button resume-button" onClick={togglePause}><span>RESUME FLIGHT</span><b>▶</b></button>
+          <button ref={resumeButtonRef} className="primary-button resume-button" onClick={togglePause}><span>RESUME FLIGHT</span><b>▶</b></button>
           <small>PRESS P TO CONTINUE</small>
         </section>
       )}
 
-      <div className="desktop-note">DESKTOP FLIGHT PROTOTYPE · KEYBOARD REQUIRED</div>
+      {/* The flight is entirely visual, so state changes are announced here for
+          anyone who cannot see the HUD change. */}
+      <p className="visually-hidden" role="status">
+        {!flying
+          ? "Ready for takeoff."
+          : paused
+            ? "Flight paused."
+            : resting
+              ? "Perched and watching Dhaka."
+              : `Flying over Dhaka. Map ${mapStatus === "live" ? "loaded from OpenStreetMap" : mapStatus === "loading" ? "still loading" : "using the offline snapshot"}.`}
+      </p>
+
+      <div className="desktop-note">{touchDevice ? "TOUCH FLIGHT · DRAG TO STEER" : "KEYBOARD FLIGHT · WASD TO STEER"}</div>
     </main>
   );
 }

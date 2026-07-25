@@ -91,10 +91,15 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(component, /createFlightRadio/);
   assert.match(component, /scheduleBirdCall/);
   assert.match(component, /const leafRustle/);
-  assert.match(component, /const crickets/);
-  assert.match(component, /Nature ambience: birds, leaves, water, and insects/);
-  assert.match(component, /RADIO_DUCKED_AMBIENCE_GAIN = 0\.24/);
+  assert.match(component, /const cityBed/);
+  assert.doesNotMatch(component, /const crickets/);
+  assert.match(component, /Nature ambience: birds, leaves, water, and breeze/);
+  // Ducking must stay a step listeners can actually hear (~7 dB), not ~1 dB.
+  assert.match(component, /RADIO_DUCKED_AMBIENCE_GAIN = 0\.12/);
   assert.match(component, /Monsoon Drift/);
+  assert.match(component, /Soft rain · distant chimes · no interruptions/);
+  assert.match(component, /scheduleGentleMelody/);
+  assert.doesNotMatch(component, /oscillator\.type = index === 0 \? "sine" : "triangle"/);
   for (const station of ["Radio Foorti", "Dhaka FM", "Jago FM"]) {
     assert.match(component, new RegExp(station));
   }
@@ -137,7 +142,11 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(component, /climb > 0 && crow\.position\.y >= MAX_FLIGHT_ALTITUDE - 1/);
   assert.match(component, /verticalSpeed = Math\.min\(verticalSpeed, 0\)/);
   assert.doesNotMatch(component, /verticalSpeed = Math\.min\(verticalSpeed, -3\)/);
-  assert.match(component, /resolveBuildingCollision\(crow\.position, previousPosition\)/);
+  // The struck collider is passed so a glancing hit slides along the wall
+  // instead of pinning the crow in place while forward is held.
+  assert.match(component, /resolveBuildingCollision\(crow\.position, previousPosition, struckBuilding\)/);
+  // A slide at a concave corner must not deposit the crow inside the neighbour.
+  assert.match(component, /if \(buildingAt\(crow\.position\.x, crow\.position\.y, crow\.position\.z\)\) \{\s*\n\s*resolveBuildingCollision\(crow\.position, previousPosition\);/);
   assert.match(component, /Ctrl \/ Q/);
   assert.match(component, /VERT M\/S/);
   assert.match(mapRoute, /south: 23\.655/);
@@ -170,10 +179,96 @@ test("keeps the finished flight experience free of starter preview code", async 
   }
   assert.match(component, /© OpenStreetMap contributors/);
   assert.doesNotMatch(component, /className="mission-card"/);
+
+  // Night city lighting: the merged OSM batches are the city the player actually
+  // flies over, so they must carry the procedural window shader, and the day/night
+  // driver must be the thing that turns it on.
+  assert.match(component, /function applyNightWindows/);
+  assert.match(component, /totalEmissiveRadiance \+= bevWindowTint/);
+  assert.match(component, /const buildingMaterials = \[[^\]]+\]\.map\(\s*\(color\) => applyNightWindows/);
+  assert.match(component, /NIGHT_WINDOW_GLOW\.value = \(1 - daylightStrength\)/);
+  assert.match(component, /centerLineMaterial\.userData\.nightGlowIntensity/);
+  assert.match(component, /customProgramCacheKey/);
+
+  // Static shadow map: the world never moves, so it must not redraw every frame.
+  assert.match(component, /renderer\.shadowMap\.autoUpdate = false/);
+  assert.match(component, /requestShadowUpdate\(\)/);
+
+  // Touch flight must exist and must feed the same axes the keyboard drives.
+  // The bindings are `let` so a committed landing can steer them, but touch and
+  // keyboard must still converge on one axis pair rather than two parallel ones.
+  assert.match(component, /function TouchStick/);
+  assert.match(component, /function TouchHoldButton/);
+  assert.match(component, /(?:const|let) turn = active \? \(keyTurn \|\| pointerTurn\) : 0/);
+  assert.match(component, /(?:const|let) climb = active \? \(keyClimb \|\| pointerClimb\) : 0/);
+  assert.match(component, /className="touch-controls"/);
+  assert.doesNotMatch(component, /DESKTOP FLIGHT PROTOTYPE · KEYBOARD REQUIRED/);
+
+  // Landing assistance. Cruise is 44 m/s against a 34 m capture sphere, so the
+  // throttle has to know a perch is ahead — without this the bird crosses the
+  // landing window in about a second and landing is a reflex test.
+  assert.match(component, /const LANDING_APPROACH_RADIUS = \d+/);
+  assert.match(component, /const LANDING_FLARE_RADIUS = \d+/);
+  // The flare must actually reach the target-speed calculation.
+  assert.match(component, /const assistedTarget = THREE\.MathUtils\.lerp\(cruiseTarget, flareTarget, approachBlend\)/);
+  assert.match(component, /: assistedTarget;/);
+  // Holding BOOST has to opt out, or the assist would fight a deliberate flyby.
+  assert.match(component, /approachPerch && !boost/);
+  // Only perches ahead of the bird may grab the throttle.
+  assert.match(component, /dot\(horizontalForward\) < LANDING_APPROACH_COS\) continue/);
+  // Committing from the approach zone must fly the bird in and settle it.
+  assert.match(component, /landingCommit = approachPerch/);
+  assert.match(component, /distanceTo\(landingCommit\.position\) < LANDING_CAPTURE_DISTANCE/);
+  // Clipping a facade used to accelerate the bird to 28 m/s mid-approach.
+  assert.match(component, /speed = Math\.max\(approachPerch \? LANDING_FLARE_SPEED : 28/);
+
+  // Title screen: an attract camera and a press-start, not a held frame.
+  assert.match(component, /if \(!flyingRef\.current\) \{/);
+  assert.match(component, /const LAUNCH_SITES = \[/);
+  assert.match(component, /event\.code !== "Enter" && event\.code !== "Space"/);
+  assert.match(component, /className="launch-option/);
+
+  // Keyboard fixes: focused controls keep their own keys, and Escape dismisses
+  // the topmost layer before it doubles as the pause key.
+  assert.match(component, /function focusedControlClaim/);
+  assert.match(component, /if \(focusedControlClaimsKey\(focusedControlClaim\(event\.target\), event\.code\)\) return;/);
+  // Escape must never be surrendered to a focused control, or the pause dialog's
+  // own resume button would swallow the key the dialog tells you to press.
+  assert.match(component, /if \(code === "Escape"\) return false;/);
+  assert.match(component, /if \(dismissOverlayRef\.current\(\)\)/);
+  assert.match(component, /const releaseInspection = \(\) => \{/);
+  assert.doesNotMatch(component, /if \(\["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"\]\.includes\(event\.code\)\) event\.preventDefault\(\);/);
+
+  // Live weather has to be felt, not just displayed.
+  assert.match(component, /WIND_DRIFT_SCALE = 0\.34/);
+  assert.match(component, /weatherVfx\.readWind\(windDrift\)/);
+
+  // Time-of-day override, so visitors are not stuck with whatever hour it is.
+  assert.match(component, /function dhakaInstantAtHour/);
+  assert.match(component, /const SKY_PRESETS: SkyPreset\[\]/);
+  assert.match(component, /skyHourOverride === null \? Date\.now\(\) : dhakaInstantAtHour\(skyHourOverride\)/);
+
+  // Teardown must release GPU textures and the WebGL context itself.
+  assert.match(component, /renderer\.forceContextLoss\(\)/);
+  assert.match(component, /value instanceof THREE\.Texture/);
   assert.match(css, /\.flight-shell/);
   assert.match(css, /\.topbar\.in-flight/);
   assert.match(css, /\.folk-river-seal/);
   assert.match(css, /--vermillion:/);
+  assert.match(css, /\.touch-stick/);
+  assert.match(css, /\.touch-controls/);
+  assert.match(css, /:focus-visible/);
+  assert.match(css, /\.visually-hidden/);
+  // Attribution and status text had shrunk to 6px, which is below readable.
+  assert.doesNotMatch(css, /font: 500 6px var\(--font-mono\)/);
+
+  // The radio proxy must not accept inherited Object keys as station names.
+  const radioRoute = await readFile(new URL("../app/api/radio/route.ts", import.meta.url), "utf8");
+  assert.match(radioRoute, /Object\.hasOwn\(LIVE_STREAMS, station\)/);
+  // The connect timeout must be cleared once headers arrive: aborting the signal
+  // also cancels the streamed body, which would cut playback off mid-song.
+  assert.match(radioRoute, /clearTimeout\(connectTimer\);/);
+  assert.doesNotMatch(radioRoute, /signal: AbortSignal\.timeout/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
   await assert.rejects(access(new URL("../app/_sites-preview", import.meta.url)));
 });
@@ -201,6 +296,65 @@ test("building collision recovery lets a perched crow climb clear on takeoff", (
 
   assert.equal(position.x, 0);
   assert.ok(position.y > 79.5, `expected takeoff to clear the roof collider, got ${position.y}`);
+});
+
+test("a glancing building hit slides along the wall instead of pinning the crow", () => {
+  const makePosition = (x, y, z) => ({
+    x,
+    y,
+    z,
+    copy(source) {
+      this.x = source.x;
+      this.y = source.y;
+      this.z = source.z;
+    },
+  });
+  // A tower centred on the origin. The crow is already level with it on Z and
+  // drifts east into its west face, so only the X axis is newly breached.
+  const building = { x: 0, z: 0, halfWidth: 20, halfDepth: 20 };
+  const overlaps = (point) =>
+    Math.abs(point.x - building.x) < building.halfWidth && Math.abs(point.z - building.z) < building.halfDepth;
+
+  const position = makePosition(-19, 40, -6);
+  const previousPosition = { x: -21, y: 40, z: -10 };
+  resolveBuildingCollision(position, previousPosition, building);
+  assert.equal(position.x, -21, "the newly breached axis is rejected");
+  assert.equal(position.z, -6, "movement along the wall is preserved");
+
+  // Repeated frames must keep making progress rather than restoring the same spot.
+  const sliding = makePosition(-21, 40, -10);
+  for (let frame = 0; frame < 12; frame++) {
+    const previous = { x: sliding.x, y: sliding.y, z: sliding.z };
+    sliding.x += 1.5;
+    sliding.z += 3;
+    // Mirror the render loop: only resolve when the step actually lands inside.
+    if (overlaps(sliding)) resolveBuildingCollision(sliding, previous, building);
+  }
+  assert.ok(sliding.z > 20, `expected the crow to slide clear of the tower, got z=${sliding.z}`);
+  assert.ok(
+    !overlaps(sliding),
+    `expected the crow to stay outside the footprint, got x=${sliding.x} z=${sliding.z}`,
+  );
+});
+
+test("a collider that appears around the crow still rejects the whole step", () => {
+  const position = {
+    x: 5,
+    y: 30,
+    z: 5,
+    copy(source) {
+      this.x = source.x;
+      this.y = source.y;
+      this.z = source.z;
+    },
+  };
+  // Both previous and current positions are inside the footprint, which is what
+  // happens when a streamed-in collider materialises around the bird.
+  const previousPosition = { x: 3, y: 28, z: 3 };
+  resolveBuildingCollision(position, previousPosition, { x: 0, z: 0, halfWidth: 20, halfDepth: 20 });
+  assert.equal(position.x, 3);
+  assert.equal(position.z, 3);
+  assert.equal(position.y, 30, "upward recovery is still preserved");
 });
 
 test("bundled Dhaka roads preserve connected major corridors", async () => {
