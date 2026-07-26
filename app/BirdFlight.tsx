@@ -131,7 +131,9 @@ type FlightAudio = {
   pause: () => void;
   resume: () => void;
   flap: () => void;
+  thunder: (strength: number, delay: number) => void;
   setFlight: (speed: number, altitude: number) => void;
+  setWeather: (mode: WeatherMode, precipitation: number) => void;
   setRadioDucking: (active: boolean) => void;
   dispose: () => void;
 };
@@ -900,17 +902,40 @@ function createWeatherVfx(
   sun: THREE.DirectionalLight,
   skyFill: THREE.DirectionalLight,
   reducedMotion: boolean,
+  onThunder: (strength: number, delay: number) => void,
 ): WeatherVfx {
   const random = seededRandom(9_071);
-  const maxDrops = reducedMotion ? 360 : 720;
+  const maxDrops = reducedMotion ? 520 : 1_100;
   const positions = new Float32Array(maxDrops * 6);
-  const drops = Array.from({ length: maxDrops }, () => ({
-    x: (random() - 0.5) * 250,
-    y: -35 + random() * 210,
-    z: (random() - 0.5) * 250,
-    speed: 82 + random() * 95,
-    length: 4.5 + random() * 8,
-  }));
+  const dropletPositions = new Float32Array(maxDrops * 3);
+  const drops = Array.from({ length: maxDrops }, (_, index) => {
+    // Golden-ratio ordering keeps every draw-range prefix distributed across
+    // near, middle, and far layers (important when drizzle enables only 28%).
+    const depth = (index * 0.618_033_988_75) % 1;
+    const near = depth < 0.34;
+    const radius = near ? 150 : depth < 0.72 ? 215 : 290;
+    return {
+      x: (random() - 0.5) * radius * 2,
+      y: -45 + random() * 235,
+      z: (random() - 0.5) * radius * 2,
+      radius,
+      speed: (near ? 118 : 76) + random() * (near ? 112 : 86),
+      length: (near ? 9 : 4.5) + random() * (near ? 13 : 8),
+    };
+  });
+  drops.forEach((drop, index) => {
+    const lineOffset = index * 6;
+    positions[lineOffset] = drop.x;
+    positions[lineOffset + 1] = drop.y;
+    positions[lineOffset + 2] = drop.z;
+    positions[lineOffset + 3] = drop.x;
+    positions[lineOffset + 4] = drop.y + drop.length;
+    positions[lineOffset + 5] = drop.z;
+    const pointOffset = index * 3;
+    dropletPositions[pointOffset] = drop.x;
+    dropletPositions[pointOffset + 1] = drop.y;
+    dropletPositions[pointOffset + 2] = drop.z;
+  });
   const rainGeometry = new THREE.BufferGeometry();
   rainGeometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
   const rainMaterial = new THREE.LineBasicMaterial({
@@ -925,6 +950,55 @@ function createWeatherVfx(
   rain.renderOrder = 25;
   rain.visible = false;
   scene.add(rain);
+
+  // The line layer supplies long, fast foreground streaks. A soft point-sprite
+  // layer fills the middle and far field so rain has depth instead of looking
+  // like a sparse cage of identical one-pixel lines.
+  const dropletGeometry = new THREE.BufferGeometry();
+  dropletGeometry.setAttribute("position", new THREE.BufferAttribute(dropletPositions, 3));
+  const dropletMaterial = new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    toneMapped: false,
+    uniforms: {
+      uColor: { value: new THREE.Color(0xb9dce5) },
+      uOpacity: { value: 0 },
+      uPixelRatio: { value: renderer.getPixelRatio() },
+      uSlant: { value: 0 },
+    },
+    vertexShader: `
+      uniform float uPixelRatio;
+      varying float vDepthFade;
+      void main() {
+        vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
+        float distanceToCamera = max(45.0, -viewPosition.z);
+        gl_PointSize = clamp(520.0 / distanceToCamera, 1.6, 7.5) * uPixelRatio;
+        gl_Position = projectionMatrix * viewPosition;
+        vDepthFade = 1.0 - smoothstep(150.0, 460.0, distanceToCamera);
+      }
+    `,
+    fragmentShader: `
+      uniform vec3 uColor;
+      uniform float uOpacity;
+      uniform float uSlant;
+      varying float vDepthFade;
+      void main() {
+        vec2 drop = gl_PointCoord - vec2(0.5);
+        drop.x += drop.y * uSlant;
+        float core = 1.0 - smoothstep(0.035, 0.16, abs(drop.x));
+        float lengthMask = 1.0 - smoothstep(0.34, 0.5, abs(drop.y));
+        float taperedHead = smoothstep(-0.52, 0.18, drop.y);
+        float alpha = core * lengthMask * taperedHead * uOpacity * (0.38 + vDepthFade * 0.62);
+        if (alpha < 0.015) discard;
+        gl_FragColor = vec4(uColor, alpha);
+      }
+    `,
+  });
+  const droplets = new THREE.Points(dropletGeometry, dropletMaterial);
+  droplets.frustumCulled = false;
+  droplets.renderOrder = 24;
+  droplets.visible = false;
+  scene.add(droplets);
 
   const starPositions = new Float32Array(420 * 3);
   for (let index = 0; index < 420; index++) {
@@ -962,6 +1036,7 @@ function createWeatherVfx(
   let windZ = 0;
   let lightningClock = 4 + random() * 4;
   let lightningPulse = 0;
+  let lightningEchoClock = -1;
   let currentWeather = DEFAULT_WEATHER;
   let daylightRefreshClock = 0;
   let skyHourOverride: number | null = null;
@@ -977,6 +1052,7 @@ function createWeatherVfx(
   const overcastSunColor = new THREE.Color(0xd6e5e5);
 
   const apply = (weather: WeatherSnapshot) => {
+    const previousMode = mode;
     currentWeather = weather;
     mode = weather.mode;
     const cloudAmount = clamp(weather.cloudCover / 100, 0, 1);
@@ -990,14 +1066,24 @@ function createWeatherVfx(
           : 0;
     activeDrops = Math.round(maxDrops * rainStrength);
     rainGeometry.setDrawRange(0, activeDrops * 2);
+    dropletGeometry.setDrawRange(0, activeDrops);
     rain.visible = raining;
+    droplets.visible = raining;
     rainMaterial.opacity = 0.2 + rainStrength * 0.48;
     rainMaterial.color.set(mode === "storm" ? 0xc9e6f2 : 0xaed3dc);
+    dropletMaterial.uniforms.uOpacity.value = 0.2 + rainStrength * 0.42;
+    dropletMaterial.uniforms.uColor.value.set(mode === "storm" ? 0xd8eff7 : 0xb8dce3);
+    renderer.domElement.dataset.rainStrength = rainStrength.toFixed(2);
+    renderer.domElement.dataset.rainDrops = activeDrops.toString();
 
     const windToward = THREE.MathUtils.degToRad(weather.windDirection + 180);
     const windScale = clamp(weather.windSpeed / 18, 0.08, 1.5);
     windX = Math.sin(windToward) * 12 * windScale;
     windZ = Math.cos(windToward) * 12 * windScale;
+    dropletMaterial.uniforms.uSlant.value = clamp((windX + windZ) / 44, -0.42, 0.42);
+    if (mode !== previousMode && (mode === "rain" || mode === "storm")) {
+      lightningClock = mode === "storm" ? 3 + random() * 5 : 8 + random() * 10;
+    }
 
     // Visitors otherwise only ever see whatever hour it happens to be in Dhaka.
     // The override re-times the whole sky — sun vector, colour, stars, exposure —
@@ -1139,6 +1225,7 @@ function createWeatherVfx(
         apply(currentWeather);
       }
       rain.position.copy(anchor);
+      droplets.position.copy(anchor);
       stars.position.set(anchor.x, 0, anchor.z);
       if (!paused && rain.visible) {
         for (let index = 0; index < activeDrops; index++) {
@@ -1146,10 +1233,10 @@ function createWeatherVfx(
           drop.y -= drop.speed * dt;
           drop.x += windX * dt;
           drop.z += windZ * dt;
-          if (drop.y < -45 || Math.abs(drop.x) > 145 || Math.abs(drop.z) > 145) {
-            drop.x = (random() - 0.5) * 250;
+          if (drop.y < -48 || Math.abs(drop.x) > drop.radius || Math.abs(drop.z) > drop.radius) {
+            drop.x = (random() - 0.5) * drop.radius * 2;
             drop.y = 145 + random() * 45;
-            drop.z = (random() - 0.5) * 250;
+            drop.z = (random() - 0.5) * drop.radius * 2;
           }
           const offset = index * 6;
           positions[offset] = drop.x;
@@ -1158,26 +1245,49 @@ function createWeatherVfx(
           positions[offset + 3] = drop.x - windX * 0.16;
           positions[offset + 4] = drop.y + drop.length;
           positions[offset + 5] = drop.z - windZ * 0.16;
+          const pointOffset = index * 3;
+          dropletPositions[pointOffset] = drop.x;
+          dropletPositions[pointOffset + 1] = drop.y + drop.length * 0.4;
+          dropletPositions[pointOffset + 2] = drop.z;
         }
         rainGeometry.attributes.position.needsUpdate = true;
+        dropletGeometry.attributes.position.needsUpdate = true;
       }
 
-      if (!paused && mode === "storm") {
+      const thunderWeather = mode === "rain" || mode === "storm";
+      if (!paused && thunderWeather) {
         lightningClock -= dt;
         if (lightningClock <= 0) {
           lightningPulse = 1;
-          lightningClock = 3.2 + random() * 6.8;
+          lightningEchoClock = 0.09 + random() * 0.12;
+          lightning.position.set(
+            anchor.x + (random() - 0.5) * 900,
+            420 + random() * 260,
+            anchor.z + (random() - 0.5) * 900,
+          );
+          const thunderStrength = mode === "storm" ? 0.78 + random() * 0.22 : 0.48 + random() * 0.22;
+          const thunderDelay = mode === "storm" ? 0.35 + random() * 2.1 : 0.8 + random() * 2.8;
+          onThunder(thunderStrength, thunderDelay);
+          lightningClock = mode === "storm" ? 5 + random() * 10 : 14 + random() * 18;
         }
-        lightningPulse = Math.max(0, lightningPulse - dt * 7.5);
-        lightning.intensity = lightningPulse > 0 ? 2.5 + lightningPulse * 8 : 0;
+        if (lightningEchoClock >= 0) {
+          lightningEchoClock -= dt;
+          if (lightningEchoClock < 0) lightningPulse = 0.68;
+        }
+        lightningPulse = Math.max(0, lightningPulse - dt * 8.8);
+        lightning.intensity = lightningPulse > 0 ? 1.8 + lightningPulse * (mode === "storm" ? 9.5 : 6.2) : 0;
+        renderer.domElement.dataset.thunderActive = lightningPulse > 0 ? "true" : "false";
       } else {
         lightning.intensity = 0;
+        renderer.domElement.dataset.thunderActive = "false";
       }
     },
     dispose() {
-      scene.remove(rain, stars, lightning);
+      scene.remove(rain, droplets, stars, lightning);
       rainGeometry.dispose();
       rainMaterial.dispose();
+      dropletGeometry.dispose();
+      dropletMaterial.dispose();
       starGeometry.dispose();
       starMaterial.dispose();
       lightning.dispose();
@@ -1913,11 +2023,15 @@ function createFlightAudio(): FlightAudio {
   let master: GainNode | null = null;
   let windGain: GainNode | null = null;
   let windFilter: BiquadFilterNode | null = null;
+  let rainGain: GainNode | null = null;
   let waterGain: GainNode | null = null;
   let cityGain: GainNode | null = null;
   let natureGain: GainNode | null = null;
   let flapBuffer: AudioBuffer | null = null;
+  let thunderRumbleBuffer: AudioBuffer | null = null;
+  let thunderCrackBuffer: AudioBuffer | null = null;
   let birdCallTimer = 0;
+  let weatherRainStrength = 0;
   let enabled = false;
   let radioDucking = false;
 
@@ -1990,6 +2104,22 @@ function createFlightAudio(): FlightAudio {
     windSource.connect(windFilter).connect(windGain).connect(master);
     windSource.start();
 
+    const rainSource = context.createBufferSource();
+    rainSource.buffer = makeNoise(context, 6.4, 0.79);
+    rainSource.loop = true;
+    const rainHighpass = context.createBiquadFilter();
+    rainHighpass.type = "highpass";
+    rainHighpass.frequency.value = 760;
+    rainHighpass.Q.value = 0.2;
+    const rainLowpass = context.createBiquadFilter();
+    rainLowpass.type = "lowpass";
+    rainLowpass.frequency.value = 4_600;
+    rainLowpass.Q.value = 0.28;
+    rainGain = context.createGain();
+    rainGain.gain.value = weatherRainStrength * 0.052;
+    rainSource.connect(rainHighpass).connect(rainLowpass).connect(rainGain).connect(master);
+    rainSource.start();
+
     const waterSource = context.createBufferSource();
     waterSource.buffer = makeNoise(context, 5.2, 0.91);
     waterSource.loop = true;
@@ -2049,6 +2179,8 @@ function createFlightAudio(): FlightAudio {
     breath.start();
 
     flapBuffer = makeNoise(context, 0.34, 0.68);
+    thunderRumbleBuffer = makeNoise(context, 6.5, 0.982);
+    thunderCrackBuffer = makeNoise(context, 0.72, 0.56);
   };
 
   const start = async () => {
@@ -2111,6 +2243,47 @@ function createFlightAudio(): FlightAudio {
       source.connect(filter).connect(gain).connect(master);
       source.start(now);
     },
+    thunder(strength, delay) {
+      if (!enabled || !context || !master || !thunderRumbleBuffer || !thunderCrackBuffer) return;
+      const amount = clamp(strength, 0.25, 1);
+      const startAt = context.currentTime + Math.max(0, delay);
+      const panner = context.createStereoPanner();
+      panner.pan.value = (Math.random() - 0.5) * 0.65;
+      panner.connect(master);
+
+      const crack = context.createBufferSource();
+      crack.buffer = thunderCrackBuffer;
+      crack.playbackRate.value = 0.82 + Math.random() * 0.2;
+      const crackFilter = context.createBiquadFilter();
+      crackFilter.type = "bandpass";
+      crackFilter.frequency.value = 1_150 + Math.random() * 480;
+      crackFilter.Q.value = 0.48;
+      const crackGain = context.createGain();
+      crackGain.gain.setValueAtTime(0.0001, startAt);
+      crackGain.gain.exponentialRampToValueAtTime(0.17 * amount, startAt + 0.018);
+      crackGain.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.62);
+      crack.connect(crackFilter).connect(crackGain).connect(panner);
+      crack.start(startAt);
+      crack.stop(startAt + 0.7);
+
+      const rumble = context.createBufferSource();
+      rumble.buffer = thunderRumbleBuffer;
+      rumble.playbackRate.value = 0.68 + Math.random() * 0.16;
+      const rumbleFilter = context.createBiquadFilter();
+      rumbleFilter.type = "lowpass";
+      rumbleFilter.frequency.setValueAtTime(260, startAt);
+      rumbleFilter.frequency.exponentialRampToValueAtTime(105, startAt + 5.8);
+      rumbleFilter.Q.value = 0.72;
+      const rumbleGain = context.createGain();
+      rumbleGain.gain.setValueAtTime(0.0001, startAt);
+      rumbleGain.gain.exponentialRampToValueAtTime(0.28 * amount, startAt + 0.18);
+      rumbleGain.gain.exponentialRampToValueAtTime(0.11 * amount, startAt + 1.6);
+      rumbleGain.gain.exponentialRampToValueAtTime(0.0001, startAt + 6.1);
+      rumble.connect(rumbleFilter).connect(rumbleGain).connect(panner);
+      rumble.onended = () => panner.disconnect();
+      rumble.start(startAt);
+      rumble.stop(startAt + 6.2);
+    },
     setFlight(speed, altitude) {
       if (!context || !windGain || !windFilter || !waterGain || !cityGain || !natureGain) return;
       const now = context.currentTime;
@@ -2120,6 +2293,17 @@ function createFlightAudio(): FlightAudio {
       waterGain.gain.setTargetAtTime(0.004 + nearness * 0.021, now, 0.7);
       cityGain.gain.setTargetAtTime(0.004 + nearness * 0.008, now, 0.8);
       natureGain.gain.setTargetAtTime(0.42 + nearness * 0.58, now, 1.1);
+    },
+    setWeather(mode, precipitation) {
+      weatherRainStrength = mode === "storm"
+        ? 1
+        : mode === "rain"
+          ? clamp(0.62 + precipitation * 0.12, 0.62, 0.94)
+          : mode === "drizzle"
+            ? 0.3
+            : 0;
+      if (!context || !rainGain) return;
+      rainGain.gain.setTargetAtTime(weatherRainStrength * 0.052, context.currentTime, 1.4);
     },
     setRadioDucking(active) {
       radioDucking = active;
@@ -4497,8 +4681,18 @@ export function BirdFlight() {
     crow.position.set(spawnWorld.x, spawnAlt, spawnWorld.y);
     scene.add(crow);
     const airflowVfx = createAirflowVfx(crow);
-    const weatherVfx = createWeatherVfx(scene, renderer, sky, hemisphere, sun, skyFill, reducedMotion);
+    const weatherVfx = createWeatherVfx(
+      scene,
+      renderer,
+      sky,
+      hemisphere,
+      sun,
+      skyFill,
+      reducedMotion,
+      (strength, delay) => flightAudio.thunder(strength, delay),
+    );
     weatherVfx.apply(DEFAULT_WEATHER);
+    flightAudio.setWeather(DEFAULT_WEATHER.mode, DEFAULT_WEATHER.precipitation);
     setSkyHourRef.current = (hour) => weatherVfx.setSkyHour(hour);
     // A shared link can pin the sky, so "look at Dhaka at golden hour" survives
     // being sent to someone in another timezone.
@@ -4514,6 +4708,7 @@ export function BirdFlight() {
         .then((snapshot) => {
           if (disposed || !["clear", "cloudy", "fog", "drizzle", "rain", "storm"].includes(snapshot.mode)) return;
           weatherVfx.apply(snapshot);
+          flightAudio.setWeather(snapshot.mode, snapshot.precipitation);
           setWeather(snapshot);
           setWeatherStatus("live");
         })

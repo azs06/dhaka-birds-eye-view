@@ -88,6 +88,11 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(component, /proceduralDistrictTiles/);
   assert.match(component, /createAirflowVfx/);
   assert.match(component, /createWeatherVfx/);
+  assert.match(component, /flightAudio\.thunder\(strength, delay\)/);
+  assert.match(component, /thunderWeather = mode === "rain" \|\| mode === "storm"/);
+  assert.match(component, /const droplets = new THREE\.Points/);
+  assert.match(component, /dataset\.rainDrops/);
+  assert.match(component, /setWeather\(snapshot\.mode, snapshot\.precipitation\)/);
   assert.match(component, /createFlightRadio/);
   assert.match(component, /scheduleBirdCall/);
   assert.match(component, /const leafRustle/);
