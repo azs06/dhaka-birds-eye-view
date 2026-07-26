@@ -5386,6 +5386,11 @@ export function BirdFlight() {
     flightActionsRef.current?.spawnAt(site.lat, site.lon, site.alt);
   }, []);
 
+  // The title ticker shows three-letter codes, so the full name of whichever one
+  // is armed has to be spelled out beside them. Null means the player has not
+  // picked yet and the crow is still on its default drift.
+  const activeLaunchSite = LAUNCH_SITES.find((site) => site.id === launchSiteId) ?? null;
+
   // Press-start, the way a title screen should answer. Enter or Space begins the
   // flight without reaching for the mouse; the focus guard keeps it from firing
   // twice when the BEGIN FLIGHT button itself already has focus.
@@ -5672,39 +5677,50 @@ export function BirdFlight() {
       )}
 
       {!flying && (
-        <section className="welcome-panel">
-          <span className="eyebrow">AN ILLUSTRATED FLIGHT THROUGH THE RIVER CITY</span>
-          <h1>The sky<br />belongs to you.</h1>
-          <p>Cross Greater Dhaka from Uttara and Mirpur to Old Dhaka, Keraniganj, Demra, and Purbachal—following the Buriganga, Turag, Balu, Shitalakshya, and the lakes between them.</p>
-          <div className="launch-select">
-            <span className="launch-label">LAUNCH SITE</span>
-            <div className="launch-options" role="group" aria-label="Choose a launch site">
+        <section className="title-screen" aria-label="Title screen">
+          {/* The scrim is the only opaque thing on the title screen: it darkens
+              the bottom of the city just enough to carry text, so the attract-mode
+              flyover stays the hero instead of being covered by a panel. */}
+          <div className="title-scrim" aria-hidden="true" />
+          <div className="title-lower">
+            <span className="title-kicker">AN ILLUSTRATED FLIGHT THROUGH THE RIVER CITY</span>
+            <h1 className="title-wordmark">The <em>sky</em> belongs to you.</h1>
+            <div className="title-rule" aria-hidden="true" />
+            <p className="title-meta">
+              <span>Greater Dhaka</span>
+              <span>{DHAKA_LANDMARKS.length} landmarks</span>
+              <span>24 km of city</span>
+              <span>{skyPresetId === "live" ? "live" : skyPresetId} sky</span>
+            </p>
+            <div className="launch-ticker" role="group" aria-label="Choose a launch site">
+              <span className="launch-ticker-label">Launch</span>
+              <span className="launch-ticker-arrow" aria-hidden="true">‹</span>
               {LAUNCH_SITES.map((site) => (
                 <button
                   key={site.id}
                   type="button"
-                  className={`launch-option${launchSiteId === site.id ? " active" : ""}`}
+                  className={`launch-code${launchSiteId === site.id ? " active" : ""}`}
                   aria-pressed={launchSiteId === site.id}
+                  aria-label={`Launch from ${site.label}`}
                   onClick={() => chooseLaunchSite(site)}
                 >
-                  <b>{site.short}</b><span>{site.label}</span>
+                  {site.short}
                 </button>
               ))}
+              <span className="launch-ticker-arrow" aria-hidden="true">›</span>
+              <span className="launch-ticker-name">{activeLaunchSite?.label ?? "Open sky over the basin"}</span>
+            </div>
+            <button onClick={beginFlight} className="title-start">
+              <b aria-hidden="true">▸</b>
+              <span>{touchDevice ? "TAP TO FLY" : "PRESS ENTER TO FLY"}</span>
+            </button>
+            <div className={`title-load ${mapStatus}`} role="status">
+              <i />{mapStatus === "live" ? "CITY LOADED · OSM + SIM TRAFFIC" : mapStatus === "loading" ? "BUILDING DHAKA FROM OPENSTREETMAP…" : "FLYING THE BUNDLED MAP SNAPSHOT"}
             </div>
           </div>
-          <button onClick={beginFlight} className="primary-button"><span>BEGIN FLIGHT</span><b>→</b></button>
-          {!touchDevice && <p className="press-start" aria-hidden="true">OR PRESS <kbd>ENTER</kbd></p>}
-          <div className="title-stats">
-            <div><b>{DHAKA_LANDMARKS.length}</b><small>LANDMARKS</small></div>
-            <div><b>24</b><small>KM OF CITY</small></div>
-            <div><b>{skyPresetId === "live" ? "LIVE" : skyPresetId.toUpperCase()}</b><small>SKY</small></div>
-          </div>
-          <div className={`title-load ${mapStatus}`} role="status">
-            <i />{mapStatus === "live" ? "CITY LOADED · OSM + SIM TRAFFIC" : mapStatus === "loading" ? "BUILDING DHAKA FROM OPENSTREETMAP…" : "FLYING THE BUNDLED MAP SNAPSHOT"}
-          </div>
-          <div className="quick-controls">
+          <div className="title-controls" aria-hidden="true">
             {touchDevice
-              ? <><span>DRAG THE PAD TO STEER</span><span>TAP FLAP FOR LIFT</span><span>HOLD BOOST TO SURGE</span></>
+              ? <><span>DRAG TO STEER</span><span>TAP FLAP</span><span>HOLD BOOST</span></>
               : <><span><kbd>WASD</kbd> STEER</span><span><kbd>CTRL / Q</kbd> BRAKE</span><span><kbd>SPACE</kbd> FLAP</span><span><kbd>E</kbd> LAND</span></>}
           </div>
         </section>

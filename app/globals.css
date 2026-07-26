@@ -10,11 +10,11 @@ button { font: inherit; }
    folk-art cards. */
 :focus-visible { outline: 2px solid var(--acid); outline-offset: 2px; box-shadow: 0 0 0 4px rgba(29,53,48,.65); }
 .visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
-.welcome-panel :focus-visible, .location:focus-visible { outline-color: var(--magenta); box-shadow: 0 0 0 4px rgba(255,240,196,.75); }
+.location:focus-visible { outline-color: var(--magenta); box-shadow: 0 0 0 4px rgba(255,240,196,.75); }
 /* touch-action: none stops the browser hijacking a drag on the steering pad as a
    page pan, but it inherits, so scrollable panels and real text have to opt back in. */
 .flight-shell { position: fixed; inset: 0; width: 100%; height: 100%; overflow: hidden; isolation: isolate; touch-action: none; -webkit-user-select: none; user-select: none; }
-.radio-panel, .sky-panel, .controls-panel, .pause-overlay, .welcome-panel { touch-action: pan-y; }
+.radio-panel, .sky-panel, .controls-panel, .pause-overlay, .title-screen { touch-action: pan-y; }
 .share-fallback input, .radio-display, .map-source { -webkit-user-select: text; user-select: text; }
 .flight-shell::before { content: ""; position: absolute; z-index: 2; inset: 0; pointer-events: none; opacity: .26; background-image: repeating-linear-gradient(7deg, rgba(69,53,34,.08) 0 1px, transparent 1px 5px), radial-gradient(circle at 22% 31%, rgba(255,240,196,.2), transparent 28%), radial-gradient(circle at 76% 68%, rgba(124,50,59,.12), transparent 24%); mix-blend-mode: soft-light; }
 .world { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
@@ -92,39 +92,50 @@ button { font: inherit; }
 .radio-now-playing.error i { background: #efa67f; }
 .radio-now-playing span { color: var(--acid); font: 700 7px var(--font-mono); letter-spacing: .13em; }
 .radio-now-playing b { font-size: 10px; font-weight: 600; }
-.welcome-panel { position: absolute; z-index: 3; left: clamp(30px, 6vw, 104px); top: 52%; width: min(570px, 48vw); padding: 36px 42px 34px; transform: translateY(-50%) rotate(-.4deg); color: var(--ink); background: linear-gradient(135deg, rgba(255,240,196,.96), rgba(239,207,143,.94)); border: 3px solid var(--ink); box-shadow: 10px 10px 0 var(--vermillion), 16px 16px 0 rgba(29,53,48,.82); text-shadow: none; }
-.welcome-panel::before, .welcome-panel::after { content: ""; position: absolute; width: 54px; height: 15px; border-block: 5px solid var(--magenta); background: repeating-linear-gradient(90deg, var(--acid) 0 7px, var(--river) 7px 14px); }
-.welcome-panel::before { top: 17px; right: 19px; transform: rotate(2deg); }
-.welcome-panel::after { left: 18px; bottom: 16px; transform: rotate(-2deg); }
-.welcome-panel .eyebrow { margin-bottom: 16px; color: var(--magenta); opacity: 1; font-weight: 700; }
-.welcome-panel h1 { margin: 0; max-width: 520px; color: var(--ink); font-size: clamp(58px, 6.4vw, 102px); line-height: .84; letter-spacing: -.07em; font-weight: 800; -webkit-text-stroke: 1px rgba(29,53,48,.35); text-shadow: 3px 3px 0 var(--acid); }
-.welcome-panel p { width: min(460px, 100%); margin: 25px 0 27px; color: #334a40; font-size: 15px; line-height: 1.55; text-shadow: none; }
 .primary-button { display: inline-flex; align-items: center; gap: 38px; padding: 15px 16px 15px 21px; border: 2px solid var(--ink); background: var(--acid); color: var(--ink); cursor: pointer; font: 700 11px var(--font-mono); letter-spacing: .13em; box-shadow: 5px 5px 0 var(--magenta); transition: transform .2s ease, box-shadow .2s ease; }
 .primary-button b { display: grid; place-items: center; width: 28px; height: 28px; border: 1px solid rgba(16,36,31,.35); font-size: 17px; }
 .primary-button:hover { transform: translate(-2px, -2px); box-shadow: 8px 8px 0 var(--magenta); }
-.quick-controls { display: flex; gap: 18px; margin-top: 22px; font: 500 8px var(--font-mono); letter-spacing: .12em; }
-/* Title screen furniture. Same riso-poster identity as the rest of the HUD, but
-   arranged the way an attract screen is: pick a launch site, press start, and a
-   build-status line so the map load is something you watch rather than wait out. */
-.launch-select { margin: 24px 0 22px; }
-.launch-label { display: block; margin-bottom: 9px; color: var(--magenta); font: 700 8px var(--font-mono); letter-spacing: .17em; }
-.launch-options { display: flex; flex-wrap: wrap; gap: 7px; }
-.launch-option { display: grid; gap: 3px; padding: 8px 11px; border: 2px solid var(--ink); background: rgba(255,240,196,.55); color: var(--ink); cursor: pointer; text-align: left; transition: transform .15s ease, box-shadow .15s ease, background .15s ease; }
-.launch-option b { font: 700 10px var(--font-mono); letter-spacing: .1em; }
-.launch-option span { font: 500 8px var(--font-mono); letter-spacing: .07em; opacity: .68; }
-.launch-option:hover { transform: translate(-1px, -1px); box-shadow: 3px 3px 0 var(--river); }
-.launch-option.active { background: var(--acid); box-shadow: 4px 4px 0 var(--magenta); }
-.press-start { margin: 12px 0 0; color: #4a6157; font: 700 8px var(--font-mono); letter-spacing: .19em; animation: press-start-blink 1.5s steps(1, end) infinite; }
-.press-start kbd { border-color: rgba(29,53,48,.4); background: rgba(29,53,48,.1); color: var(--ink); }
-@keyframes press-start-blink { 50% { opacity: .24; } }
-.title-stats { display: flex; gap: 22px; margin-top: 21px; padding-top: 16px; border-top: 2px solid rgba(29,53,48,.2); }
-.title-stats div { display: grid; gap: 3px; }
-.title-stats b { color: var(--ink); font: 700 20px var(--font-mono); line-height: 1; }
-.title-stats small { color: #4a6157; font: 600 7px var(--font-mono); letter-spacing: .13em; }
-.title-load { display: flex; align-items: center; gap: 8px; margin-top: 14px; color: #4a6157; font: 600 8px var(--font-mono); letter-spacing: .12em; }
-.title-load i { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--leaf); }
-.title-load.loading i { background: var(--vermillion); animation: title-load-pulse 1.05s ease-in-out infinite; }
-.title-load.fallback i { background: var(--magenta); }
+
+/* Title screen. This is a cinematic opener, not a poster: the city keeps the
+   whole frame and the only opaque element is a bottom scrim dark enough to carry
+   type. Everything stacks upward from the bottom edge (justify-content: flex-end),
+   so no amount of furniture can push the start prompt off a short viewport. */
+.title-screen { position: absolute; z-index: 3; inset: 0; display: flex; flex-direction: column; justify-content: flex-end; padding: 0 clamp(24px, 5.4vw, 96px) clamp(26px, 3.6vh, 42px); overflow: hidden; pointer-events: none; }
+.title-scrim { position: absolute; inset: 0; background: linear-gradient(0deg, rgba(4,17,15,.94) 0%, rgba(4,17,15,.84) 20%, rgba(4,17,15,.46) 43%, rgba(4,17,15,.12) 60%, transparent 72%); }
+.title-lower { position: relative; display: grid; justify-items: start; max-width: 780px; pointer-events: auto; }
+.title-kicker { color: var(--acid); font: 700 9px/1.3 var(--font-mono); letter-spacing: .32em; text-transform: uppercase; opacity: .88; }
+/* min(vw, vh) keeps the wordmark from swallowing the screen on short laptops —
+   pure vw sizing is what used to push the panel off the bottom edge. */
+.title-wordmark { margin: 15px 0 0; max-width: 20ch; color: var(--cream); font-size: clamp(34px, min(5.6vw, 10vh), 84px); line-height: .92; letter-spacing: -.035em; font-weight: 800; text-transform: uppercase; text-wrap: balance; text-shadow: 0 6px 40px rgba(2,12,10,.9), 0 2px 4px rgba(2,12,10,.7); }
+.title-wordmark em { font-style: normal; color: var(--acid); }
+.title-rule { width: clamp(170px, 24vw, 340px); height: 4px; margin-top: clamp(14px, 2.2vh, 22px); background: linear-gradient(90deg, var(--acid), var(--magenta) 58%, transparent); }
+.title-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 15px; margin: clamp(12px, 1.8vh, 18px) 0 0; color: rgba(255,240,196,.76); font: 500 11px/1.5 var(--font-mono); letter-spacing: .11em; text-transform: uppercase; }
+.title-meta span + span::before { content: "·"; margin-right: 15px; color: var(--river); }
+.launch-ticker { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; margin-top: clamp(16px, 2.6vh, 26px); }
+.launch-ticker-label { color: var(--magenta); font: 700 9px var(--font-mono); letter-spacing: .24em; text-transform: uppercase; }
+.launch-ticker-arrow { color: rgba(255,240,196,.3); font-size: 15px; line-height: 1; }
+/* Three-letter codes, not name cards: the old full-width buttons were what broke
+   out of the panel edge, and a ticker of codes cannot outgrow its row. */
+.launch-code { padding: 7px 11px; border: 1px solid rgba(255,240,196,.22); background: rgba(5,20,17,.46); color: rgba(255,240,196,.72); cursor: pointer; font: 700 11px var(--font-mono); letter-spacing: .14em; transition: color .18s ease, border-color .18s ease, background .18s ease; }
+.launch-code:hover { color: var(--cream); border-color: rgba(255,240,196,.52); background: rgba(255,240,196,.08); }
+.launch-code.active { color: var(--ink); background: var(--acid); border-color: var(--acid); box-shadow: 0 0 24px rgba(245,214,90,.34); }
+.launch-ticker-name { color: rgba(255,240,196,.58); font: 500 11px var(--font-mono); letter-spacing: .1em; }
+/* The start prompt is the single loudest thing on screen — the old BEGIN FLIGHT
+   button was 11px, smaller than the stat numbers beside it, so the eye never
+   found it. Size, glow, and the ring pulse all exist to fix that hierarchy. */
+.title-start { display: inline-flex; align-items: center; gap: 14px; margin-top: clamp(20px, 3.2vh, 32px); padding: 15px 30px 15px 22px; border: 2px solid var(--acid); background: rgba(245,214,90,.1); color: var(--acid); cursor: pointer; font: 700 clamp(12px, 1.2vw, 15px) var(--font-mono); letter-spacing: .22em; animation: title-start-pulse 2.6s ease-out infinite; transition: color .2s ease, background .2s ease, transform .2s ease; }
+.title-start b { font-size: 17px; line-height: 1; }
+.title-start:hover { transform: translateY(-2px); background: var(--acid); color: var(--ink); }
+@keyframes title-start-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(245,214,90,.34); }
+  70% { box-shadow: 0 0 0 18px rgba(245,214,90,0); }
+  100% { box-shadow: 0 0 0 0 rgba(245,214,90,0); }
+}
+.title-controls { position: relative; display: flex; flex-wrap: wrap; gap: 6px 20px; margin-top: clamp(18px, 2.6vh, 28px); color: rgba(255,240,196,.42); font: 500 9px var(--font-mono); letter-spacing: .14em; pointer-events: auto; }
+.title-load { display: flex; align-items: center; gap: 9px; margin-top: clamp(14px, 2.2vh, 22px); color: rgba(255,240,196,.55); font: 600 9px var(--font-mono); letter-spacing: .14em; }
+.title-load i { flex: none; width: 7px; height: 7px; border-radius: 50%; background: #6fce8a; }
+.title-load.loading i { background: var(--acid); animation: title-load-pulse 1.05s ease-in-out infinite; }
+.title-load.fallback i { background: var(--vermillion); }
 @keyframes title-load-pulse { 50% { opacity: .25; transform: scale(.6); } }
 kbd { display: inline-grid; min-width: 23px; height: 22px; padding: 0 5px; place-items: center; margin-right: 5px; border: 1px solid rgba(241,235,216,.35); background: rgba(10,28,23,.42); color: var(--cream); font: 500 9px var(--font-mono); box-shadow: none; }
 .telemetry { position: absolute; z-index: 3; left: 50%; bottom: 34px; transform: translateX(-50%); display: flex; align-items: center; padding: 12px 22px; background: var(--glass); border: 2px solid rgba(255,240,196,.65); box-shadow: 4px 4px 0 rgba(189,63,112,.72); backdrop-filter: blur(12px); }
@@ -192,7 +203,10 @@ kbd { display: inline-grid; min-width: 23px; height: 22px; padding: 0 5px; place
 .map-source.live i { background: var(--acid); box-shadow: 0 0 5px rgba(216,255,98,.55); }
 .map-source a { color: inherit; text-decoration: none; }
 .map-source a:hover { color: var(--cream); text-decoration: underline; }
-.folk-river-seal { position: absolute; z-index: 3; right: clamp(90px, 10vw, 180px); top: 52%; width: 236px; height: 236px; display: grid; align-content: center; justify-items: center; padding: 40px 25px 30px; transform: translateY(-50%) rotate(3deg); border: 6px solid var(--cream); border-radius: 50%; color: var(--cream); background: radial-gradient(circle at 50% 34%, var(--acid) 0 13%, transparent 13.5%), repeating-conic-gradient(from 7deg, var(--vermillion) 0 12deg, #bf4770 12deg 24deg, #f0aa47 24deg 36deg, #2f9eaa 36deg 48deg); box-shadow: 0 0 0 7px var(--ink), 12px 14px 0 rgba(29,53,48,.56); text-align: center; pointer-events: none; overflow: hidden; }
+/* Shrunk and lifted clear of the lower third: at full size it read as a second
+   headline competing with the wordmark. It is a studio mark now, not a poster
+   element, so it scales as a unit rather than being re-measured piece by piece. */
+.folk-river-seal { position: absolute; z-index: 3; right: clamp(48px, 7vw, 132px); top: 40%; width: 236px; height: 236px; display: grid; align-content: center; justify-items: center; padding: 40px 25px 30px; transform: translateY(-50%) rotate(3deg) scale(.7); transform-origin: 100% 50%; opacity: .9; border: 6px solid var(--cream); border-radius: 50%; color: var(--cream); background: radial-gradient(circle at 50% 34%, var(--acid) 0 13%, transparent 13.5%), repeating-conic-gradient(from 7deg, var(--vermillion) 0 12deg, #bf4770 12deg 24deg, #f0aa47 24deg 36deg, #2f9eaa 36deg 48deg); box-shadow: 0 0 0 7px var(--ink), 12px 14px 0 rgba(29,53,48,.56); text-align: center; pointer-events: none; overflow: hidden; }
 .folk-river-seal::before { content: ""; position: absolute; inset: 21px; border: 4px double var(--cream); border-radius: inherit; background: rgba(29,53,48,.8); }
 .folk-river-seal strong, .folk-river-seal small { position: relative; z-index: 2; }
 .folk-river-seal strong { margin-top: 34px; font-family: sans-serif; font-size: 31px; line-height: 1; letter-spacing: .02em; }
@@ -247,9 +261,13 @@ kbd { display: inline-grid; min-width: 23px; height: 22px; padding: 0 5px; place
   .topbar { grid-template-columns: 1fr auto; }
   .weather-flight { left: 18px; top: 50px; transform: none; }
   .weather-flight span, .weather-flight i { display: none; }
-  .welcome-panel { left: 24px; width: calc(100vw - 48px); padding: 29px 27px 28px; }
-  .welcome-panel h1 { font-size: clamp(52px, 15vw, 82px); }
-  .quick-controls { flex-wrap: wrap; gap: 10px 14px; margin-top: 19px; }
+  .title-screen { padding: 0 20px 22px; }
+  /* .32em tracking is a wide-screen luxury; at phone widths it pushed the kicker
+     onto a second line and broke the run-in to the wordmark. */
+  .title-kicker { font-size: 8px; letter-spacing: .18em; }
+  .title-wordmark { max-width: 100%; font-size: clamp(32px, min(11vw, 9vh), 58px); }
+  .title-meta { font-size: 10px; }
+  .title-controls { gap: 5px 14px; }
   /* The bottom edge now belongs to the thumb controls, so the readouts sit
      above them instead of underneath. */
   .telemetry { left: 50%; bottom: 178px; max-width: calc(100vw - 28px); padding: 8px 12px; transform: translateX(-50%); }
@@ -301,29 +319,25 @@ kbd { display: inline-grid; min-width: 23px; height: 22px; padding: 0 5px; place
 @media (min-width: 901px) and (max-width: 1180px) { .folk-river-seal { right: 54px; width: 190px; height: 190px; } }
 
 @media (prefers-reduced-motion: reduce) {
-  .primary-button, .flight-dynamics, .launch-option { transition: none; }
-  .perch-prompt[data-state="commit"], .press-start, .title-load.loading i { animation: none; }
+  .primary-button, .flight-dynamics, .launch-code, .title-start { transition: none; }
+  .perch-prompt[data-state="commit"], .title-start, .title-load.loading i { animation: none; }
+  /* The pulse ring carried the start prompt's emphasis, so a static ring stands
+     in for it rather than leaving the button flat. */
+  .title-start { box-shadow: 0 0 0 4px rgba(245,214,90,.18); }
 }
 
-/* The title panel carries a lot more furniture than it used to, so it has to
-   give ground on short viewports rather than run off the bottom of the screen. */
-@media (max-height: 780px) {
-  /* Bottom padding stays clear of the decorative ribbon pinned at bottom: 16px,
-     or the control chips collide with it. */
-  .welcome-panel { padding: 26px 32px 36px; }
-  .welcome-panel h1 { font-size: clamp(42px, 4.8vw, 68px); }
-  .welcome-panel p { margin: 18px 0 0; font-size: 14px; }
-  .launch-select { margin: 18px 0 16px; }
-  .title-stats { margin-top: 15px; padding-top: 12px; }
-  .title-load, .quick-controls { margin-top: 11px; }
-}
-
+/* The lower third stacks up from the bottom edge, so it can never be cut off —
+   but on short viewports it can still climb far enough to cover the skyline.
+   These steps trade type size for headroom so the city stays the subject. */
 @media (max-height: 680px) {
-  .welcome-panel h1 { font-size: clamp(34px, 4.2vw, 54px); }
-  .welcome-panel p { margin-top: 14px; line-height: 1.45; }
-  .launch-select { margin: 14px 0 13px; }
-  .launch-option { padding: 6px 9px; }
-  .press-start { margin-top: 9px; }
-  .title-stats { margin-top: 12px; padding-top: 10px; }
-  .title-stats b { font-size: 17px; }
+  .title-wordmark { font-size: clamp(28px, min(4.6vw, 8.5vh), 52px); }
+  .title-rule { height: 3px; }
+  .title-meta { font-size: 10px; }
+  .title-start { padding: 11px 22px 11px 17px; }
+  .title-controls { display: none; }
+}
+
+@media (max-height: 560px) {
+  .title-kicker, .title-rule, .title-load { display: none; }
+  .title-wordmark { margin-top: 0; font-size: clamp(24px, 6vh, 38px); }
 }

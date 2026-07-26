@@ -226,7 +226,10 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(component, /if \(!flyingRef\.current\) \{/);
   assert.match(component, /const LAUNCH_SITES = \[/);
   assert.match(component, /event\.code !== "Enter" && event\.code !== "Space"/);
-  assert.match(component, /className="launch-option/);
+  assert.match(component, /className={`launch-code/);
+  // The lower third is a scrim over the live city, not an opaque panel over it.
+  assert.match(component, /className="title-scrim"/);
+  assert.match(component, /"TAP TO FLY" : "PRESS ENTER TO FLY"/);
 
   // Keyboard fixes: focused controls keep their own keys, and Escape dismisses
   // the topmost layer before it doubles as the pause key.
