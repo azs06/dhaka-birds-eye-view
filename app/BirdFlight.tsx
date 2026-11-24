@@ -242,6 +242,11 @@ const TRAFFIC_MAX_CATCH_UP_STEPS = 2;
 // is pure waste, but the crow and the streaming district tiles do move, so this
 // trades a twelfth of the shadow-pass cost for a shadow that still tracks.
 const SHADOW_REFRESH_FRAMES = 12;
+// Frame pacing: 60 fps in flight, a slow tick while paused, and a reduced rate
+// when the window is visible but another app has focus.
+const ACTIVE_FRAME_MS = 1000 / 60;
+const UNFOCUSED_FRAME_MS = 1000 / 24;
+const PAUSED_FRAME_MS = 1000 / 10;
 // The rain streaks use the raw wind vector; the bird uses a fraction of it so a
 // stiff Dhaka breeze is a drift you correct for, never a fight you cannot win.
 const WIND_DRIFT_SCALE = 0.34;
@@ -2550,15 +2555,46 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
   const whiteStone = new THREE.MeshStandardMaterial({ color: 0xf0eee6, roughness: 0.76 });
   const brick = new THREE.MeshStandardMaterial({ color: 0x9f5946, roughness: 0.87 });
   const redBrick = new THREE.MeshStandardMaterial({ color: 0xa34c39, roughness: 0.9 });
-  const pinkPlaster = new THREE.MeshStandardMaterial({ color: 0xd47a88, roughness: 0.8 });
-  const glass = new THREE.MeshPhysicalMaterial({ color: 0x537f88, roughness: 0.2, metalness: 0.16, clearcoat: 0.45 });
-  const darkGlass = new THREE.MeshStandardMaterial({ color: 0x294b54, roughness: 0.2, metalness: 0.26 });
-  const roof = new THREE.MeshStandardMaterial({ color: 0x596462, roughness: 0.78, metalness: 0.12 });
+  const glass = applyNightWindows(new THREE.MeshPhysicalMaterial({ color: 0x537f88, roughness: 0.2, metalness: 0.16, clearcoat: 0.45 }), 0.62);
+  const darkGlass = applyNightWindows(new THREE.MeshStandardMaterial({ color: 0x294b54, roughness: 0.2, metalness: 0.26 }), 0.6);
   const recess = new THREE.MeshStandardMaterial({ color: 0x202625, roughness: 0.98 });
   const accent = new THREE.MeshStandardMaterial({ color: 0xcaa24c, roughness: 0.56, metalness: 0.22 });
   const lawn = new THREE.MeshStandardMaterial({ color: 0x688652, roughness: 1 });
   const water = new THREE.MeshPhysicalMaterial({ color: 0x407e8a, roughness: 0.2, metalness: 0.04, clearcoat: 0.7 });
   const monumentRed = new THREE.MeshStandardMaterial({ color: 0xb92d32, roughness: 0.76 });
+  const marble = new THREE.MeshStandardMaterial({ color: 0xf5f2ea, roughness: 0.58 });
+  const terracotta = new THREE.MeshStandardMaterial({ color: 0xa9604b, roughness: 0.94 });
+  const plazaBrick = new THREE.MeshStandardMaterial({ color: 0x8f4a3a, roughness: 0.96 });
+  const deepBrick = new THREE.MeshStandardMaterial({ color: 0x9a3f31, roughness: 0.9 });
+  const brickTrim = new THREE.MeshStandardMaterial({ color: 0xc27a62, roughness: 0.86 });
+  const bronze = new THREE.MeshStandardMaterial({ color: 0x6f6a5c, roughness: 0.5, metalness: 0.45 });
+  const cream = new THREE.MeshStandardMaterial({ color: 0xefe6cf, roughness: 0.82 });
+  const peach = new THREE.MeshStandardMaterial({ color: 0xe6b497, roughness: 0.86 });
+  const tileRoof = new THREE.MeshStandardMaterial({ color: 0x9c4f3c, roughness: 0.9 });
+  const salmon = new THREE.MeshStandardMaterial({ color: 0xdf9184, roughness: 0.84 });
+  const salmonTrim = new THREE.MeshStandardMaterial({ color: 0xf4d6cb, roughness: 0.78 });
+  const roofTerrace = new THREE.MeshStandardMaterial({ color: 0xb59c90, roughness: 0.95 });
+  const stoneStep = new THREE.MeshStandardMaterial({ color: 0x8d7868, roughness: 0.93 });
+  const silverPanel = new THREE.MeshStandardMaterial({ color: 0xcdd2d4, roughness: 0.46, metalness: 0.32 });
+  const roofGrey = new THREE.MeshStandardMaterial({ color: 0x858c8a, roughness: 0.9 });
+  const plantGrey = new THREE.MeshStandardMaterial({ color: 0xa9adab, roughness: 0.7, metalness: 0.2 });
+  // Materials that glow after dark share the city's night-window uniform, so
+  // landmark openings come on with the rest of the skyline.
+  const nightLit = <T extends THREE.MeshStandardMaterial>(material: T, strength: number, tint = 0xffc27a) => {
+    const tintUniform = { value: new THREE.Color(tint).multiplyScalar(strength) };
+    material.onBeforeCompile = (shader) => {
+      shader.uniforms.bevNightGlow = NIGHT_WINDOW_GLOW;
+      shader.uniforms.bevLitTint = tintUniform;
+      shader.fragmentShader = shader.fragmentShader
+        .replace("#include <common>", "#include <common>\nuniform float bevNightGlow;\nuniform vec3 bevLitTint;")
+        .replace("#include <emissivemap_fragment>", "#include <emissivemap_fragment>\ntotalEmissiveRadiance += bevLitTint * bevNightGlow;");
+    };
+    material.customProgramCacheKey = () => `bev-night-lit-${tint}-${strength}`;
+    return material;
+  };
+  const archDark = nightLit(new THREE.MeshStandardMaterial({ color: 0x3d2a22, roughness: 0.9 }), 0.55);
+  const ribbonGlass = nightLit(new THREE.MeshStandardMaterial({ color: 0x24434c, roughness: 0.22, metalness: 0.3 }), 0.34, 0xffd9a0);
+  const atriumGlass = nightLit(new THREE.MeshPhysicalMaterial({ color: 0x4f9aa6, roughness: 0.16, metalness: 0.2, clearcoat: 0.6 }), 0.3, 0xfff0c8);
   const unitBox = new THREE.BoxGeometry(1, 1, 1);
 
   const addBox = (
@@ -2593,67 +2629,242 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
     return mesh;
   };
 
-  const addDome = (
+  const addCone = (
     parent: THREE.Object3D,
     radius: number,
+    height: number,
     position: [number, number, number],
     material: THREE.Material,
+    segments = 8,
   ) => {
-    const mesh = new THREE.Mesh(new THREE.SphereGeometry(radius, 24, 12, 0, Math.PI * 2, 0, Math.PI / 2), material);
+    const mesh = new THREE.Mesh(new THREE.ConeGeometry(radius, height, segments), material);
     mesh.position.set(...position);
     mesh.castShadow = true;
     parent.add(mesh);
     return mesh;
   };
 
-  // Voxel relief: a pixel-art elevation (strings of palette chars, "." = empty)
-  // extruded `depth` voxels and rendered as one InstancedMesh per material.
-  // `position` is the centre of the grid's bottom edge.
-  const addVoxelRelief = (
+  // A dome turned from a profile of [radius, height] pairs. `flat` gives faceted
+  // (octagonal, ribbed) domes instead of a smooth shell.
+  const addLathe = (
     parent: THREE.Object3D,
-    rows: string[],
-    palette: Record<string, THREE.Material>,
-    voxel: number,
+    profile: Array<[number, number]>,
+    segments: number,
     position: [number, number, number],
-    options?: { depth?: number; rotationY?: number; leanX?: number },
+    material: THREE.Material,
+    flat = false,
   ) => {
-    const group = new THREE.Group();
-    group.position.set(...position);
-    if (options?.rotationY) group.rotation.y = options.rotationY;
-    if (options?.leanX) group.rotation.x = options.leanX;
-    const depth = options?.depth ?? 1;
-    const gridWidth = rows[0].length;
-    const counts = new Map<string, number>();
-    for (const row of rows) for (const cell of row) if (cell !== ".") counts.set(cell, (counts.get(cell) ?? 0) + depth);
-    const matrix = new THREE.Matrix4();
-    const quaternion = new THREE.Quaternion();
-    const scale = new THREE.Vector3(voxel, voxel, voxel);
-    const voxelPosition = new THREE.Vector3();
-    for (const [cell, count] of counts) {
-      const material = palette[cell];
-      if (!material) continue;
-      const instanced = new THREE.InstancedMesh(unitBox, material, count);
-      instanced.castShadow = true;
-      instanced.receiveShadow = true;
-      let index = 0;
-      rows.forEach((row, rowIndex) => {
-        for (let column = 0; column < row.length; column++) {
-          if (row[column] !== cell) continue;
-          for (let layer = 0; layer < depth; layer++) {
-            voxelPosition.set(
-              (column - (gridWidth - 1) / 2) * voxel,
-              (rows.length - 1 - rowIndex) * voxel + voxel / 2,
-              (layer - (depth - 1) / 2) * voxel,
-            );
-            matrix.compose(voxelPosition, quaternion, scale);
-            instanced.setMatrixAt(index++, matrix);
-          }
-        }
-      });
-      group.add(instanced);
+    let geometry: THREE.BufferGeometry = new THREE.LatheGeometry(profile.map(([r, y]) => new THREE.Vector2(r, y)), segments);
+    if (flat) {
+      geometry = geometry.toNonIndexed();
+      geometry.computeVertexNormals();
     }
-    parent.add(group);
-    return group;
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.position.set(...position);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    parent.add(mesh);
+    return mesh;
+  };
+  // Profile for a masonry dome: `bulge` > 0 swells it past its springing line
+  // (Mughal and Indo-Saracenic domes), and the tip is drawn up into a point.
+  const domeProfile = (radius: number, height: number, bulge = 0, steps = 12) => {
+    const profile: Array<[number, number]> = [];
+    for (let step = 0; step <= steps; step++) {
+      const t = step / steps;
+      const angle = t * Math.PI / 2;
+      const swell = 1 + bulge * Math.sin(Math.min(1, t * 2.2) * Math.PI);
+      profile.push([Math.max(0.001, radius * Math.cos(angle) * swell), height * (Math.sin(angle) * 0.86 + t * t * 0.14)]);
+    }
+    return profile;
+  };
+  const addFinial = (parent: THREE.Object3D, position: [number, number, number], size = 1, material: THREE.Material = accent) => {
+    const [x, y, z] = position;
+    const ball = new THREE.Mesh(new THREE.SphereGeometry(0.55 * size, 8, 6), material);
+    ball.position.set(x, y + 0.5 * size, z);
+    parent.add(ball);
+    addCone(parent, 0.22 * size, 2.6 * size, [x, y + 2.1 * size, z], material, 6);
+  };
+
+  // Flat facade openings. Each is drawn in the XY plane with its origin at the
+  // bottom centre, and faces +Z until a wall edge turns it.
+  const shapeGeometry = (shape: THREE.Shape, segments = 10) => new THREE.ShapeGeometry(shape, segments);
+  const roundArch = (width: number, height: number) => {
+    const half = width / 2;
+    const shape = new THREE.Shape();
+    shape.moveTo(-half, 0);
+    shape.lineTo(half, 0);
+    shape.lineTo(half, height - half);
+    shape.absarc(0, height - half, half, 0, Math.PI, false);
+    shape.lineTo(-half, 0);
+    return shapeGeometry(shape);
+  };
+  const pointedArch = (width: number, height: number) => {
+    const half = width / 2;
+    const spring = height - width * 0.72;
+    const shape = new THREE.Shape();
+    shape.moveTo(-half, 0);
+    shape.lineTo(half, 0);
+    shape.lineTo(half, spring);
+    shape.quadraticCurveTo(half, height - width * 0.2, 0, height);
+    shape.quadraticCurveTo(-half, height - width * 0.2, -half, spring);
+    shape.lineTo(-half, 0);
+    return shapeGeometry(shape);
+  };
+  const rectPane = (width: number, height: number) => {
+    const geometry = new THREE.PlaneGeometry(width, height);
+    geometry.translate(0, height / 2, 0);
+    return geometry;
+  };
+  const discPane = (radius: number, segments = 36) => {
+    const geometry = new THREE.CircleGeometry(radius, segments);
+    geometry.translate(0, radius, 0);
+    return geometry;
+  };
+  const trianglePane = (width: number, height: number) => {
+    const shape = new THREE.Shape();
+    shape.moveTo(-width / 2, 0);
+    shape.lineTo(width / 2, 0);
+    shape.lineTo(0, height);
+    shape.lineTo(-width / 2, 0);
+    return shapeGeometry(shape, 1);
+  };
+
+  type WallEdge = { ax: number; az: number; dx: number; dz: number; nx: number; nz: number; length: number; rotationY: number };
+  // Every wall of an outline, with the normal that points away from the building.
+  const wallEdges = (points: MapPoint[]): WallEdge[] => {
+    let area = 0;
+    for (let index = 0; index < points.length; index++) {
+      const [ax, az] = points[index];
+      const [bx, bz] = points[(index + 1) % points.length];
+      area += ax * bz - bx * az;
+    }
+    const edges: WallEdge[] = [];
+    for (let index = 0; index < points.length; index++) {
+      const [ax, az] = points[index];
+      const [bx, bz] = points[(index + 1) % points.length];
+      const length = Math.hypot(bx - ax, bz - az);
+      if (length < 0.5) continue;
+      const dx = (bx - ax) / length;
+      const dz = (bz - az) / length;
+      const side = area > 0 ? 1 : -1;
+      const nx = dz * side;
+      const nz = -dx * side;
+      edges.push({ ax, az, dx, dz, nx, nz, length, rotationY: Math.atan2(nx, nz) });
+    }
+    return edges;
+  };
+  // Stand a flat opening on a wall edge, `along` metres from the edge's start.
+  const addOnWall = (
+    parent: THREE.Object3D,
+    edge: WallEdge,
+    along: number,
+    y: number,
+    geometry: THREE.BufferGeometry,
+    material: THREE.Material,
+    proud = 0.12,
+  ) => {
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.position.set(edge.ax + edge.dx * along + edge.nx * proud, y, edge.az + edge.dz * along + edge.nz * proud);
+    mesh.rotation.y = edge.rotationY;
+    parent.add(mesh);
+    return mesh;
+  };
+  type BayStorey = { y: number; opening: THREE.BufferGeometry; surround?: THREE.BufferGeometry };
+  // Regular bays of openings along every wall long enough to take one, so
+  // arcades and window rows follow the real wall line of any footprint.
+  const addBays = (
+    parent: THREE.Object3D,
+    edges: WallEdge[],
+    options: {
+      bay: number;
+      storeys: BayStorey[];
+      opening: THREE.Material;
+      surround?: THREE.Material;
+      minEdge?: number;
+      margin?: number;
+      pier?: { width: number; depth: number; bottom: number; top: number; material: THREE.Material };
+    },
+  ) => {
+    const margin = options.margin ?? 0.8;
+    for (const edge of edges) {
+      if (edge.length < (options.minEdge ?? options.bay)) continue;
+      const usable = edge.length - margin * 2;
+      const count = Math.max(1, Math.floor(usable / options.bay));
+      const spacing = usable / count;
+      for (let index = 0; index < count; index++) {
+        const along = margin + (index + 0.5) * spacing;
+        for (const storey of options.storeys) {
+          if (storey.surround && options.surround) addOnWall(parent, edge, along, storey.y - 0.25, storey.surround, options.surround, 0.07);
+          addOnWall(parent, edge, along, storey.y, storey.opening, options.opening, 0.14);
+        }
+      }
+      if (options.pier) {
+        const { width, depth, bottom, top, material } = options.pier;
+        for (let index = 0; index <= count; index++) {
+          const along = margin + index * spacing;
+          const pier = addBox(parent, [width, top - bottom, depth], [
+            edge.ax + edge.dx * along + edge.nx * depth * 0.4,
+            (top + bottom) / 2,
+            edge.az + edge.dz * along + edge.nz * depth * 0.4,
+          ], material);
+          pier.rotation.y = edge.rotationY;
+        }
+      }
+    }
+  };
+
+  // A chhatri: the small domed kiosk that crowns Mughal and Indo-Saracenic roofs.
+  const addChhatri = (
+    parent: THREE.Object3D,
+    position: [number, number, number],
+    size: number,
+    body: THREE.Material,
+    dome: THREE.Material,
+  ) => {
+    const [x, y, z] = position;
+    addBox(parent, [size * 1.15, size * 0.14, size * 1.15], [x, y + size * 0.07, z], body);
+    for (const cx of [-1, 1]) {
+      for (const cz of [-1, 1]) addBox(parent, [size * 0.13, size * 0.8, size * 0.13], [x + cx * size * 0.42, y + size * 0.5, z + cz * size * 0.42], body);
+    }
+    addBox(parent, [size * 1.3, size * 0.12, size * 1.3], [x, y + size * 0.96, z], body);
+    addLathe(parent, domeProfile(size * 0.5, size * 0.62, 0.12, 7), 10, [x, y + size * 1.02, z], dome);
+    addFinial(parent, [x, y + size * 1.62, z], size * 0.16);
+  };
+
+  // Collapse a finished detail group to one mesh per material. Landmark detail
+  // is static, so hundreds of small parts should not cost hundreds of draw calls.
+  const bakeGroup = (group: THREE.Group) => {
+    group.updateMatrixWorld(true);
+    const toGroup = group.matrixWorld.clone().invert();
+    const buckets = new Map<THREE.Material, THREE.BufferGeometry[]>();
+    const sources: THREE.Mesh[] = [];
+    const relative = new THREE.Matrix4();
+    group.traverse((object) => {
+      if (!(object instanceof THREE.Mesh) || object instanceof THREE.InstancedMesh || Array.isArray(object.material)) return;
+      const geometry = object.geometry.index ? object.geometry.toNonIndexed() : object.geometry.clone();
+      for (const name of Object.keys(geometry.attributes)) {
+        if (name !== "position" && name !== "normal" && name !== "uv") geometry.deleteAttribute(name);
+      }
+      geometry.applyMatrix4(relative.multiplyMatrices(toGroup, object.matrixWorld));
+      const bucket = buckets.get(object.material) ?? [];
+      bucket.push(geometry);
+      buckets.set(object.material, bucket);
+      sources.push(object);
+    });
+    for (const source of sources) {
+      source.removeFromParent();
+      if (source.geometry !== unitBox) source.geometry.dispose();
+    }
+    for (const [material, geometries] of buckets) {
+      const merged = mergeGeometries(geometries, false);
+      geometries.forEach((geometry) => geometry.dispose());
+      if (!merged) continue;
+      const mesh = new THREE.Mesh(merged, material);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      group.add(mesh);
+    }
   };
 
   const addLabel = (position: THREE.Vector3, text: string, parent: THREE.Object3D = root) => {
@@ -2688,23 +2899,35 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
       return lawn;
     }
     if (kind === "church") return part.role === "tower" ? paleConcrete : whiteStone;
-    if (kind === "bashundhara-city") return part.role === "tower" ? glass : paleConcrete;
+    if (kind === "bashundhara-city") return part.osmId === 1092674471 ? atriumGlass : silverPanel;
     if (kind === "police-plaza") return glass;
     if (kind === "brac") return brick;
     if (kind === "hotel") return darkGlass;
     if (kind === "parliament") return concrete;
-    if (kind === "lalbagh-fort") return part.role === "tomb" ? whiteStone : redBrick;
-    if (kind === "ahsan-manzil") return pinkPlaster;
+    if (kind === "lalbagh-fort") return part.role === "tomb" || part.role === "museum" ? peach : redBrick;
+    if (kind === "ahsan-manzil") return salmon;
     if (kind === "curzon-hall") return redBrick;
     if (kind === "baitul-mukarram") return paleConcrete;
     return whiteStone;
   };
 
+  // The OSM snapshot's heights are coarse tags. Where a part's real proportions
+  // matter to how the building reads, model it at its true height instead.
+  const PART_HEIGHTS: Record<number, number> = {
+    624025793: 14, // Ahsan Manzil: two storeys on a plinth, the dome carries the height
+    624025792: 11,
+    24448713: 33, // Bashundhara City mall podium
+    1092674471: 37, // atrium rotunda
+    1092674472: 80, // office tower
+    186664126: 13, // Baitul Mukarram's low wings; the prayer-hall cube stands above them
+  };
+  const partHeight = (part: LandmarkFootprintPart) => PART_HEIGHTS[part.osmId] ?? part.height;
   const partBounds = new Map<number, { minX: number; maxX: number; minZ: number; maxZ: number; height: number }>();
   // Bounding boxes are enough to hang a dome or a spire off, but banding and wall
   // voids have to follow the actual wall line, so keep the polygons too.
   const partOutlines = new Map<number, MapPoint[]>();
   const allBounds = new Map<DhakaLandmark["kind"], { minX: number; maxX: number; minZ: number; maxZ: number; top: number }>();
+  const landmarkMeshes = new Map<DhakaLandmark["kind"], THREE.Object3D[]>();
 
   for (const landmark of DHAKA_LANDMARKS) {
     const footprint = footprintByKind.get(landmark.kind);
@@ -2738,18 +2961,19 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
       const partMaxX = Math.max(...xs);
       const partMinZ = Math.min(...zs);
       const partMaxZ = Math.max(...zs);
-      partBounds.set(part.osmId, { minX: partMinX, maxX: partMaxX, minZ: partMinZ, maxZ: partMaxZ, height: part.height });
+      const height = partHeight(part);
+      partBounds.set(part.osmId, { minX: partMinX, maxX: partMaxX, minZ: partMinZ, maxZ: partMaxZ, height });
       partOutlines.set(part.osmId, points);
       if (part.role !== "ground" && part.role !== "water") {
         minX = Math.min(minX, partMinX);
         maxX = Math.max(maxX, partMaxX);
         minZ = Math.min(minZ, partMinZ);
         maxZ = Math.max(maxZ, partMaxZ);
-        top = Math.max(top, part.height);
+        top = Math.max(top, height);
       }
 
       const geometry = new THREE.ExtrudeGeometry(polygonShape(points), {
-        depth: part.height,
+        depth: height,
         bevelEnabled: false,
         curveSegments: 1,
       });
@@ -2761,6 +2985,9 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
       mesh.receiveShadow = true;
       mesh.userData.osmId = part.osmId;
       root.add(mesh);
+      const partMeshes = landmarkMeshes.get(landmark.kind) ?? [];
+      partMeshes.push(mesh);
+      landmarkMeshes.set(landmark.kind, partMeshes);
     }
 
     if (!Number.isFinite(minX)) {
@@ -2773,6 +3000,10 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
     }
     allBounds.set(landmark.kind, { minX, maxX, minZ, maxZ, top });
   }
+
+  const perchRay = new THREE.Raycaster();
+  const perchOrigin = new THREE.Vector3();
+  const perchDown = new THREE.Vector3(0, -1, 0);
 
   // Landmarks with no OSM masses to align with may orient details by heading;
   // footprint-anchored details must stay in world space like the masses they decorate.
@@ -2806,10 +3037,101 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
       const centreZ = (part.minZ + part.maxZ) / 2;
       return points.map(([x, z]) => [x - centreX, z - centreZ] as MapPoint);
     };
+    // The same wall line in the detail group's own coordinates.
+    const walls = (osmId: number) => {
+      const points = partOutlines.get(osmId);
+      return points ? wallEdges(points.map(([x, z]) => [x - group.position.x, z - group.position.z] as MapPoint)) : [];
+    };
+    // A slab that follows a part's outline: string courses, cornices, parapets
+    // and roof finishes. `grow` scales it about the part's centre, so above 1 it
+    // stands proud of the wall and below 1 it sits inside the parapet.
+    const slabGeometries = new Map<string, THREE.BufferGeometry>();
+    const slab = (osmId: number, y: number, height: number, grow: number, material: THREE.Material) => {
+      const local = outline(osmId);
+      const seat = anchor(osmId);
+      if (!local || !seat) return null;
+      const key = `${osmId}:${height}`;
+      let geometry = slabGeometries.get(key);
+      if (!geometry) {
+        geometry = new THREE.ExtrudeGeometry(polygonShape(local), { depth: height, bevelEnabled: false, curveSegments: 1 });
+        geometry.rotateX(-Math.PI / 2);
+        slabGeometries.set(key, geometry);
+      }
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.position.set(seat.x, y, seat.z);
+      mesh.scale.set(grow, 1, grow);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      group.add(mesh);
+      return mesh;
+    };
+    // A part's own axes: a child group centred on its tightest bounding
+    // rectangle and turned so local +Z faces `facing`. Details built in it line
+    // up with walls that are not square to the map.
+    const frame = (osmId: number, facing: [number, number]) => {
+      const points = partOutlines.get(osmId);
+      const part = partBounds.get(osmId);
+      if (!points || !part) return null;
+      let best: { area: number; cos: number; sin: number; minU: number; maxU: number; minV: number; maxV: number } | null = null;
+      for (let index = 0; index < points.length; index++) {
+        const [ax, az] = points[index];
+        const [bx, bz] = points[(index + 1) % points.length];
+        const length = Math.hypot(bx - ax, bz - az);
+        if (length < 0.5) continue;
+        const cos = (bx - ax) / length;
+        const sin = (bz - az) / length;
+        let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+        for (const [x, z] of points) {
+          const u = x * cos + z * sin;
+          const v = -x * sin + z * cos;
+          minU = Math.min(minU, u); maxU = Math.max(maxU, u);
+          minV = Math.min(minV, v); maxV = Math.max(maxV, v);
+        }
+        const area = (maxU - minU) * (maxV - minV);
+        if (!best || area < best.area) best = { area, cos, sin, minU, maxU, minV, maxV };
+      }
+      if (!best) return null;
+      const centreU = (best.minU + best.maxU) / 2;
+      const centreV = (best.minV + best.maxV) / 2;
+      const axes = [
+        { x: best.cos, z: best.sin, half: (best.maxU - best.minU) / 2, across: (best.maxV - best.minV) / 2 },
+        { x: -best.cos, z: -best.sin, half: (best.maxU - best.minU) / 2, across: (best.maxV - best.minV) / 2 },
+        { x: -best.sin, z: best.cos, half: (best.maxV - best.minV) / 2, across: (best.maxU - best.minU) / 2 },
+        { x: best.sin, z: -best.cos, half: (best.maxV - best.minV) / 2, across: (best.maxU - best.minU) / 2 },
+      ];
+      const front = axes.reduce((a, b) => (b.x * facing[0] + b.z * facing[1] > a.x * facing[0] + a.z * facing[1] ? b : a));
+      const local = new THREE.Group();
+      local.position.set(
+        centreU * best.cos - centreV * best.sin - group.position.x,
+        0,
+        centreU * best.sin + centreV * best.cos - group.position.z,
+      );
+      local.rotation.y = Math.atan2(front.x, front.z);
+      group.add(local);
+      return { g: local, hx: front.across, hz: front.half, height: part.height };
+    };
+    // Floor-by-floor dressing for a plain tower extrusion: a band to every
+    // storey, a parapet, a roof finish, and plant on top.
+    const dressTower = (osmId: number, options: { floor: number; band: THREE.Material; bandHeight: number; crown: THREE.Material; start?: number; grow?: number }) => {
+      const seat = anchor(osmId);
+      if (!seat) return null;
+      for (let y = options.start ?? 5; y < seat.height - 1.5; y += options.floor) slab(osmId, y, options.bandHeight, options.grow ?? 1.006, options.band);
+      slab(osmId, seat.height, 1.4, 1.012, options.crown);
+      slab(osmId, seat.height + 1.4, 0.08, 0.93, roofGrey);
+      const core = Math.min(seat.width, seat.depth);
+      addBox(group, [core * 0.42, 3.6, core * 0.34], [seat.x - core * 0.08, seat.height + 3.2, seat.z + core * 0.06], plantGrey);
+      addBox(group, [core * 0.2, 2.2, core * 0.2], [seat.x + core * 0.22, seat.height + 2.5, seat.z - core * 0.16], roofGrey);
+      addCylinder(group, core * 0.07, core * 0.08, 2.4, [seat.x + core * 0.2, seat.height + 2.6, seat.z + core * 0.24], plantGrey, 10);
+      return seat;
+    };
     return {
       group,
       anchor,
       outline,
+      walls,
+      slab,
+      frame,
+      dressTower,
       width: Math.max(8, bounds.maxX - bounds.minX),
       depth: Math.max(8, bounds.maxZ - bounds.minZ),
       top: bounds.top > 0 ? bounds.top : landmark.altitude,
@@ -2817,383 +3139,739 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
   };
 
   for (const landmark of DHAKA_LANDMARKS) {
-    const { group, anchor, outline, width, depth, top } = detailGroup(landmark);
+    const { group, anchor, walls, slab, frame, dressTower, width, depth, top } = detailGroup(landmark);
+    // Tall features that rise above the footprint's own height get their own
+    // collision column instead of lifting the whole building's.
+    const solid = (x: number, z: number, half: number, solidTop: number) => {
+      colliders.push({ x: group.position.x + x, z: group.position.z + z, halfWidth: half, halfDepth: half, top: solidTop });
+    };
+    let colliderTop = top;
 
     if (landmark.kind === "church") {
-      const tower = anchor(983631140);
-      if (tower) {
-        const spire = new THREE.Mesh(new THREE.ConeGeometry(Math.min(tower.width, tower.depth) * 0.52, 14, 8), roof);
-        spire.position.set(tower.x, tower.height + 7, tower.z);
-        spire.castShadow = true;
-        group.add(spire);
-        addBox(group, [0.7, 6, 0.7], [tower.x, tower.height + 17, tower.z], accent);
-        addBox(group, [3.4, 0.7, 0.7], [tower.x, tower.height + 18.2, tower.z], accent);
+      const NAVE = 717625483;
+      const nave = anchor(NAVE);
+      if (nave) {
+        const lancet = pointedArch(1.7, 5.2);
+        addBays(group, walls(NAVE), {
+          bay: 5.2, minEdge: 5, storeys: [{ y: 3.2, opening: lancet, surround: pointedArch(2.3, 5.9) }],
+          opening: archDark, surround: paleConcrete,
+          pier: { width: 0.8, depth: 0.7, bottom: 0, top: nave.height, material: paleConcrete },
+        });
+        slab(NAVE, 0, 1.2, 1.012, paleConcrete);
+        slab(NAVE, nave.height - 0.4, 0.9, 1.02, paleConcrete);
+        slab(NAVE, nave.height + 0.5, 0.08, 0.95, tileRoof);
       }
       for (const osmId of [983631141, 983631142]) {
         const upper = anchor(osmId);
         if (!upper) continue;
-        const pinnacle = new THREE.Mesh(new THREE.ConeGeometry(Math.min(upper.width, upper.depth) * 0.42, 6, 8), roof);
-        pinnacle.position.set(upper.x, upper.height + 3, upper.z);
-        pinnacle.castShadow = true;
-        group.add(pinnacle);
+        addBays(group, walls(osmId), { bay: 4.4, minEdge: 4, storeys: [{ y: 14.4, opening: pointedArch(1.3, 3.4) }], opening: archDark });
+        slab(osmId, upper.height - 0.3, 0.7, 1.03, paleConcrete);
+        addCone(group, Math.min(upper.width, upper.depth) * 0.5, 6.5, [upper.x, upper.height + 3.6, upper.z], tileRoof, 8);
+      }
+      const tower = anchor(983631140);
+      if (tower) {
+        const radius = Math.min(tower.width, tower.depth) * 0.5;
+        slab(983631140, 12, 0.6, 1.05, paleConcrete);
+        slab(983631140, tower.height - 0.4, 0.9, 1.08, paleConcrete);
+        addBays(group, walls(983631140), { bay: 3.6, minEdge: 1.4, margin: 0.2, storeys: [{ y: 14.5, opening: pointedArch(1, 4.2) }], opening: archDark });
+        addCone(group, radius * 1.02, 15, [tower.x, tower.height + 8, tower.z], tileRoof, 8);
+        addBox(group, [0.5, 5.4, 0.5], [tower.x, tower.height + 17.6, tower.z], accent);
+        addBox(group, [3, 0.5, 0.5], [tower.x, tower.height + 18.6, tower.z], accent);
+        solid(tower.x, tower.z, radius, tower.height + 14);
       }
     } else if (landmark.kind === "bashundhara-city") {
-      const tower = anchor(1092674471);
-      if (tower) {
-        for (let y = 7; y < tower.height - 3; y += 4.6) {
-          addBox(group, [tower.width * 1.04, 0.55, tower.depth * 1.04], [tower.x, y, tower.z], paleConcrete);
+      // Three volumes the OSM outline already separates: the silver-panelled
+      // mall podium, the round glass atrium with its ribbed dome, and the
+      // office tower with a curved curtain-wall bay.
+      const MALL = 24448713;
+      const ROTUNDA = 1092674471;
+      const TOWER = 1092674472;
+      const FLOOR = 3.7;
+      const mall = anchor(MALL);
+      if (mall) {
+        // Glazed shopfront under a canopy, then a ribbon window to every floor.
+        slab(MALL, 0, 4.4, 1.004, ribbonGlass);
+        slab(MALL, 4.4, 0.6, 1.022, paleConcrete);
+        for (let y = 7; y < mall.height - 2; y += FLOOR) slab(MALL, y, 1.5, 1.003, ribbonGlass);
+        slab(MALL, mall.height, 1.3, 1.006, silverPanel);
+        slab(MALL, mall.height + 1.3, 0.08, 0.965, roofGrey);
+        const deck = frame(MALL, [0, 1]);
+        if (deck) {
+          const roofY = mall.height + 1.38;
+          // Rooftop plant, lift overruns and skylights: the roof is the face a
+          // bird sees most, so it should not be a blank slab.
+          const plant: Array<[number, number, number, number, number]> = [
+            [-0.42, -0.5, 16, 5, 11], [-0.1, -0.56, 11, 3.6, 8], [0.36, -0.44, 13, 6, 13],
+            [-0.5, 0.1, 9, 4, 20], [0.44, 0.3, 12, 4.5, 16], [-0.3, 0.52, 18, 3.4, 9],
+          ];
+          for (const [fx, fz, w, h, d] of plant) {
+            addBox(deck.g, [w, h, d], [fx * deck.hx, roofY + h / 2, fz * deck.hz], plantGrey);
+            addBox(deck.g, [w * 0.86, 0.5, d * 0.86], [fx * deck.hx, roofY + h + 0.25, fz * deck.hz], roofGrey);
+          }
+          for (const [fx, fz] of [[0.02, 0.1], [0.02, 0.34], [-0.2, 0.22]] as const) {
+            addBox(deck.g, [15, 1.6, 7], [fx * deck.hx, roofY + 0.8, fz * deck.hz], atriumGlass);
+          }
+          for (const [fx, fz] of [[0.26, -0.08], [0.34, -0.08], [0.26, 0.04], [0.34, 0.04]] as const) {
+            addCylinder(deck.g, 2.1, 2.4, 3.2, [fx * deck.hx, roofY + 1.6, fz * deck.hz], plantGrey, 12);
+          }
         }
-        addBox(group, [tower.width * 0.94, 1.8, tower.depth * 0.94], [tower.x, tower.height + 0.9, tower.z], roof);
       }
-      const core = anchor(1092674472);
-      if (core) {
-        addDome(group, Math.max(3.2, Math.min(core.width, core.depth) * 0.52), [core.x, core.height + 0.4, core.z], glass);
-        addCylinder(group, 0.5, 0.9, 11, [core.x, core.height + 6, core.z], accent, 8);
+      const rotunda = anchor(ROTUNDA);
+      if (rotunda) {
+        const radius = Math.min(rotunda.width, rotunda.depth) / 2;
+        for (let y = 4.4; y < rotunda.height; y += FLOOR) slab(ROTUNDA, y, 0.5, 1.012, silverPanel);
+        slab(ROTUNDA, rotunda.height, 1.2, 1.03, silverPanel);
+        const rise = radius * 0.62;
+        const domeY = rotunda.height + 1.2;
+        const profile: Array<[number, number]> = [];
+        for (let step = 0; step <= 8; step++) {
+          const angle = (step / 8) * Math.PI / 2;
+          profile.push([Math.max(0.001, radius * 0.97 * Math.cos(angle)), rise * Math.sin(angle)]);
+        }
+        addLathe(group, profile, 24, [rotunda.x, domeY, rotunda.z], atriumGlass);
+        // Radial glazing ribs and two ring purlins over the glass.
+        const ribGeometry = new THREE.TorusGeometry(radius * 0.975, 0.2, 4, 10, Math.PI / 2);
+        for (let rib = 0; rib < 16; rib++) {
+          const mesh = new THREE.Mesh(ribGeometry, silverPanel);
+          mesh.scale.y = rise / radius;
+          mesh.rotation.y = (rib / 16) * Math.PI * 2;
+          mesh.position.set(rotunda.x, domeY, rotunda.z);
+          group.add(mesh);
+        }
+        for (const t of [0.34, 0.68]) {
+          const angle = t * Math.PI / 2;
+          const ring = new THREE.Mesh(new THREE.TorusGeometry(radius * 0.975 * Math.cos(angle), 0.18, 4, 32), silverPanel);
+          ring.rotation.x = Math.PI / 2;
+          ring.position.set(rotunda.x, domeY + rise * Math.sin(angle), rotunda.z);
+          group.add(ring);
+        }
+        addCylinder(group, 1.5, 1.9, 0.9, [rotunda.x, domeY + rise + 0.2, rotunda.z], accent, 12);
+        solid(rotunda.x, rotunda.z, radius, domeY + rise);
+      }
+      const tower = anchor(TOWER);
+      if (tower && mall) {
+        const base = mall.height;
+        for (let y = base + 2.4; y < tower.height - 2; y += FLOOR) slab(TOWER, y, 1.6, 1.004, ribbonGlass);
+        slab(TOWER, tower.height, 1.4, 1.01, silverPanel);
+        slab(TOWER, tower.height + 1.4, 0.08, 0.93, roofGrey);
+        // Face the curved bay away from the mall, toward the street.
+        const shaft = frame(TOWER, [tower.x - mall.x, tower.z - mall.z]);
+        if (shaft) {
+          const bayRadius = shaft.hx * 0.6;
+          const bayHeight = tower.height - base + 3;
+          const bay = new THREE.Mesh(
+            new THREE.CylinderGeometry(bayRadius, bayRadius, bayHeight, 28, 1, false, -Math.PI / 2, Math.PI),
+            atriumGlass,
+          );
+          bay.position.set(0, base + bayHeight / 2, shaft.hz - bayRadius * 0.45);
+          bay.castShadow = true;
+          shaft.g.add(bay);
+          for (let y = base + FLOOR; y < base + bayHeight; y += FLOOR) {
+            const mullion = new THREE.Mesh(new THREE.TorusGeometry(bayRadius + 0.05, 0.12, 4, 20, Math.PI), silverPanel);
+            mullion.rotation.x = Math.PI / 2;
+            mullion.rotation.z = Math.PI;
+            mullion.position.set(0, y, shaft.hz - bayRadius * 0.45);
+            shaft.g.add(mullion);
+          }
+          addCylinder(shaft.g, bayRadius + 0.5, bayRadius + 0.5, 0.7, [0, base + bayHeight + 0.35, shaft.hz - bayRadius * 0.45], silverPanel, 28);
+          // Recessed service slots down the two end walls.
+          for (const side of [-1, 1]) {
+            addBox(shaft.g, [0.5, tower.height - base - 8, shaft.hz * 0.5], [side * (shaft.hx + 0.1), base + (tower.height - base) / 2, -shaft.hz * 0.2], ribbonGlass);
+          }
+          addBox(shaft.g, [shaft.hx * 1.1, 4.5, shaft.hz * 1.0], [0, tower.height + 3, -shaft.hz * 0.1], plantGrey);
+          addBox(shaft.g, [shaft.hx * 0.5, 2.6, shaft.hz * 0.6], [-shaft.hx * 0.2, tower.height + 6.5, -shaft.hz * 0.1], roofGrey);
+          addCylinder(shaft.g, 0.35, 0.5, 13, [shaft.hx * 0.3, tower.height + 11.5, -shaft.hz * 0.1], accent, 8);
+        }
+        solid(tower.x, tower.z, Math.max(tower.width, tower.depth) / 2, tower.height + 6);
+        colliderTop = mall.height + 2;
       }
     } else if (landmark.kind === "amphitheatre") {
-      for (let tier = 0; tier < 7; tier++) {
+      // A stepped half-bowl of seating round a lakeside stage. Each tier is a
+      // half-drum a little taller and wider than the one inside it.
+      const bowl = anchor(1065574904);
+      const reach = (bowl ? Math.min(bowl.width, bowl.depth) : Math.min(width, depth)) * 0.4;
+      const TIERS = 9;
+      for (let tier = 0; tier < TIERS; tier++) {
+        const radius = reach * (0.42 + (tier / (TIERS - 1)) * 0.58);
+        const height = 0.9 + tier * 0.95;
         const seating = new THREE.Mesh(
-          new THREE.TorusGeometry(Math.min(width, depth) * (0.18 + tier * 0.045), 0.75, 5, 40, Math.PI),
-          tier % 2 ? concrete : paleConcrete,
+          new THREE.CylinderGeometry(radius, radius, height, 48, 1, false, Math.PI / 2, Math.PI),
+          tier % 2 ? lawn : paleConcrete,
         );
-        seating.rotation.x = Math.PI / 2;
-        seating.rotation.z = Math.PI;
-        seating.position.set(0, 1.5 + tier * 1.25, depth * 0.08 - tier * 0.7);
+        seating.position.set(0, 1.2 + height / 2, -reach * 0.1);
         seating.castShadow = true;
+        seating.receiveShadow = true;
         group.add(seating);
       }
+      // Aisles cut through the tiers, the stage, and its shell canopy.
+      for (const angle of [-0.9, -0.3, 0.3, 0.9]) {
+        const aisle = addBox(group, [1.6, 0.2, reach * 0.56], [Math.sin(angle) * reach * 0.72, 1.2 + (TIERS - 1) * 0.95 + 1, -reach * 0.1 - Math.cos(angle) * reach * 0.72], whiteStone);
+        aisle.rotation.y = angle;
+        aisle.rotation.x = -0.18;
+      }
+      addCylinder(group, reach * 0.4, reach * 0.42, 1.4, [0, 1.9, -reach * 0.1], whiteStone, 40);
+      addBox(group, [reach * 0.9, 1.6, reach * 0.3], [0, 2, reach * 0.12], whiteStone);
+      const canopy = new THREE.Mesh(new THREE.SphereGeometry(reach * 0.36, 28, 10, 0, Math.PI, 0, Math.PI / 2), marble);
+      canopy.scale.set(1.3, 0.62, 0.8);
+      canopy.position.set(0, 2.8, reach * 0.2);
+      canopy.castShadow = true;
+      group.add(canopy);
+      addBox(group, [reach * 1.1, 0.5, 1.2], [0, 3, reach * 0.2], accent);
     } else if (landmark.kind === "police-plaza") {
-      const mass = anchor(366560370);
+      // Blue curtain-wall tower on a shopping podium.
+      const TOWER = 366560370;
+      const mass = dressTower(TOWER, { floor: 3.8, band: silverPanel, bandHeight: 0.5, crown: silverPanel, start: 12 });
       if (mass) {
-        addBox(group, [Math.max(5, mass.width * 0.09), mass.height * 0.96, mass.depth * 1.03], [mass.x, mass.height * 0.48, mass.z], paleConcrete);
-        for (let y = 10; y < mass.height - 4; y += 7.4) {
-          addBox(group, [mass.width * 1.03, 0.6, mass.depth * 1.03], [mass.x, y, mass.z], paleConcrete);
+        slab(TOWER, 0, 9, 1.035, paleConcrete);
+        slab(TOWER, 9, 0.8, 1.06, silverPanel);
+        slab(TOWER, 2, 5, 1.04, ribbonGlass);
+        for (const edge of walls(TOWER)) {
+          if (edge.length < 12) continue;
+          for (let along = 4; along < edge.length - 2; along += 8) {
+            const fin = addBox(group, [0.5, mass.height - 11, 0.9], [edge.ax + edge.dx * along + edge.nx * 0.4, 10 + (mass.height - 11) / 2, edge.az + edge.dz * along + edge.nz * 0.4], silverPanel);
+            fin.rotation.y = edge.rotationY;
+          }
         }
-        addBox(group, [mass.width * 0.9, 2.2, mass.depth * 1.04], [mass.x, mass.height + 1.1, mass.z], roof);
       }
     } else if (landmark.kind === "brac") {
-      const mass = anchor(229029081);
+      // Brick-red office tower with deep ribbon windows.
+      const TOWER = 229029081;
+      const mass = dressTower(TOWER, { floor: 3.6, band: ribbonGlass, bandHeight: 1.7, crown: brickTrim, start: 6.5, grow: 1.004 });
       if (mass) {
-        addBox(group, [mass.width * 0.18, mass.height * 0.92, mass.depth * 1.02], [mass.x + mass.width * 0.2, mass.height * 0.46, mass.z], darkGlass);
-        for (let y = 8; y < mass.height - 4; y += 6.5) {
-          addBox(group, [mass.width * 1.02, 0.6, mass.depth * 1.02], [mass.x, y, mass.z], paleConcrete);
+        slab(TOWER, 0, 4.6, 1.02, ribbonGlass);
+        slab(TOWER, 4.6, 0.7, 1.05, paleConcrete);
+        const shaft = frame(TOWER, [1, 0]);
+        if (shaft) {
+          // Glazed lift core standing proud of the brick on the entrance face.
+          addBox(shaft.g, [shaft.hx * 0.34, mass.height + 4, 1.6], [0, (mass.height + 4) / 2, shaft.hz + 0.6], darkGlass);
+          for (const side of [-1, 1]) addBox(shaft.g, [0.7, mass.height + 4.6, 2], [side * shaft.hx * 0.19, (mass.height + 4.6) / 2, shaft.hz + 0.6], paleConcrete);
         }
-        addBox(group, [mass.width, 1.8, mass.depth], [mass.x, mass.height + 0.9, mass.z], roof);
       }
     } else if (landmark.kind === "hotel") {
-      const mass = anchor(498432169);
+      // Slim dark-glass hotel tower with a lit crown.
+      const TOWER = 498432169;
+      const mass = dressTower(TOWER, { floor: 3.5, band: silverPanel, bandHeight: 0.4, crown: silverPanel, start: 14 });
       if (mass) {
-        for (let y = 10; y < mass.height - 5; y += 8) {
-          addBox(group, [mass.width * 1.02, 0.65, mass.depth * 1.02], [mass.x, y, mass.z], paleConcrete);
-        }
-        addBox(group, [mass.width * 0.7, 3.5, mass.depth * 0.7], [mass.x, mass.height + 1.7, mass.z], roof);
-        addBox(group, [4, 6, 4], [mass.x, mass.height + 5.5, mass.z], accent);
+        slab(TOWER, 0, 10, 1.05, paleConcrete);
+        slab(TOWER, 2, 6, 1.056, ribbonGlass);
+        slab(TOWER, 10, 0.8, 1.1, silverPanel);
+        slab(TOWER, mass.height - 7, 5, 1.012, atriumGlass);
+        addCylinder(group, 0.3, 0.45, 12, [mass.x, mass.height + 9, mass.z], accent, 8);
       }
     } else if (landmark.kind === "parliament") {
       // Kahn's citadel is three concentric rings the OSM outlines already carry:
-      // a 34 m block ring, a 42 m star, and the 46 m octagonal assembly chamber at
-      // the centre. The massing was never the problem — what was missing is
-      // everything that makes it readable from the air: white marble banding on
-      // raw grey concrete, the giant geometric voids punched through the outer
-      // walls, the crowned chamber, and the water it is always photographed across.
-      const citadel = anchor(24448328);
-      const star = anchor(443036732);
-      const chamber = anchor(443037035);
+      // a 34 m ring of office blocks, a 42 m star of light wells, and the 46 m
+      // octagonal assembly chamber. What makes it read from the air is the
+      // finish: marble pour lines on grey concrete, giant geometric openings in
+      // the outer walls, terracotta roof terraces, and the two plazas it stands
+      // between: red brick to the south, white marble to the north.
+      const CITADEL = 24448328;
+      const STAR = 443036732;
+      const CHAMBER = 443037035;
+      const citadel = anchor(CITADEL);
+      const chamber = anchor(CHAMBER);
 
-      // Marble banding at every pour line. One triangulation is cloned up the
-      // elevation, so a dozen stripes cost one extrusion rather than a dozen.
-      const bandPart = (osmId: number, top: number) => {
-        const local = outline(osmId);
-        const seat = anchor(osmId);
-        if (!local || !seat) return;
-        const geometry = new THREE.ExtrudeGeometry(polygonShape(local), {
-          depth: 0.8,
-          bevelEnabled: false,
-          curveSegments: 1,
-        });
-        geometry.rotateX(-Math.PI / 2);
-        for (let y = 4.4; y < top - 1.5; y += 4.4) {
-          const band = new THREE.Mesh(geometry, whiteStone);
-          band.position.set(seat.x, y, seat.z);
-          // Standing each band slightly proud of the wall is what catches the
-          // light. Scaling about the part centroid keeps it parallel to every face.
-          band.scale.set(1.005, 1, 1.005);
-          band.receiveShadow = true;
-          group.add(band);
-        }
-      };
-      bandPart(24448328, 34);
-      bandPart(443036732, 42);
-      bandPart(443037035, 46);
-
-      if (citadel) {
-        const local = outline(24448328);
-        if (local) {
-          // Walk the real wall line for the point furthest along each face normal,
-          // so every void lands flat on a wall instead of floating off a corner.
-          const wallPoint = (dirX: number, dirZ: number) => {
-            let best = local[0];
-            let bestDot = -Infinity;
-            for (const point of local) {
-              const dot = point[0] * dirX + point[1] * dirZ;
-              if (dot > bestDot) {
-                bestDot = dot;
-                best = point;
-              }
-            }
-            return best;
-          };
-          const diagonal = Math.SQRT1_2;
-          const voids: Array<[number, number, number, number]> = [
-            // direction x, direction z, radius, cross-section segments
-            [0, -1, 13, 44], [0, 1, 13, 44],
-            [-1, 0, 12, 3], [1, 0, 12, 3],
-            [-diagonal, -diagonal, 10, 4], [diagonal, -diagonal, 10, 4],
-            [-diagonal, diagonal, 10, 4], [diagonal, diagonal, 10, 4],
-          ];
-          const wallNormal = new THREE.Vector3();
-          const wallTangent = new THREE.Vector3();
-          const wallUp = new THREE.Vector3(0, 1, 0);
-          const wallBasis = new THREE.Matrix4();
-          for (const [dirX, dirZ, radius, segments] of voids) {
-            const edge = wallPoint(dirX, dirZ);
-            // A shallow prism sunk into the wall on its normal, dark inside, so the
-            // openings read as holes at flying height instead of as the radius-8
-            // decals that used to vanish above a hundred metres. Only a sliver
-            // stands proud — any more and they look bolted on rather than cut.
-            const opening = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius, 4, segments), recess);
-            wallNormal.set(dirX, 0, dirZ).normalize();
-            wallTangent.crossVectors(wallUp, wallNormal).normalize();
-            wallBasis.makeBasis(wallTangent, wallNormal, wallUp);
-            opening.quaternion.setFromRotationMatrix(wallBasis);
-            // Spin the cross-section a quarter turn so triangles and squares sit
-            // on a flat edge with a vertex up, the way Kahn cut them.
-            opening.rotateY(Math.PI / 2);
-            // Pulling the seat back off the extreme vertex keeps the diagonal
-            // openings on a wall face instead of hanging off a corner.
-            opening.position.set(citadel.x + edge[0] * 0.93, 17.5, citadel.z + edge[1] * 0.93);
-            group.add(opening);
-          }
-        }
-
-        // A stone apron for the podium the citadel stands on. Crescent Lake is
-        // already in the OSM water layer, so there is no synthetic ring here —
-        // laying one down would just double the real thing.
-        const plaza = new THREE.Mesh(new THREE.CircleGeometry(92, 40), paleConcrete);
-        plaza.rotation.x = -Math.PI / 2;
-        plaza.position.set(citadel.x, -0.1, citadel.z);
-        plaza.receiveShadow = true;
-        group.add(plaza);
+      // Marble inlay at every pour line.
+      for (const [osmId, wallTop] of [[CITADEL, 34], [STAR, 42], [CHAMBER, 46]] as const) {
+        for (let y = 3.2; y < wallTop - 1; y += 3.2) slab(osmId, y, 0.26, 1.003, marble);
       }
+      // Terracotta terraces inside a concrete parapet.
+      slab(CITADEL, 34, 1.2, 1.004, concrete);
+      slab(CITADEL, 35.2, 0.08, 0.962, terracotta);
+      slab(STAR, 42, 1.0, 1.004, concrete);
+      slab(STAR, 43, 0.08, 0.95, terracotta);
+      slab(CHAMBER, 46, 1.0, 1.004, concrete);
+      slab(CHAMBER, 47, 0.08, 0.94, terracotta);
 
-      if (star) {
-        // Deep light slots between the peripheral blocks, which is what gives the
-        // ring its vertical rhythm rather than reading as one unbroken slab.
-        for (let slot = 0; slot < 8; slot++) {
-          const angle = (slot / 8) * Math.PI * 2 + Math.PI / 8;
-          const reach = Math.min(star.width, star.depth) * 0.5;
-          const shadowSlot = new THREE.Mesh(unitBox, recess);
-          shadowSlot.scale.set(1.7, 40, 5.5);
-          shadowSlot.position.set(star.x + Math.cos(angle) * reach, 20, star.z + Math.sin(angle) * reach);
-          shadowSlot.rotation.y = -angle;
-          group.add(shadowSlot);
+      // The giant openings. One to each flat wall of the outer blocks, sized to
+      // the wall: circles on the long entrance and lounge faces, and circles
+      // alternating with triangles round the diamond-set office blocks.
+      const circleLarge = discPane(8.6);
+      const circleLargeTrim = discPane(9.6);
+      const circleSmall = discPane(5.6);
+      const circleSmallTrim = discPane(6.3);
+      const triangle = trianglePane(11.5, 15);
+      const triangleTrim = trianglePane(13.3, 16.6);
+      const slot = rectPane(2.2, 9);
+      walls(CITADEL).forEach((edge, index) => {
+        const middle = edge.length / 2;
+        if (edge.length >= 26) {
+          addOnWall(group, edge, middle, 6.4, circleLargeTrim, marble, 0.08);
+          addOnWall(group, edge, middle, 7.4, circleLarge, recess, 0.16);
+        } else if (edge.length >= 15.5) {
+          if (index % 2 === 0) {
+            addOnWall(group, edge, middle, 9.3, circleSmallTrim, marble, 0.08);
+            addOnWall(group, edge, middle, 10, circleSmall, recess, 0.16);
+            addOnWall(group, edge, middle, 23.5, slot, recess, 0.16);
+          } else {
+            addOnWall(group, edge, middle, 7.2, triangleTrim, marble, 0.08);
+            addOnWall(group, edge, middle, 8, triangle, recess, 0.16);
+          }
+        } else if (edge.length >= 11) {
+          addOnWall(group, edge, middle, 6, rectPane(2.4, 22), recess, 0.16);
         }
+      });
+      // Tall light slits between the folds of the star.
+      const slit = rectPane(1.5, 30);
+      for (const edge of walls(STAR)) {
+        if (edge.length >= 9) addOnWall(group, edge, edge.length / 2, 8, slit, recess, 0.16);
       }
 
       if (chamber) {
         const radius = Math.min(chamber.width, chamber.depth) * 0.5;
-        // Octagonal clerestory drum over the assembly chamber.
-        addCylinder(group, radius * 0.94, radius, 8.5, [chamber.x, chamber.height + 4.2, chamber.z], concrete, 8);
-        // Kahn crowned the chamber with a folded parabolic shell. Lathing the
-        // parabola over eight segments gives both the curve and the fold in one
-        // geometry; the fins around the drum supply the umbrella ribbing.
-        const profile: THREE.Vector2[] = [];
-        const shellRadius = radius * 1.06;
-        for (let step = 0; step <= 10; step++) {
-          const shellR = shellRadius * (1 - step / 10);
-          profile.push(new THREE.Vector2(shellR, 10.5 * (1 - (shellR / shellRadius) ** 2)));
+        // The chamber roof barely breaks the skyline: a low clerestory ring and
+        // the white folded umbrella that lights the hall below.
+        addCylinder(group, radius * 0.6, radius * 0.62, 2.6, [chamber.x, 47 + 1.3, chamber.z], concrete, 8);
+        addLathe(group, [[radius * 0.6, 0], [radius * 0.34, 2.3], [radius * 0.1, 3.3], [0.001, 3.5]], 16, [chamber.x, 49.6, chamber.z], marble, true);
+        for (let slotIndex = 0; slotIndex < 8; slotIndex++) {
+          const angle = (slotIndex / 8) * Math.PI * 2 + Math.PI / 8;
+          const court = addBox(group, [5.4, 0.3, 2.6], [chamber.x + Math.cos(angle) * radius * 0.8, 47.1, chamber.z + Math.sin(angle) * radius * 0.8], recess);
+          court.rotation.y = -angle + Math.PI / 2;
         }
-        // Flat normals are what turn eight lathe segments into eight visible
-        // folds. Smooth-shaded it just reads as a dome, which is the one shape
-        // this roof is famously not.
-        const shellGeometry = new THREE.LatheGeometry(profile, 8).toNonIndexed();
-        shellGeometry.computeVertexNormals();
-        const shell = new THREE.Mesh(shellGeometry, whiteStone);
-        shell.position.set(chamber.x, chamber.height + 8.4, chamber.z);
-        shell.castShadow = true;
-        group.add(shell);
-        for (let fin = 0; fin < 8; fin++) {
-          const angle = (fin / 8) * Math.PI * 2 + Math.PI / 8;
-          const blade = new THREE.Mesh(unitBox, whiteStone);
-          blade.scale.set(1.7, 9, 3.6);
-          blade.position.set(
-            chamber.x + Math.cos(angle) * radius * 0.95,
-            chamber.height + 4.4,
-            chamber.z + Math.sin(angle) * radius * 0.95,
-          );
-          blade.rotation.y = -angle;
-          blade.castShadow = true;
-          group.add(blade);
-        }
-        // Light monitor at the apex.
-        addCylinder(group, radius * 0.19, radius * 0.27, 4.6, [chamber.x, chamber.height + 20.4, chamber.z], whiteStone, 8);
+      }
+
+      if (citadel) {
+        const southEdge = citadel.z + citadel.depth / 2;
+        const northEdge = citadel.z - citadel.depth / 2;
+        // South Plaza: two brick tiers across the lake, reached by a brick causeway.
+        const plazaZ = southEdge + 26 + 50;
+        addBox(group, [232, 1.2, 108], [citadel.x, 0.6, plazaZ], plazaBrick);
+        addBox(group, [220, 1, 98], [citadel.x, 1.7, plazaZ - 1], terracotta);
+        addBox(group, [20, 2.4, 40], [citadel.x, 1.2, southEdge + 14], plazaBrick);
+        for (const offset of [-73, 0, 73]) addBox(group, [0.6, 0.1, 98], [citadel.x + offset, 2.25, plazaZ - 1], marble);
+        for (const offset of [-16, 16]) addBox(group, [220, 0.1, 0.6], [citadel.x, 2.25, plazaZ - 1 + offset], marble);
+        for (const side of [-1, 1]) addBox(group, [3.4, 3, 98], [citadel.x + side * 112, 1.5, plazaZ - 1], plazaBrick);
+        // Presidential Plaza: white marble steps on the north side.
+        addBox(group, [118, 1.2, 64], [citadel.x, 0.6, northEdge - 24], marble);
+        addBox(group, [96, 1.1, 46], [citadel.x, 1.75, northEdge - 18], whiteStone);
+        addBox(group, [60, 0.2, 26], [citadel.x, 2.4, northEdge - 20], lawn);
       }
     } else if (landmark.kind === "lalbagh-fort") {
-      const grounds = anchor(624024881);
-      if (grounds) {
-        const halfWidth = grounds.width / 2 - 2;
-        const halfDepth = grounds.depth / 2 - 2;
-        addBox(group, [grounds.width - 4, 4.5, 1.8], [grounds.x, 2.6, grounds.z - halfDepth], redBrick);
-        addBox(group, [grounds.width - 4, 4.5, 1.8], [grounds.x, 2.6, grounds.z + halfDepth], redBrick);
-        addBox(group, [1.8, 4.5, grounds.depth - 4], [grounds.x - halfWidth, 2.6, grounds.z], redBrick);
-        addBox(group, [1.8, 4.5, grounds.depth - 4], [grounds.x + halfWidth, 2.6, grounds.z], redBrick);
-        for (const [sideX, sideZ] of [[-1, -1], [1, -1], [-1, 1], [1, 1]] as const) {
-          const cornerX = grounds.x + sideX * halfWidth;
-          const cornerZ = grounds.z + sideZ * halfDepth;
-          addCylinder(group, 3.4, 3.8, 7, [cornerX, 3.5, cornerZ], redBrick, 12);
-          addDome(group, 3.3, [cornerX, 7, cornerZ], whiteStone);
+      // An unfinished Mughal fort: a walled garden holding the Diwan-i-Aam, the
+      // tomb of Pari Bibi and the three-domed mosque on one east-west axis.
+      const GROUNDS = 624024881;
+      const TOMB = 624024857;
+      const MOSQUE = 624024874;
+      const HALL = 624024864;
+      const GATE = 624024884;
+      // Curtain wall along the real boundary, with a bastion at every corner.
+      const boundary = walls(GROUNDS);
+      boundary.forEach((edge, index) => {
+        const wall = addBox(group, [edge.length + 1.2, 5.2, 1.7], [edge.ax + edge.dx * edge.length / 2, 3, edge.az + edge.dz * edge.length / 2], redBrick);
+        wall.rotation.y = edge.rotationY;
+        const coping = addBox(group, [edge.length + 1.2, 0.5, 2.2], [edge.ax + edge.dx * edge.length / 2, 5.8, edge.az + edge.dz * edge.length / 2], brickTrim);
+        coping.rotation.y = edge.rotationY;
+        const next = boundary[(index + 1) % boundary.length];
+        const turn = Math.abs(edge.dx * next.dz - edge.dz * next.dx);
+        if (turn > 0.5 && edge.length > 14 && next.length > 14) {
+          addCylinder(group, 3.6, 4.2, 7.4, [next.ax, 4.1, next.az], redBrick, 8);
+          addCylinder(group, 4.1, 4.1, 0.5, [next.ax, 8, next.az], brickTrim, 8);
+          addLathe(group, domeProfile(3.2, 2.8, 0.1, 7), 12, [next.ax, 8.2, next.az], whiteStone);
         }
-      }
-      const tomb = anchor(624024857);
+      });
+      const mughalArch = pointedArch(2.6, 5.2);
+      const mughalArchTrim = pointedArch(3.5, 6.2);
+      const tomb = anchor(TOMB);
       if (tomb) {
-        const domeRadius = Math.max(5, Math.min(tomb.width, tomb.depth) * 0.38);
-        addDome(group, domeRadius, [tomb.x, tomb.height, tomb.z], whiteStone);
-        addCylinder(group, 0.35, 0.6, 3.2, [tomb.x, tomb.height + domeRadius + 1.4, tomb.z], accent, 8);
+        // Pari Bibi's tomb: a square of peach-washed stone, three arched
+        // doors to each face, a bronze dome on an octagonal drum, four turrets.
+        addBays(group, walls(TOMB), {
+          bay: 6.4, minEdge: 6, storeys: [{ y: 2.2, opening: mughalArch, surround: mughalArchTrim }],
+          opening: archDark, surround: cream,
+          pier: { width: 0.9, depth: 0.6, bottom: 0, top: tomb.height, material: cream },
+        });
+        slab(TOMB, 0, 1.6, 1.07, cream);
+        slab(TOMB, tomb.height - 0.6, 1, 1.03, cream);
+        slab(TOMB, tomb.height + 0.4, 1, 1.004, peach);
+        const half = Math.min(tomb.width, tomb.depth) / 2;
+        const domeRadius = half * 0.56;
+        addCylinder(group, domeRadius * 1.05, domeRadius * 1.12, 3.4, [tomb.x, tomb.height + 3.1, tomb.z], peach, 8);
+        addCylinder(group, domeRadius * 1.14, domeRadius * 1.14, 0.5, [tomb.x, tomb.height + 5, tomb.z], cream, 8);
+        addLathe(group, domeProfile(domeRadius, domeRadius * 1.3, 0.12, 14), 28, [tomb.x, tomb.height + 5.2, tomb.z], bronze);
+        addFinial(group, [tomb.x, tomb.height + 5.2 + domeRadius * 1.3, tomb.z], 0.9);
+        for (const sideX of [-1, 1]) {
+          for (const sideZ of [-1, 1]) {
+            const tx = tomb.x + sideX * (tomb.width / 2 - 0.4);
+            const tz = tomb.z + sideZ * (tomb.depth / 2 - 0.4);
+            addCylinder(group, 1.3, 1.5, tomb.height + 2.4, [tx, (tomb.height + 2.4) / 2, tz], peach, 8);
+            addChhatri(group, [tx, tomb.height + 2.4, tz], 3, peach, bronze);
+          }
+        }
+        solid(tomb.x, tomb.z, domeRadius * 1.2, tomb.height + 5.2 + domeRadius * 1.3);
       }
-      const mosque = anchor(624024874);
+      const mosque = anchor(MOSQUE);
       if (mosque) {
-        const alongX = mosque.width >= mosque.depth;
-        const spacing = Math.max(mosque.width, mosque.depth) * 0.3;
-        for (const step of [-1, 0, 1]) {
-          const radius = step === 0 ? 3.8 : 3.1;
-          addDome(group, radius, [mosque.x + (alongX ? step * spacing : 0), mosque.height, mosque.z + (alongX ? 0 : step * spacing)], whiteStone);
+        const hall = frame(MOSQUE, [1, 0]);
+        addBays(group, walls(MOSQUE), {
+          bay: 5.6, minEdge: 7, storeys: [{ y: 1.6, opening: pointedArch(2.4, 5.6), surround: pointedArch(3.3, 6.6) }],
+          opening: archDark, surround: brickTrim,
+        });
+        slab(MOSQUE, mosque.height - 0.5, 0.8, 1.05, brickTrim);
+        slab(MOSQUE, mosque.height + 0.3, 0.9, 1.01, redBrick);
+        if (hall) {
+          for (const step of [-1, 0, 1]) {
+            const radius = step === 0 ? 2.9 : 2.3;
+            const x = step * hall.hx * 0.62;
+            addCylinder(hall.g, radius * 1.05, radius * 1.1, 1.6, [x, mosque.height + 2, 0], redBrick, 8);
+            addLathe(hall.g, domeProfile(radius, radius * 1.45, 0.16, 12), 16, [x, mosque.height + 2.8, 0], whiteStone, true);
+            addFinial(hall.g, [x, mosque.height + 2.8 + radius * 1.45, 0], 0.6);
+          }
+          for (const sideX of [-1, 1]) {
+            for (const sideZ of [-1, 1]) {
+              addCylinder(hall.g, 0.9, 1.1, mosque.height + 3.4, [sideX * hall.hx, (mosque.height + 3.4) / 2, sideZ * hall.hz], redBrick, 8);
+              addLathe(hall.g, domeProfile(1.1, 1.7, 0.2, 6), 8, [sideX * hall.hx, mosque.height + 3.4, sideZ * hall.hz], whiteStone);
+            }
+          }
         }
       }
-      const gate = anchor(624024884);
+      const audience = anchor(HALL);
+      if (audience) {
+        // Diwan-i-Aam: two arcaded storeys under a flat terrace.
+        addBays(group, walls(HALL), {
+          bay: 4.6, minEdge: 4.2,
+          storeys: [
+            { y: 1.2, opening: pointedArch(2.2, 3.9), surround: pointedArch(3, 4.7) },
+            { y: 6.9, opening: pointedArch(2.2, 3.6), surround: pointedArch(3, 4.4) },
+          ],
+          opening: archDark, surround: cream,
+          pier: { width: 0.7, depth: 0.5, bottom: 0, top: audience.height, material: cream },
+        });
+        slab(HALL, 5.7, 0.6, 1.03, cream);
+        slab(HALL, audience.height - 0.4, 0.8, 1.05, cream);
+        slab(HALL, audience.height + 0.4, 0.9, 1.006, peach);
+        slab(HALL, audience.height + 1.3, 0.08, 0.92, terracotta);
+      }
+      const gate = anchor(GATE);
       if (gate) {
-        addBox(group, [gate.width * 0.5, 4, gate.depth * 0.5], [gate.x, gate.height + 2, gate.z], redBrick);
-        addDome(group, Math.max(2.4, Math.min(gate.width, gate.depth) * 0.26), [gate.x, gate.height + 4, gate.z], whiteStone);
+        const gateway = frame(GATE, [0, 1]);
+        slab(GATE, gate.height, 0.7, 1.01, brickTrim);
+        if (gateway) {
+          // The south gate: a tall arched pavilion between two slender minarets.
+          const { g, hz } = gateway;
+          addBox(g, [17, 17, hz * 2 + 5], [0, 8.5, 0], redBrick);
+          addBox(g, [18, 0.7, hz * 2 + 6], [0, 17, 0], brickTrim);
+          for (const side of [-1, 1]) {
+            const arch = new THREE.Mesh(pointedArch(6.4, 11.5), archDark);
+            arch.position.set(0, 0.6, side * (hz + 2.56));
+            if (side < 0) arch.rotation.y = Math.PI;
+            g.add(arch);
+            const trim = new THREE.Mesh(pointedArch(8, 13), cream);
+            trim.position.set(0, 0.3, side * (hz + 2.52));
+            if (side < 0) trim.rotation.y = Math.PI;
+            g.add(trim);
+          }
+          for (const sideX of [-1, 1]) {
+            addCylinder(g, 1.4, 1.7, 20, [sideX * 9.6, 10, 0], redBrick, 8);
+            addChhatri(g, [sideX * 9.6, 20, 0], 3.2, redBrick, whiteStone);
+          }
+          addChhatri(g, [-4.5, 17.4, 0], 3.4, redBrick, whiteStone);
+          addChhatri(g, [4.5, 17.4, 0], 3.4, redBrick, whiteStone);
+        }
+      }
+      // The garden axis that ties the three monuments together.
+      const axis = [audience, tomb, mosque].filter((stop): stop is NonNullable<typeof stop> => Boolean(stop));
+      for (let index = 0; index + 1 < axis.length; index++) {
+        const from = axis[index];
+        const to = axis[index + 1];
+        const length = Math.hypot(to.x - from.x, to.z - from.z);
+        const path = addBox(group, [length, 0.16, 5], [(from.x + to.x) / 2, 0.62, (from.z + to.z) / 2], paleConcrete);
+        path.rotation.y = Math.atan2(-(to.z - from.z), to.x - from.x);
+        const channel = addBox(group, [length * 0.6, 0.2, 1.4], [(from.x + to.x) / 2, 0.66, (from.z + to.z) / 2], water);
+        channel.rotation.y = path.rotation.y;
       }
     } else if (landmark.kind === "ahsan-manzil") {
-      const palace = anchor(624025793);
+      // The Pink Palace: two arcaded storeys on a plinth, corner pavilions, the
+      // grand river stair up to the first floor, and the domed tower over it.
+      const PALACE = 624025793;
+      const ANDARMAHAL = 624025792;
+      const archLow = roundArch(2.3, 3.5);
+      const archLowTrim = roundArch(3, 4.1);
+      const archHigh = roundArch(2.3, 4.3);
+      const archHighTrim = roundArch(3, 4.9);
+      const dress = (osmId: number, height: number, storeys: BayStorey[]) => {
+        addBays(group, walls(osmId), {
+          bay: 4.3,
+          minEdge: 3.6,
+          storeys,
+          opening: archDark,
+          surround: salmonTrim,
+          pier: { width: 0.7, depth: 0.5, bottom: 0, top: height, material: salmonTrim },
+        });
+        slab(osmId, 0, 1.1, 1.014, salmonTrim);
+        slab(osmId, height * 0.46, 0.55, 1.014, salmonTrim);
+        slab(osmId, height - 0.5, 0.7, 1.024, salmonTrim);
+        slab(osmId, height, 1.2, 1.004, salmon);
+        slab(osmId, height + 1.2, 0.22, 1.016, salmonTrim);
+        slab(osmId, height + 1.2, 0.08, 0.95, roofTerrace);
+      };
+      const palace = anchor(PALACE);
       if (palace) {
-        addBox(group, [palace.width * 1.03, 1.1, palace.depth * 1.03], [palace.x, palace.height + 0.4, palace.z], whiteStone);
-        const domeRadius = clamp(Math.min(palace.width, palace.depth) * 0.28, 5, 8.5);
-        addCylinder(group, domeRadius * 1.12, domeRadius * 1.3, 5, [palace.x, palace.height + 2.5, palace.z], pinkPlaster, 8);
-        addCylinder(group, domeRadius * 0.94, domeRadius * 1.04, 2.4, [palace.x, palace.height + 6.2, palace.z], whiteStone, 8);
-        addDome(group, domeRadius, [palace.x, palace.height + 7, palace.z], pinkPlaster);
-        addCylinder(group, 0.4, 0.7, 4, [palace.x, palace.height + 7 + domeRadius + 1.8, palace.z], accent, 8);
-        // Pilaster rhythm along the river-facing south facade.
-        const alongX = palace.width >= palace.depth;
-        const span = (alongX ? palace.width : palace.depth) * 0.42;
-        for (let index = 0; index < 7; index++) {
-          const offset = -span + (2 * span * index) / 6;
-          const pilasterX = palace.x + (alongX ? offset : palace.width / 2 + 0.3);
-          const pilasterZ = palace.z + (alongX ? palace.depth / 2 + 0.3 : offset);
-          addBox(group, alongX ? [1.4, palace.height * 0.82, 1] : [1, palace.height * 0.82, 1.4], [pilasterX, palace.height * 0.44, pilasterZ], whiteStone);
+        const H = palace.height;
+        dress(PALACE, H, [
+          { y: 1.7, opening: archLow, surround: archLowTrim },
+          { y: H * 0.46 + 1.2, opening: archHigh, surround: archHighTrim },
+        ]);
+        const body = frame(PALACE, [0, 1]);
+        if (body) {
+          const { g, hx, hz } = body;
+          // Corner pavilions rise an attic above the roof line, each crowned with a
+          // shaped gable and four bud finials.
+          for (const sideX of [-1, 1]) {
+            for (const sideZ of [-1, 1]) {
+              const px = sideX * (hx - 4.2);
+              const pz = sideZ * (hz - 4.4);
+              addBox(g, [8.6, 2.4, 8.6], [px, H + 1.2 + 1.2, pz], salmon);
+              addBox(g, [9.2, 0.4, 9.2], [px, H + 3.8, pz], salmonTrim);
+              addCone(g, 4.6, 1.6, [px, H + 4.8, pz], roofTerrace, 4).rotation.y = Math.PI / 4;
+              for (const cx of [-1, 1]) {
+                for (const cz of [-1, 1]) {
+                  addCylinder(g, 0.5, 0.6, 2.2, [px + cx * 4, H + 5.1, pz + cz * 4], salmon, 8);
+                  addLathe(g, domeProfile(0.75, 1.3, 0.2, 6), 8, [px + cx * 4, H + 6.2, pz + cz * 4], salmonTrim);
+                }
+              }
+            }
+          }
+          // Central tower over the entrance: a square stage, an octagonal drum,
+          // then the dome. It stands toward the river front, as built.
+          const tz = hz - 7.5;
+          const towerBase = H + 1.2;
+          addBox(g, [11, 7.4, 11], [0, towerBase + 3.7, tz], salmon);
+          addBox(g, [12.2, 0.6, 12.2], [0, towerBase + 7.4, tz], salmonTrim);
+          addBox(g, [11.6, 0.4, 11.6], [0, towerBase + 2.2, tz], salmonTrim);
+          const towerArch = roundArch(1.7, 3.6);
+          const towerArchTrim = roundArch(2.3, 4.1);
+          for (let face = 0; face < 4; face++) {
+            const angle = (face / 4) * Math.PI * 2;
+            for (const offset of [-3, 0, 3]) {
+              for (const [geometry, material, proud, lift] of [[towerArchTrim, salmonTrim, 5.56, -0.2], [towerArch, archDark, 5.62, 0]] as const) {
+                const pane = new THREE.Mesh(geometry, material);
+                pane.position.set(Math.sin(angle) * proud + Math.cos(angle) * offset, towerBase + 2.9 + lift, tz + Math.cos(angle) * proud - Math.sin(angle) * offset);
+                pane.rotation.y = angle;
+                g.add(pane);
+              }
+            }
+          }
+          for (const cx of [-1, 1]) {
+            for (const cz of [-1, 1]) {
+              addCylinder(g, 0.8, 0.9, 9.6, [cx * 5.6, towerBase + 4.8, tz + cz * 5.6], salmonTrim, 8);
+              addLathe(g, domeProfile(1.15, 1.9, 0.22, 6), 8, [cx * 5.6, towerBase + 9.6, tz + cz * 5.6], salmon);
+              addFinial(g, [cx * 5.6, towerBase + 11.4, tz + cz * 5.6], 0.5);
+            }
+          }
+          addCylinder(g, 5, 5.3, 2.6, [0, towerBase + 8.9, tz], salmon, 8).rotation.y = Math.PI / 8;
+          addCylinder(g, 5.5, 5.5, 0.5, [0, towerBase + 10.4, tz], salmonTrim, 8).rotation.y = Math.PI / 8;
+          addLathe(g, domeProfile(5, 7.2, 0.07, 14), 24, [0, towerBase + 10.6, tz], salmon);
+          addFinial(g, [0, towerBase + 17.6, tz], 1.1);
+          g.updateMatrix();
+          const towerSeat = new THREE.Vector3(0, 0, tz).applyMatrix4(g.matrix);
+          solid(towerSeat.x, towerSeat.z, 8, towerBase + 18);
+
+          // Projecting entrance bay with a triple arch at the head of the stair.
+          addBox(g, [13, H + 1.2, 3.2], [0, (H + 1.2) / 2, hz + 1.6], salmon);
+          addBox(g, [13.8, 0.6, 3.8], [0, H * 0.46 + 0.2, hz + 1.7], salmonTrim);
+          addBox(g, [13.8, 0.7, 3.8], [0, H - 0.2, hz + 1.7], salmonTrim);
+          addBox(g, [13.6, 0.24, 3.6], [0, H + 1.3, hz + 1.7], salmonTrim);
+          const doorArch = roundArch(2.6, 5);
+          const doorArchTrim = roundArch(3.4, 5.6);
+          for (const offset of [-4.1, 0, 4.1]) {
+            for (const [geometry, material, proud, lift] of [[doorArchTrim, salmonTrim, 3.27, -0.2], [doorArch, archDark, 3.33, 0]] as const) {
+              const pane = new THREE.Mesh(geometry, material);
+              pane.position.set(offset, H * 0.46 + 1.1 + lift, hz + proud);
+              g.add(pane);
+            }
+          }
+          for (const offset of [-6.2, -2.05, 2.05, 6.2]) addBox(g, [0.8, H + 1.2, 0.5], [offset, (H + 1.2) / 2, hz + 3.35], salmonTrim);
+          // The grand stair: a single broad flight from the lawn to the first floor.
+          const landing = H * 0.46;
+          const STEPS = 12;
+          const run = 17;
+          const stairStart = hz + 3.2;
+          for (let step = 0; step < STEPS; step++) {
+            const stepHeight = landing * (1 - step / STEPS);
+            addBox(g, [12 + step * 0.34, stepHeight, run / STEPS + 0.05], [0, stepHeight / 2, stairStart + (step + 0.5) * (run / STEPS)], stoneStep);
+          }
+          for (const side of [-1, 1]) {
+            const rail = addBox(g, [0.9, 1.5, Math.hypot(run, landing)], [side * 7.6, landing / 2 + 0.7, stairStart + run / 2], salmon);
+            rail.rotation.x = Math.atan2(landing, run);
+            addBox(g, [1.5, 2.6, 1.5], [side * 8.2, 1.3, stairStart + run + 0.4], salmonTrim);
+          }
+          // Forecourt walk down to the river gate.
+          addBox(g, [7, 0.14, 46], [0, 0.6, stairStart + run + 23], paleConcrete);
+          addBox(g, [58, 0.14, 4], [0, 0.6, stairStart + run + 3], paleConcrete);
         }
-        addBox(group, [10, 1.4, 6], [palace.x, 0.8, palace.z + palace.depth / 2 + 3.2], whiteStone);
-        addBox(group, [13, 0.7, 9], [palace.x, 0.35, palace.z + palace.depth / 2 + 4.4], paleConcrete);
+      }
+      const andarmahal = anchor(ANDARMAHAL);
+      if (andarmahal) {
+        dress(ANDARMAHAL, andarmahal.height, [
+          { y: 1.5, opening: roundArch(2, 2.9), surround: roundArch(2.6, 3.4) },
+          { y: andarmahal.height * 0.46 + 1.1, opening: roundArch(2, 3.4), surround: roundArch(2.6, 3.9) },
+        ]);
+      }
+      for (const osmId of [624025788, 624025789, 624025784]) {
+        const wing = anchor(osmId);
+        if (!wing) continue;
+        slab(osmId, wing.height, 0.6, 1.02, salmonTrim);
+        slab(osmId, wing.height + 0.6, 0.08, 0.93, roofTerrace);
       }
     } else if (landmark.kind === "shaheed-minar") {
-      addBox(group, [44, 0.6, 28], [0, 0.3, 2], paleConcrete);
-      addBox(group, [40, 1.2, 23], [0, 0.9, 0], whiteStone);
-      // Voxel-art elevation: five column-and-lintel frames bowing forward,
-      // the mother frame tallest at centre, the red sun rising behind.
-      addVoxelRelief(
-        group,
-        [
-          "..RRRR..",
-          ".RRRRRR.",
-          "RRRRRRRR",
-          "RRRRRRRR",
-          "RRRRRRRR",
-          "RRRRRRRR",
-          ".RRRRRR.",
-          "..RRRR..",
-        ],
-        { R: monumentRed },
-        1.4,
-        [4.5, 4.2, -3.6],
-        { depth: 1 },
-      );
-      addVoxelRelief(
-        group,
-        [
-          "..........WWWW..........",
-          "..........W..W..........",
-          ".....WWWW.W..W.WWWW.....",
-          ".....W..W.W..W.W..W.....",
-          "WWWW.W..W.W..W.W..W.WWWW",
-          "W..W.W..W.W..W.W..W.W..W",
-          "W..W.W..W.W..W.W..W.W..W",
-          "W..W.W..W.W..W.W..W.W..W",
-          "W..W.W..W.W..W.W..W.W..W",
-          "W..W.W..W.W..W.W..W.W..W",
-        ],
-        { W: whiteStone },
-        1.6,
-        [0, 1.4, 0],
-        { depth: 1, leanX: -0.15 },
-      );
+      // The Language Martyrs' monument: a mother and her fallen sons as five
+      // marble frames on a stepped plinth, her head bowed, the red sun behind.
+      addBox(group, [58, 0.5, 40], [0, 0.25, 5], paleConcrete);
+      addBox(group, [50, 1.1, 30], [0, 1.05, 2], whiteStone);
+      addBox(group, [44, 1, 22], [0, 2.1, 0], marble);
+      for (let step = 0; step < 4; step++) addBox(group, [26 - step * 1.2, 0.5, 1.4], [0, 0.75 + step * 0.5, 17.6 - step * 1.4], whiteStone);
+      const BASE = 2.6;
+      const sun = addCylinder(group, 5.6, 5.6, 0.5, [0, BASE + 8.4, -4.4], monumentRed, 40);
+      sun.rotation.x = Math.PI / 2;
+      const addFrame = (x: number, z: number, frameWidth: number, height: number, bars: number, turn: number, bowed: boolean) => {
+        const holder = new THREE.Group();
+        holder.position.set(x, BASE, z);
+        holder.rotation.y = turn;
+        group.add(holder);
+        const straight = bowed ? height * 0.68 : height;
+        for (let bar = 0; bar < bars; bar++) {
+          const barX = -frameWidth / 2 + (frameWidth * bar) / (bars - 1);
+          addBox(holder, [0.55, straight, 0.55], [barX, straight / 2, 0], marble);
+          if (bowed) {
+            const lean = 0.5;
+            const upper = height - straight;
+            const bent = addBox(holder, [0.55, upper, 0.55], [barX, straight + Math.cos(lean) * upper / 2, Math.sin(lean) * upper / 2], marble);
+            bent.rotation.x = lean;
+          }
+        }
+        if (bowed) {
+          const lean = 0.5;
+          const upper = height - straight;
+          addBox(holder, [frameWidth + 0.55, 0.6, 0.6], [0, straight + Math.cos(lean) * upper, Math.sin(lean) * upper], marble);
+          addBox(holder, [frameWidth + 0.55, 0.5, 0.6], [0, straight, 0], marble);
+        } else {
+          addBox(holder, [frameWidth + 0.55, 0.6, 0.6], [0, height - 0.3, 0], marble);
+        }
+        addBox(holder, [frameWidth + 1.6, 0.4, 2], [0, 0.2, 0], whiteStone);
+      };
+      addFrame(0, -1.5, 7.2, 14, 5, 0, true);
+      addFrame(-8.4, -0.4, 4.6, 9.4, 4, 0.2, false);
+      addFrame(8.4, -0.4, 4.6, 9.4, 4, -0.2, false);
+      addFrame(-15, 2, 3.8, 7, 3, 0.42, false);
+      addFrame(15, 2, 3.8, 7, 3, -0.42, false);
     } else if (landmark.kind === "curzon-hall") {
-      const mass = anchor(264272612);
+      // Curzon Hall: deep red brick, cusped arcades on both storeys, and a
+      // roofline of chhatris rather than any single dome.
+      const HALL = 264272612;
+      const mass = anchor(HALL);
       if (mass) {
-        addBox(group, [mass.width * 1.02, 0.7, mass.depth * 1.02], [mass.x, 5.5, mass.z], whiteStone);
-        addBox(group, [mass.width * 1.02, 0.7, mass.depth * 1.02], [mass.x, 11.5, mass.z], whiteStone);
-        addCylinder(group, 6.5, 7.5, 4.5, [mass.x, mass.height + 2, mass.z], whiteStone, 16);
-        addDome(group, 6.5, [mass.x, mass.height + 4, mass.z], redBrick);
-        addCylinder(group, 0.4, 0.7, 3.4, [mass.x, mass.height + 11.6, mass.z], accent, 8);
-        const cornerX = mass.width / 2 - 4;
-        const cornerZ = mass.depth / 2 - 4;
-        for (const [sideX, sideZ] of [[-1, -1], [1, -1], [-1, 1], [1, 1]] as const) {
-          addCylinder(group, 1.6, 1.8, 4, [mass.x + sideX * cornerX, mass.height + 1.6, mass.z + sideZ * cornerZ], whiteStone, 10);
-          addDome(group, 2, [mass.x + sideX * cornerX, mass.height + 3.6, mass.z + sideZ * cornerZ], whiteStone);
+        const H = mass.height;
+        addBays(group, walls(HALL), {
+          bay: 4.4, minEdge: 4,
+          storeys: [
+            { y: 1.4, opening: pointedArch(2.4, 5), surround: pointedArch(3.2, 5.8) },
+            { y: H * 0.5 + 1, opening: pointedArch(2.4, 5.4), surround: pointedArch(3.2, 6.2) },
+          ],
+          opening: archDark, surround: brickTrim,
+          pier: { width: 0.7, depth: 0.5, bottom: 0, top: H, material: brickTrim },
+        });
+        slab(HALL, 0, 1.1, 1.01, brickTrim);
+        slab(HALL, H * 0.5, 0.6, 1.012, brickTrim);
+        slab(HALL, H - 0.6, 0.9, 1.022, brickTrim);
+        slab(HALL, H + 0.3, 1.1, 1.004, deepBrick);
+        slab(HALL, H + 1.4, 0.08, 0.955, terracotta);
+        const hall = frame(HALL, [0, -1]);
+        if (hall) {
+          const { g, hx, hz } = hall;
+          const roofY = H + 1.4;
+          // Corner kiosks, a row along each long parapet, and the larger
+          // pavilions over the projecting centre bays.
+          for (const sideX of [-1, 1]) {
+            for (const sideZ of [-1, 1]) addChhatri(g, [sideX * (hx - 3), roofY, sideZ * (hz * 0.42)], 4.2, deepBrick, brickTrim);
+            for (const t of [0.3, 0.62]) {
+              for (const sideZ of [-1, 1]) addChhatri(g, [sideX * hx * t, roofY, sideZ * (hz * 0.3)], 2.6, deepBrick, brickTrim);
+            }
+          }
+          for (const sideZ of [-1, 1]) {
+            addBox(g, [16, 3.4, 9], [0, roofY + 1.7, sideZ * (hz - 6)], deepBrick);
+            addBox(g, [17, 0.5, 10], [0, roofY + 3.6, sideZ * (hz - 6)], brickTrim);
+            for (const sideX of [-1, 1]) addChhatri(g, [sideX * 6.2, roofY + 3.8, sideZ * (hz - 6)], 4.6, deepBrick, brickTrim);
+            const portal = new THREE.Mesh(pointedArch(5, 8.4), archDark);
+            portal.position.set(0, 1.2, sideZ * (hz + 0.2));
+            if (sideZ < 0) portal.rotation.y = Math.PI;
+            g.add(portal);
+          }
         }
       }
     } else if (landmark.kind === "baitul-mukarram") {
-      const mass = anchor(186664126);
+      // The national mosque: a tall white cube after the Kaaba rising out of
+      // low wings of slit windows, entered through a triple-arched portal, with
+      // a single minaret beside it.
+      const HALL = 186664126;
+      const mass = anchor(HALL);
       if (mass) {
-        addBox(group, [mass.width * 0.6, 2.2, mass.depth * 0.6], [mass.x, mass.height + 1.1, mass.z], whiteStone);
-        // Voxel arch screens: rows of recessed pointed arches sunk into every
-        // facade of the great white cube, in repeating 5-column units.
-        const voxel = 2.2;
-        const archRows = (columns: number) => {
-          const lines: string[] = [];
-          for (let row = 0; row < 10; row++) {
-            let line = "";
-            for (let column = 0; column < columns; column++) {
-              const phase = column % 5;
-              if (row === 0) line += ".";
-              else if (row === 1) line += phase === 2 ? "D" : ".";
-              else line += phase >= 1 && phase <= 3 ? "D" : ".";
-            }
-            lines.push(line);
+        const H = mass.height;
+        addBays(group, walls(HALL), {
+          bay: 3.4, minEdge: 14, margin: 3,
+          storeys: [{ y: 3.6, opening: roundArch(1, 7.6) }],
+          opening: archDark,
+        });
+        slab(HALL, 0, 1.6, 1.012, paleConcrete);
+        slab(HALL, H - 1.2, 1.6, 1.01, marble);
+        slab(HALL, H + 0.4, 0.08, 0.97, roofGrey);
+        const hall = frame(HALL, [1, 0]);
+        if (hall) {
+          const { g, hx, hz } = hall;
+          const cube = hz * 0.62;
+          const cubeX = -hx * 0.2;
+          const cubeTop = 35;
+          addBox(g, [cube * 2, cubeTop, cube * 2], [cubeX, cubeTop / 2, 0], whiteStone);
+          // The two dark bands under the cornice are the cube's only ornament.
+          for (const y of [cubeTop - 5.6, cubeTop - 3.6]) addBox(g, [cube * 2 + 0.3, 0.7, cube * 2 + 0.3], [cubeX, y, 0], recess);
+          addBox(g, [cube * 2 + 0.8, 0.9, cube * 2 + 0.8], [cubeX, cubeTop - 0.45, 0], marble);
+          addBox(g, [cube * 2 - 2, 0.1, cube * 2 - 2], [cubeX, cubeTop + 0.05, 0], roofGrey);
+          // Entrance portal on the east front, three pointed arches wide.
+          const portalX = cubeX + cube;
+          addBox(g, [5, H + 6.5, 30], [portalX + 2.5, (H + 6.5) / 2, 0], whiteStone);
+          addBox(g, [5.6, 1, 31], [portalX + 2.5, H + 6.5, 0], marble);
+          for (const [offset, archWidth, archHeight] of [[-9.6, 5.4, 11.5], [0, 7, 14.5], [9.6, 5.4, 11.5]] as const) {
+            const arch = new THREE.Mesh(pointedArch(archWidth, archHeight), archDark);
+            arch.position.set(portalX + 5.06, 1.6, offset);
+            arch.rotation.y = Math.PI / 2;
+            g.add(arch);
           }
-          return lines;
-        };
-        const screenColumns = (wallLength: number) => Math.max(6, Math.floor((wallLength - 10) / voxel));
-        for (const side of [-1, 1]) {
-          addVoxelRelief(group, archRows(screenColumns(mass.width)), { D: recess }, voxel, [mass.x, 3, mass.z + side * (mass.depth / 2 - 0.6)], { depth: 1 });
-          addVoxelRelief(group, archRows(screenColumns(mass.depth)), { D: recess }, voxel, [mass.x + side * (mass.width / 2 - 0.6), 3, mass.z], { depth: 1, rotationY: Math.PI / 2 });
+          // Forecourt, reflecting pool and the walk up to the portal.
+          addBox(g, [hx * 0.5, 0.3, 26], [hx + hx * 0.2, 0.2, 0], paleConcrete);
+          addBox(g, [hx * 0.42, 0.3, 9], [hx + hx * 0.2, 0.34, 0], water);
+          g.updateMatrix();
+          const cubeSeat = new THREE.Vector3(cubeX, 0, 0).applyMatrix4(g.matrix);
+          solid(cubeSeat.x, cubeSeat.z, cube, cubeTop);
         }
-        const minaretX = mass.x + mass.width * 0.6;
-        const minaretZ = mass.z + mass.depth * 0.52;
-        addCylinder(group, 2.6, 3.1, 50, [minaretX, 25, minaretZ], paleConcrete, 12);
-        addCylinder(group, 4.2, 4.2, 1.6, [minaretX, 50.8, minaretZ], whiteStone, 12);
-        addCylinder(group, 1.9, 2.3, 10, [minaretX, 56.5, minaretZ], paleConcrete, 12);
-        addDome(group, 2.2, [minaretX, 61.5, minaretZ], whiteStone);
-        addCylinder(group, 0.35, 0.6, 4.5, [minaretX, 65.5, minaretZ], accent, 8);
+        const minaretX = mass.x + mass.width * 0.56;
+        const minaretZ = mass.z + mass.depth * 0.54;
+        addBox(group, [7.5, 6, 7.5], [minaretX, 3, minaretZ], whiteStone);
+        addCylinder(group, 2.3, 3, 46, [minaretX, 29, minaretZ], whiteStone, 8);
+        for (const y of [22, 38]) addCylinder(group, 3.5, 3.1, 1.2, [minaretX, y, minaretZ], marble, 8);
+        addCylinder(group, 4.3, 3.2, 1.6, [minaretX, 52.6, minaretZ], marble, 8);
+        addCylinder(group, 1.8, 2.1, 8, [minaretX, 57.4, minaretZ], whiteStone, 8);
+        addLathe(group, domeProfile(2.1, 3.4, 0.14, 8), 12, [minaretX, 61.4, minaretZ], marble);
+        addFinial(group, [minaretX, 64.8, minaretZ], 0.8);
+        solid(minaretX, minaretZ, 3.6, 66);
       }
     } else if (landmark.kind === "bangladesh-bank") {
-      addBox(group, [width * 0.9, 8, depth * 0.92], [0, 4, 0], concrete);
-      const shaftHeight = top - 10;
-      addBox(group, [width * 0.72, shaftHeight, depth * 0.66], [0, shaftHeight / 2 + 7, 0], darkGlass);
-      for (let y = 14; y < top - 6; y += 7) {
-        addBox(group, [width * 0.75, 0.8, depth * 0.69], [0, y, 0], paleConcrete);
+      // Central bank tower: a concrete podium, a glazed shaft with a spandrel to
+      // every floor, solid end cores, and a stepped crown.
+      addBox(group, [width * 0.96, 9, depth * 0.96], [0, 4.5, 0], concrete);
+      addBox(group, [width * 0.98, 4.6, depth * 0.98], [0, 4.4, 0], ribbonGlass);
+      addBox(group, [width * 1.02, 0.9, depth * 1.02], [0, 9.4, 0], paleConcrete);
+      const shaftHeight = top - 12;
+      addBox(group, [width * 0.72, shaftHeight, depth * 0.66], [0, shaftHeight / 2 + 9.8, 0], darkGlass);
+      for (let y = 13.4; y < top - 5; y += 3.7) addBox(group, [width * 0.735, 0.7, depth * 0.675], [0, y, 0], paleConcrete);
+      for (const side of [-1, 1]) {
+        addBox(group, [width * 0.1, shaftHeight + 3, depth * 0.5], [side * width * 0.39, (shaftHeight + 3) / 2 + 9.8, 0], concrete);
+        for (let offset = -0.26; offset <= 0.261; offset += 0.13) {
+          addBox(group, [0.5, shaftHeight, 0.8], [width * offset, shaftHeight / 2 + 9.8, side * depth * 0.335], paleConcrete);
+        }
       }
-      addBox(group, [width * 0.78, 2.6, depth * 0.72], [0, top - 1.5, 0], roof);
-      addBox(group, [5, 9, 5], [0, top + 2.5, 0], accent);
+      addBox(group, [width * 0.78, 2.4, depth * 0.72], [0, top - 1.4, 0], paleConcrete);
+      addBox(group, [width * 0.5, 4, depth * 0.44], [0, top + 1.8, 0], plantGrey);
+      addBox(group, [width * 0.3, 2.4, depth * 0.3], [0, top + 5, 0], roofGrey);
+      addCylinder(group, 0.4, 0.6, 12, [0, top + 12, 0], accent, 8);
     } else if (landmark.kind === "airport") {
       const runway = addBox(group, [72, 1.2, 3_200], [0, 0.35, 0], recess);
       runway.receiveShadow = true;
@@ -3207,27 +3885,81 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
           addCylinder(group, 0.8, 0.8, 0.5, [side * 38, 1.45, offset], side < 0 ? monumentRed : accent, 8);
         }
       }
-      addBox(group, [290, 16, 72], [-245, 8, -300], paleConcrete);
+      // Terminal: a long glazed concourse under an oversailing roof, with
+      // piers out to the apron stands.
+      addBox(group, [290, 14, 72], [-245, 7, -300], paleConcrete);
+      addBox(group, [292, 6, 73], [-245, 8, -300], ribbonGlass);
+      addBox(group, [304, 1.6, 84], [-245, 15, -300], silverPanel);
+      for (let offset = -120; offset <= 120; offset += 40) addBox(group, [14, 2.4, 60], [-245 + offset, 17, -300], atriumGlass);
       addBox(group, [230, 8, 126], [-250, 4, -205], concrete);
-      for (const gate of [-120, -40, 40, 120]) {
-        addBox(group, [13, 5, 55], [-202 + gate, 5, -120], glass);
+      addBox(group, [228, 0.2, 124], [-250, 8.1, -205], roofGrey);
+      // A simple airliner: fuselage, swept wing, tailplane and fin.
+      const addAirliner = (x: number, z: number, heading: number, livery: THREE.Material) => {
+        const plane = new THREE.Group();
+        plane.position.set(x, 4.6, z);
+        plane.rotation.y = heading;
+        group.add(plane);
+        const fuselage = addCylinder(plane, 2.3, 2.3, 34, [0, 0, 0], whiteStone, 12);
+        fuselage.rotation.x = Math.PI / 2;
+        const nose = addCone(plane, 2.3, 6, [0, 0, 20], whiteStone, 12);
+        nose.rotation.x = Math.PI / 2;
+        const tail = addCone(plane, 2.3, 9, [0, 0.6, -21.5], whiteStone, 12);
+        tail.rotation.x = -Math.PI / 2;
+        for (const side of [-1, 1]) {
+          const wing = addBox(plane, [20, 0.5, 5.4], [side * 11, -0.6, -1.5], whiteStone);
+          wing.rotation.y = side * 0.42;
+          const engine = addCylinder(plane, 1.1, 1.1, 4.6, [side * 7.4, -1.9, 1.6], plantGrey, 10);
+          engine.rotation.x = Math.PI / 2;
+          const stabiliser = addBox(plane, [7.6, 0.4, 3], [side * 4.2, 1, -21.5], whiteStone);
+          stabiliser.rotation.y = side * 0.4;
+        }
+        const fin = addBox(plane, [0.5, 8, 5.6], [0, 4.6, -21.5], livery);
+        fin.rotation.x = -0.5;
+        addBox(plane, [4.7, 0.5, 30], [0, -0.3, 0], livery);
+      };
+      for (const [index, gate] of [-120, -40, 40, 120].entries()) {
+        addBox(group, [5, 4, 44], [-202 + gate, 6, -122], silverPanel);
+        addBox(group, [5.4, 2, 44.2], [-202 + gate, 6.4, -122], ribbonGlass);
+        addAirliner(-202 + gate + 16, -86, Math.PI, index % 2 ? accent : monumentRed);
       }
-      addCylinder(group, 11, 15, 52, [-390, 26, -245], concrete, 12);
-      addCylinder(group, 20, 15, 8, [-390, 55, -245], darkGlass, 12);
-      addCylinder(group, 1.2, 1.2, 13, [-390, 65.5, -245], accent, 8);
+      addAirliner(-70, 420, 0, monumentRed);
+      // Control tower with a glazed cab.
+      addCylinder(group, 6, 8, 48, [-390, 24, -245], concrete, 12);
+      addCylinder(group, 12, 7, 6, [-390, 51, -245], paleConcrete, 12);
+      addCylinder(group, 13, 12, 5.5, [-390, 56.7, -245], ribbonGlass, 12);
+      addCylinder(group, 13.6, 13.6, 1, [-390, 60, -245], silverPanel, 12);
+      addCylinder(group, 1, 1, 12, [-390, 66.5, -245], accent, 8);
+      // Runway numbers end: threshold bars at both ends.
+      for (const end of [-1, 1]) {
+        for (let bar = -3; bar <= 3; bar++) addBox(group, [3, 0.45, 44], [bar * 8, 1.36, end * 1_500], whiteStone);
+      }
     }
 
+    bakeGroup(group);
     const bounds = allBounds.get(landmark.kind)!;
     colliders.push({
       x: (bounds.minX + bounds.maxX) / 2,
       z: (bounds.minZ + bounds.maxZ) / 2,
       halfWidth: Math.max(3, (bounds.maxX - bounds.minX) / 2),
       halfDepth: Math.max(3, (bounds.maxZ - bounds.minZ) / 2),
-      top,
+      top: colliderTop,
     });
     const world = coordinatesToWorld(landmark.lat, landmark.lon);
+    // Seat the perch on whatever is actually built at that spot, so the crow
+    // lands on the roof or the dome rather than inside it.
+    group.updateMatrixWorld(true);
+    perchRay.set(perchOrigin.set(world.x, 900, world.y), perchDown);
+    const surfaces = perchRay.intersectObjects([group, ...(landmarkMeshes.get(landmark.kind) ?? [])], true);
+    let perchTop = surfaces.length > 0 ? surfaces[0].point.y : top;
+    // A perch below the top of a collision column could never be reached, so
+    // it never sits lower than the columns that contain it.
+    for (const collider of colliders) {
+      if (Math.abs(world.x - collider.x) <= collider.halfWidth && Math.abs(world.y - collider.z) <= collider.halfDepth) {
+        perchTop = Math.max(perchTop, collider.top);
+      }
+    }
     const perch = {
-      position: new THREE.Vector3(world.x, top, world.y),
+      position: new THREE.Vector3(world.x, perchTop, world.y),
       label: landmark.label,
       heading: landmark.heading,
     };
@@ -4754,7 +5486,13 @@ export function BirdFlight() {
 
     let maxFrameMs = 0;
     let longFrames = 0;
-    if (import.meta.env.DEV) (window as BirdFlightWindow & { __scene?: THREE.Scene }).__scene = scene;
+    if (import.meta.env.DEV) {
+      // Dev-only handles for inspecting models from an arbitrary camera.
+      const devWindow = window as BirdFlightWindow & { __scene?: THREE.Scene; __renderer?: THREE.WebGLRenderer; __THREE?: typeof THREE };
+      devWindow.__scene = scene;
+      devWindow.__renderer = renderer;
+      devWindow.__THREE = THREE;
+    }
     (window as BirdFlightWindow).__birdFlightDiagnostics = () => {
       const trafficSimulation = scene.userData.trafficSimulation as TrafficSimulation | null | undefined;
       return {
@@ -5027,6 +5765,14 @@ export function BirdFlight() {
     const animate = () => {
       animation = requestAnimationFrame(animate);
       const now = performance.now();
+      // Pace the loop instead of drawing as fast as the display allows. A 120 Hz
+      // panel would otherwise render two million triangles twice as often for no
+      // visible gain, and a paused or backgrounded game would keep the GPU at
+      // full load. The 1.5 ms slack stops a 60 Hz display from skipping frames.
+      const frameBudgetMs = pausedRef.current
+        ? PAUSED_FRAME_MS
+        : document.hasFocus() ? ACTIVE_FRAME_MS : UNFOCUSED_FRAME_MS;
+      if (now - lastFrame < frameBudgetMs - 1.5) return;
       const frameMs = now - lastFrame;
       const dt = Math.min(frameMs / 1000, 0.035);
       lastFrame = now;
@@ -5476,7 +6222,10 @@ export function BirdFlight() {
     return () => {
       disposed = true;
       delete (window as BirdFlightWindow).__birdFlightDiagnostics;
-      delete (window as BirdFlightWindow & { __scene?: THREE.Scene }).__scene;
+      const devWindow = window as BirdFlightWindow & { __scene?: unknown; __renderer?: unknown; __THREE?: unknown };
+      delete devWindow.__scene;
+      delete devWindow.__renderer;
+      delete devWindow.__THREE;
       focusLandmarkRef.current = () => false;
       flightActionsRef.current = null;
       flightAudio.dispose();
