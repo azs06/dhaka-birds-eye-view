@@ -1411,12 +1411,17 @@ async function addRoadNetworkMeshes(
 ) {
   const majorRoads = new Set(["motorway", "trunk", "primary", "secondary"]);
   const localRoads = new Set(["tertiary", "residential", "unclassified", "service"]);
-  const surfaces: THREE.BufferGeometry[][] = [[], [], []];
-  const shoulders: THREE.BufferGeometry[] = [];
+  const surfaces: THREE.BufferGeometry[] = [];
   const centerLines: THREE.BufferGeometry[] = [];
   const edgeLines: THREE.BufferGeometry[] = [];
+  const shoulderColor = new THREE.Color(0xaaa28f);
+  const surfaceColors = [0x2f3735, 0x464f4b, 0x626b65].map((color) => new THREE.Color(color));
 
-  const segmentBox = (
+  // Roads are only ever seen from above, so each strip is its top face alone:
+  // two triangles where a box would spend twelve on sides and an underside
+  // nobody can see. `y` and `height` still describe the box it stands in for,
+  // so every deck keeps the elevation it had.
+  const segmentStrip = (
     x1: number,
     z1: number,
     x2: number,
@@ -1425,6 +1430,7 @@ async function addRoadNetworkMeshes(
     height: number,
     y: number,
     lateralOffset = 0,
+    color?: THREE.Color,
   ) => {
     const dx = x2 - x1;
     const dz = z2 - z1;
@@ -1432,13 +1438,23 @@ async function addRoadNetworkMeshes(
     if (length < 1) return null;
     const normalX = -dz / length;
     const normalZ = dx / length;
-    const geometry = new THREE.BoxGeometry(length + 0.8, height, width);
+    const geometry = new THREE.PlaneGeometry(length + 0.8, width);
+    geometry.rotateX(-Math.PI / 2);
     geometry.rotateY(-Math.atan2(dz, dx));
     geometry.translate(
       (x1 + x2) / 2 + normalX * lateralOffset,
-      y,
+      y + height / 2,
       (z1 + z2) / 2 + normalZ * lateralOffset,
     );
+    if (color) {
+      const colors = new Float32Array(geometry.attributes.position.count * 3);
+      for (let vertex = 0; vertex < colors.length; vertex += 3) {
+        colors[vertex] = color.r;
+        colors[vertex + 1] = color.g;
+        colors[vertex + 2] = color.b;
+      }
+      geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    }
     return geometry;
   };
 
@@ -1446,45 +1462,38 @@ async function addRoadNetworkMeshes(
     const bucket = majorRoads.has(road.kind) ? 0 : localRoads.has(road.kind) ? 1 : 2;
     const width = bucket === 0 ? (road.kind === "motorway" || road.kind === "trunk" ? 17 : 14) : bucket === 1 ? 7.5 : 4.2;
     // Stagger deck heights per class so crossing roads never share a coplanar top
-    // face — identical-height boxes in different asphalt colours z-fight at every
+    // face — identical-height decks in different asphalt colours z-fight at every
     // junction where a local street overlaps a major road.
     const surfaceY = bucket === 0 ? 0.98 : bucket === 1 ? 0.9 : 0.84;
     for (let index = 1; index < road.points.length; index++) {
       const [x1, z1] = road.points[index - 1];
       const [x2, z2] = road.points[index];
-      const surface = segmentBox(x1, z1, x2, z2, width, 0.34, surfaceY);
+      const surface = segmentStrip(x1, z1, x2, z2, width, 0.34, surfaceY, 0, surfaceColors[bucket]);
       if (!surface) continue;
-      surfaces[bucket].push(surface);
-      const shoulder = segmentBox(x1, z1, x2, z2, width + (bucket === 0 ? 5.5 : 2.4), 0.24, 0.78);
-      if (shoulder) shoulders.push(shoulder);
+      surfaces.push(surface);
+      const shoulder = segmentStrip(x1, z1, x2, z2, width + (bucket === 0 ? 5.5 : 2.4), 0.24, 0.78, 0, shoulderColor);
+      if (shoulder) surfaces.push(shoulder);
       if (bucket === 0) {
-        const center = segmentBox(x1, z1, x2, z2, 0.58, 0.09, 1.19);
+        const center = segmentStrip(x1, z1, x2, z2, 0.58, 0.09, 1.19);
         if (center) centerLines.push(center);
         const edgeOffset = width / 2 - 0.85;
-        const leftEdge = segmentBox(x1, z1, x2, z2, 0.32, 0.075, 1.18, -edgeOffset);
-        const rightEdge = segmentBox(x1, z1, x2, z2, 0.32, 0.075, 1.18, edgeOffset);
+        const leftEdge = segmentStrip(x1, z1, x2, z2, 0.32, 0.075, 1.18, -edgeOffset);
+        const rightEdge = segmentStrip(x1, z1, x2, z2, 0.32, 0.075, 1.18, edgeOffset);
         if (leftEdge) edgeLines.push(leftEdge);
         if (rightEdge) edgeLines.push(rightEdge);
       }
     }
   }
 
+  // Shoulders and all three asphalt classes share one vertex-coloured material,
+  // so a map cell's whole road surface is a single draw call.
   await mergeIntoMeshBatches(
     parent,
-    shoulders,
-    new THREE.MeshStandardMaterial({ color: 0xaaa28f, roughness: 0.98 }),
-    `${name} shoulders`,
+    surfaces,
+    new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.96 }),
+    `${name} roads`,
     isCancelled,
-    false,
-    280,
-    false,
   );
-  const roadMaterials = [0x2f3735, 0x464f4b, 0x626b65].map(
-    (color) => new THREE.MeshStandardMaterial({ color, roughness: 0.95 }),
-  );
-  for (let index = 0; index < surfaces.length; index++) {
-    await mergeIntoMeshBatches(parent, surfaces[index], roadMaterials[index], `${name} roads ${index}`, isCancelled, false, 280, false);
-  }
   // Road markings are the only continuous line work in the city, so lifting them
   // at night traces every corridor from the air the way real street lighting does.
   const centerLineMaterial = new THREE.MeshStandardMaterial({
@@ -1512,9 +1521,6 @@ async function addRoadNetworkMeshes(
     centerLineMaterial,
     `${name} center lines`,
     isCancelled,
-    false,
-    320,
-    false,
   );
   await mergeIntoMeshBatches(
     parent,
@@ -1522,9 +1528,6 @@ async function addRoadNetworkMeshes(
     edgeLineMaterial,
     `${name} edge lines`,
     isCancelled,
-    false,
-    320,
-    false,
   );
 }
 
@@ -2010,8 +2013,13 @@ async function addProceduralDistrictTiles(
         await yieldIfNeeded(isCancelled);
         continue;
       }
+      // Hidden tiles stay out of the scene graph entirely. There are thousands
+      // of them, and three.js walks every attached object each frame whether or
+      // not it is visible.
       group.visible = Math.hypot(centerX - initialPosition.x, centerZ - initialPosition.z) < visibilityRadius;
-      scene.add(group);
+      group.updateMatrixWorld(true);
+      group.traverse((object) => { object.matrixAutoUpdate = false; });
+      if (group.visible) scene.add(group);
       tiles.push({ group, centerX, centerZ, colliders: tileColliders });
       await yieldIfNeeded(isCancelled);
   }
@@ -4127,6 +4135,7 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
           addBox(train, [CAR_W - 0.2, 0.5, 0.35], [0, 1.9, tip - dir * 0.2], metroRed);
         }
       }
+      bakeGroup(train);
       train.traverse((object) => { object.frustumCulled = false; });
       return train;
     };
@@ -4163,6 +4172,13 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
       }
       return { u: stopSeq[0], dir: dirSign[0] };
     };
+
+    // Guideway, piers and stations are static: merge them to one mesh per
+    // material instead of one draw call per girder segment.
+    bakeGroup(metroRoot);
+    for (const child of [...metroRoot.children]) {
+      if (child instanceof THREE.Group && child.children.length === 0) metroRoot.remove(child);
+    }
 
     const TRAIN_COUNT = 3;
     const trains = Array.from({ length: TRAIN_COUNT }, (_, i) => {
@@ -4698,6 +4714,13 @@ function polygonShape(points: MapPoint[]) {
   return shape;
 }
 
+// Side of the square map cells that static world geometry is merged into.
+const WORLD_MESH_CELL_SIZE = 2400;
+
+// Merge static world geometry into one mesh per map cell. Merging by cell rather
+// than by arrival order is what lets the renderer cull: each mesh's bounds are a
+// compact patch of the city, so everything behind the camera or past the far
+// plane is skipped instead of the whole map being submitted every frame.
 async function mergeIntoMeshBatches(
   group: THREE.Object3D,
   geometries: THREE.BufferGeometry[],
@@ -4705,25 +4728,28 @@ async function mergeIntoMeshBatches(
   name: string,
   isCancelled: () => boolean,
   shadows = false,
-  batchSize = 160,
-  frustumCulled = true,
 ) {
   if (geometries.length === 0) return;
   const yieldIfNeeded = createMainThreadYielder();
-  for (let start = 0; start < geometries.length; start += batchSize) {
-    const batch = geometries.slice(start, start + batchSize);
+  const cells = new Map<string, THREE.BufferGeometry[]>();
+  for (const geometry of geometries) {
+    geometry.computeBoundingBox();
+    const box = geometry.boundingBox!;
+    const key = `${Math.floor((box.min.x + box.max.x) / 2 / WORLD_MESH_CELL_SIZE)}:${Math.floor((box.min.z + box.max.z) / 2 / WORLD_MESH_CELL_SIZE)}`;
+    const cell = cells.get(key);
+    if (cell) cell.push(geometry);
+    else cells.set(key, [geometry]);
+  }
+  for (const [key, batch] of cells) {
     const merged = mergeGeometries(batch, false);
     batch.forEach((geometry) => geometry.dispose());
     if (merged) {
       const mesh = new THREE.Mesh(merged, material);
-      mesh.name = `${name} ${Math.floor(start / batchSize) + 1}`;
+      mesh.name = `${name} ${key}`;
       mesh.castShadow = shadows;
       mesh.receiveShadow = true;
-      // Each merged batch bundles road segments spanning a wide area, so its
-      // bounding sphere leaves the frustum (and the whole batch is culled) long
-      // before the individual roads do — making connected roads pop in/out as the
-      // camera turns. Ground-level road/water meshes opt out of frustum culling.
-      mesh.frustumCulled = frustumCulled;
+      // The world never moves, so skip recomposing its matrix every frame.
+      mesh.matrixAutoUpdate = false;
       group.add(mesh);
     }
     await yieldIfNeeded(isCancelled);
@@ -4799,16 +4825,18 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
       const [x2, z2] = feature.points[index];
       const length = Math.hypot(x2 - x1, z2 - z1);
       if (length < 1) continue;
-      const geometry = new THREE.BoxGeometry(length, 0.24, 8);
+      // Top face only, at the height the old 0.24 m box's lid sat.
+      const geometry = new THREE.PlaneGeometry(length, 8);
+      geometry.rotateX(-Math.PI / 2);
       geometry.rotateY(-Math.atan2(z2 - z1, x2 - x1));
-      geometry.translate((x1 + x2) / 2, 0.74, (z1 + z2) / 2);
+      geometry.translate((x1 + x2) / 2, 0.86, (z1 + z2) / 2);
       waterLines.push(geometry);
     }
     await yieldIfNeeded(isCancelled);
   }
   const waterMaterial = new THREE.MeshPhysicalMaterial({ color: 0x397f88, roughness: 0.24, metalness: 0.02, clearcoat: 0.7, clearcoatRoughness: 0.28 });
-  await mergeIntoMeshBatches(root, waterAreas, waterMaterial, "OSM water areas", isCancelled, false, 160, false);
-  await mergeIntoMeshBatches(root, waterLines, waterMaterial, "OSM waterways", isCancelled, false, 160, false);
+  await mergeIntoMeshBatches(root, waterAreas, waterMaterial, "OSM water areas", isCancelled);
+  await mergeIntoMeshBatches(root, waterLines, waterMaterial, "OSM waterways", isCancelled);
 
   await addRoadNetworkMeshes(root, data.roads, "OSM", isCancelled, scene);
   // Hide the immediate fallback network the moment real OSM roads exist — both are
@@ -5533,6 +5561,7 @@ export function BirdFlight() {
     let flapKick = 0;
     let cameraKick = 0;
     let lastFrame = performance.now();
+    let nextFrameAt = 0;
     let elapsedTime = 0;
     let diagnosticFrame = 0;
     let shadowFrame = 0;
@@ -5772,7 +5801,10 @@ export function BirdFlight() {
       const frameBudgetMs = pausedRef.current
         ? PAUSED_FRAME_MS
         : document.hasFocus() ? ACTIVE_FRAME_MS : UNFOCUSED_FRAME_MS;
-      if (now - lastFrame < frameBudgetMs - 1.5) return;
+      if (now + 1.5 < nextFrameAt) return;
+      // Advance by the budget, not from `now`, so displays that are not a
+      // multiple of 60 Hz still average the target rate.
+      nextFrameAt = Math.max(nextFrameAt + frameBudgetMs, now);
       const frameMs = now - lastFrame;
       const dt = Math.min(frameMs / 1000, 0.035);
       lastFrame = now;
@@ -6200,6 +6232,8 @@ export function BirdFlight() {
             const visible = dx * dx + dz * dz < visibilitySquared;
             if (tile.group.visible !== visible) {
               tile.group.visible = visible;
+              if (visible) scene.add(tile.group);
+              else scene.remove(tile.group);
               visibilityChanged = true;
             }
           }
@@ -6252,6 +6286,9 @@ export function BirdFlight() {
         }
         material.dispose();
       };
+      // Detached district tiles still own GPU resources: reattach them so the
+      // walk below releases those too.
+      for (const tile of (scene.userData.proceduralDistrictTiles as ProceduralDistrictTile[] | undefined) ?? []) scene.add(tile.group);
       scene.traverse((object) => {
         if (object instanceof THREE.Mesh || object instanceof THREE.Points || object instanceof THREE.Line) {
           object.geometry.dispose();
