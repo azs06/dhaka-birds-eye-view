@@ -135,6 +135,20 @@ button { font: inherit; }
 .launch-code { padding: 8px 0 4px; border: 0; border-top: 3px solid rgba(255,240,196,.24); background: none; color: rgba(255,240,196,.8); cursor: pointer; font: 600 16px/1.3 var(--font-display), sans-serif; transition: color .18s ease, border-color .18s ease; }
 .launch-code:hover { color: var(--cream); border-top-color: rgba(255,240,196,.6); }
 .launch-code.active { color: var(--acid); border-top-color: var(--acid); }
+.title-choices { display: grid; gap: clamp(12px, 2vh, 20px); }
+/* Birds are chosen the same way as take-off places, with a swatch of each
+   one's plumage, back colour first, so the name is not the only clue. */
+.bird-picker { display: grid; gap: 8px; }
+.bird-choice { display: inline-flex; align-items: center; gap: 8px; padding: 8px 0 4px; border: 0; border-top: 3px solid rgba(255,240,196,.24); background: none; color: rgba(255,240,196,.8); cursor: pointer; font: 600 16px/1.3 var(--font-display), sans-serif; transition: color .18s ease, border-color .18s ease; }
+.bird-choice i { flex: none; width: 22px; height: 10px; border-radius: 5px; box-shadow: 0 0 0 1px rgba(255,240,196,.5); }
+.bird-choice:hover { color: var(--cream); border-top-color: rgba(255,240,196,.6); }
+.bird-choice.active { color: var(--acid); border-top-color: var(--acid); }
+.bird-note { margin: 0; color: rgba(255,240,196,.62); font-size: 13px; line-height: 1.4; }
+.pause-overlay:has(.bird-picker) { width: min(440px, calc(100vw - 32px)); }
+.pause-overlay .bird-picker { justify-items: center; margin: 4px 0 20px; text-align: center; }
+.pause-overlay .bird-picker .launch-sites { justify-content: center; gap: 4px 16px; }
+.pause-overlay .bird-choice { font-size: 14px; }
+.pause-overlay .bird-note { display: none; }
 /* The start button says what it does and is the only filled shape on screen. */
 .title-start { display: inline-flex; align-items: center; gap: 16px; padding: 13px 16px 13px 24px; border: 0; background: var(--acid); color: var(--ink); box-shadow: 5px 5px 0 var(--vermillion); cursor: pointer; font: 700 clamp(17px, 1.5vw, 21px)/1.2 var(--font-display), sans-serif; transition: transform .16s ease, box-shadow .16s ease; }
 .title-start:hover { transform: translate(-2px, -2px); box-shadow: 7px 7px 0 var(--vermillion); }
@@ -281,7 +295,8 @@ kbd { display: inline-grid; min-width: 23px; height: 22px; padding: 0 5px; place
   .flight-shell[lang="bn"] .map-source { top: 132px; }
   .title-wordmark { font-size: clamp(34px, min(11.4vw, 13vh), 76px); }
   .title-actions { gap: 16px 28px; }
-  .launch-code { font-size: 15px; }
+  .launch-code, .bird-choice { font-size: 15px; }
+  .launch-sites { gap: 4px 18px; }
   /* The bottom edge now belongs to the thumb controls, so the readouts sit
      above them instead of underneath. */
   .telemetry { left: 50%; bottom: 178px; max-width: calc(100vw - 28px); padding: 8px 12px; transform: translateX(-50%); }
@@ -330,7 +345,7 @@ kbd { display: inline-grid; min-width: 23px; height: 22px; padding: 0 5px; place
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .primary-button, .flight-dynamics, .launch-code, .title-start { transition: none; }
+  .primary-button, .flight-dynamics, .launch-code, .bird-choice, .title-start { transition: none; }
   .perch-prompt[data-state="commit"], .title-load.loading i { animation: none; }
 }
 
@@ -344,8 +359,14 @@ kbd { display: inline-grid; min-width: 23px; height: 22px; padding: 0 5px; place
   .title-controls { display: none; }
 }
 
+@media (max-height: 760px) {
+  .bird-note { display: none; }
+}
+
 @media (max-height: 560px) {
-  .title-lead, .title-foot { display: none; }
+  .title-lead, .title-foot, .title-choices .launch-ticker-label { display: none; }
+  .title-choices { gap: 4px; }
+  .launch-code, .bird-choice { padding: 4px 0 2px; font-size: 14px; }
   .title-wordmark { font-size: clamp(28px, 11vh, 52px); }
   .title-actions { margin-top: 8px; }
 }

@@ -1,6 +1,6 @@
 # Bird's Eye View — Fly over Dhaka
 
-Take wing as a house crow over a stylised Greater Dhaka built from real
+Take wing as a house crow, or another of the city's birds, over a stylised Greater Dhaka built from real
 OpenStreetMap geometry, live weather, and the city's real solar clock.
 
 Built on [vinext](https://github.com/cloudflare/vinext) and deployed as a
@@ -50,6 +50,23 @@ Touch controls appear automatically on devices with no mouse. Tap a pink diamond
 on the minimap to fly the camera to that landmark, and use `◐` to hold the sky at
 dawn, noon, golden hour, or night instead of following Dhaka's current time.
 
+## Birds
+
+Six Bangladeshi birds can be flown, chosen on the welcome screen or from the
+pause panel: the house crow (পাতিকাক), the Oriental magpie-robin (দোয়েল, the
+national bird), the common myna (ভাত শালিক), the black kite (ভুবন চিল), the
+rose-ringed parakeet (সবুজ টিয়া), and the white-throated kingfisher (সাদাবুক
+মাছরাঙা). The choice is remembered, and `?bird=` in a link overrides it.
+
+All six share one skeleton and one flight model. They differ in shape, plumage,
+size, and how they move their wings: the kite soars with barely a beat, the
+parakeet and the robin flap almost constantly.
+
+The models are generated, not hand-made. `scripts/create-birds.mjs` describes
+each species as proportions, feather shapes, colours and markings, and
+`npm run assets:birds` rebuilds every file in `public/models/`. `app/birds.ts`
+lists them for the game.
+
 ## Languages
 
 The interface is in English and Bengali (বাংলা). Switch with the `বাংলা / English`
@@ -73,6 +90,7 @@ work by hand:
 | `yaw` | Initial heading in radians |
 | `sky` | `live`, `dawn`, `noon`, `golden`, `dusk`, or `night` |
 | `lang` | `en` or `bn` |
+| `bird` | `crow`, `doel`, `shalik`, `chil`, `tiya`, or `machhranga` |
 | `touch` | `1` forces the touch HUD on, `0` forces it off |
 
 Example: `/?lat=23.7280&lon=90.4090&alt=190&yaw=2.4&sky=dusk` — dusk over the
@@ -148,7 +166,8 @@ Notes:
   and the live radio streams
 - `worker/index.ts` is the Cloudflare Worker entry point
 - `wrangler.jsonc` configures the Worker; `vite.config.ts` wires vinext to it
-- `scripts/create-crow.mjs` regenerates the crow model in `public/models/`
+- `scripts/create-birds.mjs` regenerates the bird models in `public/models/`
+- `app/birds.ts` lists the playable birds
 
 ## Useful Commands
 
@@ -159,7 +178,7 @@ Notes:
 - `npm test`: build, then check the rendered shell, source invariants, flight
   collision, and the bundled map
 - `npm run lint` / `npm run typecheck`: ESLint and `tsc --noEmit`
-- `npm run assets:crow`: regenerate `public/models/dhaka-house-crow.glb`
+- `npm run assets:birds`: regenerate the bird models in `public/models/`
 
 ## Learn More
 

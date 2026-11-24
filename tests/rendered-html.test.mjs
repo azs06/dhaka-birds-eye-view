@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { access, readFile } from "node:fs/promises";
 import test from "node:test";
 import { resolveBuildingCollision } from "../app/flight-collision.mjs";
+import { BIRDS } from "../app/birds.ts";
 import { PLACE_NAMES_BN, STATION_TEXT_BN, STRINGS } from "../app/i18n.ts";
 
 async function render() {
@@ -46,7 +47,8 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(page, /<BirdFlight \/>/);
   assert.match(layout, /Bird's Eye View — Fly over Dhaka/);
   assert.match(component, /new THREE\.WebGLRenderer/);
-  assert.match(component, /dhaka-house-crow\.glb/);
+  assert.equal(BIRDS[0].model, "/models/dhaka-house-crow.glb");
+  assert.match(component, /loadBird\(birdTraits, false\)/);
   assert.match(component, /Hatirjheel Lake/);
   assert.match(component, /fetch\("\/api\/osm",/);
   assert.match(component, /fetch\("\/dhaka-map\.json",/);
@@ -329,6 +331,31 @@ test("Bengali translations cover the whole interface", async () => {
   assert.match(component, /const locale = localeRef\.current;/);
   assert.match(component, /flightModeRef\.current\.dataset\.mode = mode;/);
   assert.match(component, /<main className="flight-shell" lang=\{locale\}>/);
+});
+
+test("every playable bird ships a model the game can animate", async () => {
+  // The game swaps models without touching its animation code, which only works
+  // if every species carries the same three clips driving the same joints.
+  const targets = new Map();
+  for (const bird of BIRDS) {
+    const file = await readFile(new URL(`../public${bird.model}`, import.meta.url));
+    assert.equal(file.toString("utf8", 0, 4), "glTF", `${bird.id} is not a binary glTF`);
+    const gltf = JSON.parse(file.toString("utf8", 20, 20 + file.readUInt32LE(12)));
+    assert.deepEqual(gltf.animations.map((clip) => clip.name), ["Flap", "Glide", "Rest"], `${bird.id} clips`);
+    for (const clip of gltf.animations) {
+      const channels = clip.channels.map((channel) => `${gltf.nodes[channel.target.node].name}.${channel.target.path}`).sort();
+      const expected = targets.get(clip.name) ?? channels;
+      targets.set(clip.name, expected);
+      assert.deepEqual(channels, expected, `${bird.id} ${clip.name} drives different joints from the crow`);
+    }
+    assert.ok(gltf.meshes.length <= 60, `${bird.id} has ${gltf.meshes.length} meshes; parts should be merged`);
+    // Names and notes must exist in both languages.
+    for (const key of [bird.name, bird.note]) {
+      assert.ok(STRINGS.en[key] && STRINGS.bn[key], `${bird.id} is missing ${key}`);
+    }
+  }
+  assert.ok(BIRDS.length >= 6);
+  assert.equal(new Set(BIRDS.map((bird) => bird.id)).size, BIRDS.length);
 });
 
 test("building collision recovery lets a perched crow climb clear on takeoff", () => {

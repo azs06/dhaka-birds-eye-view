@@ -24,6 +24,7 @@ import {
   type Locale,
   type Strings,
 } from "./i18n";
+import { BIRDS, birdById, chooseBird, readBird, subscribeToBird, type Bird, type BirdId } from "./birds";
 import { DHAKA_LANDMARK_FOOTPRINTS, type LandmarkFootprintPart } from "./dhaka-landmark-footprints";
 
 type CameraMode = "CHASE" | "BIRD'S EYE";
@@ -5218,6 +5219,10 @@ export function BirdFlight() {
   const t = STRINGS[locale];
   const localeRef = useRef<Locale>("en");
   const relabelRef = useRef<(locale: Locale) => void>(() => {});
+  // The crow is what the server renders; the visitor's bird swaps in on the client.
+  const birdId = useSyncExternalStore(subscribeToBird, readBird, () => "crow" as BirdId);
+  const birdRef = useRef<BirdId>("crow");
+  const loadBirdRef = useRef<(bird: Bird, preview: boolean) => void>(() => {});
   const [flying, setFlying] = useState(false);
   const [paused, setPaused] = useState(false);
   const [resting, setResting] = useState(false);
@@ -5270,6 +5275,13 @@ export function BirdFlight() {
       cancelled = true;
     };
   }, [locale]);
+
+  // Swap the model in the running scene when the bird changes.
+  useEffect(() => {
+    const changed = birdRef.current !== birdId;
+    birdRef.current = birdId;
+    if (changed) loadBirdRef.current(birdById(birdId), true);
+  }, [birdId]);
 
   const tuneRadio = useCallback((stationIndex: number) => {
     const nextIndex = (stationIndex + RADIO_STATIONS.length) % RADIO_STATIONS.length;
@@ -5577,41 +5589,83 @@ export function BirdFlight() {
     crowToonRamp.minFilter = THREE.NearestFilter;
     crowToonRamp.magFilter = THREE.NearestFilter;
     crowToonRamp.needsUpdate = true;
-    new GLTFLoader().load("/models/dhaka-house-crow.glb", (gltf) => {
-      if (disposed) return;
-      const model = gltf.scene;
-      model.scale.setScalar(0.92);
+    // The player's bird. Every species shares one skeleton and the same three
+    // clips, so swapping is just replacing the model under the `crow` group. The
+    // crow, at /models/dhaka-house-crow.glb, is the default.
+    let birdModel: THREE.Object3D | null = null;
+    let birdTraits: Bird = birdById(birdRef.current);
+    let birdLoadToken = 0;
+    let birdPreviewUntil = 0;
+    let birdPreview = 0;
+    const disposeBirdModel = (model: THREE.Object3D) => {
       model.traverse((object) => {
-        if (object instanceof THREE.Mesh) {
-          object.castShadow = true;
-          object.receiveShadow = true;
-          const sourceMaterials = Array.isArray(object.material) ? object.material : [object.material];
-          const toonMaterials = sourceMaterials.map((material) => new THREE.MeshToonMaterial({
-            color: material.color?.clone() ?? new THREE.Color(0x1b2b2a),
-            map: material.map ?? null,
-            // Feathers are thin blades seen from above and below.
-            side: material.side,
-            gradientMap: crowToonRamp,
-          }));
-          object.material = Array.isArray(object.material) ? toonMaterials : toonMaterials[0];
-        }
+        if (!(object instanceof THREE.Mesh)) return;
+        object.geometry.dispose();
+        // The tone ramp is shared by every bird, so it is not released here.
+        for (const material of Array.isArray(object.material) ? object.material : [object.material]) material.dispose();
       });
-      crow.add(model);
-      mixer = new THREE.AnimationMixer(model);
-      flapAction = mixer.clipAction(gltf.animations.find((clip) => clip.name === "Flap") ?? gltf.animations[0]);
-      glideAction = mixer.clipAction(gltf.animations.find((clip) => clip.name === "Glide") ?? gltf.animations[1]);
-      restAction = mixer.clipAction(gltf.animations.find((clip) => clip.name === "Rest") ?? gltf.animations[2]);
-      flapAction.play();
-      glideAction.play();
-      restAction.play();
-      flapAction.setEffectiveWeight(0.08);
-      glideAction.setEffectiveWeight(0.92);
-      restAction.setEffectiveWeight(0);
-      if (import.meta.env.DEV) {
-        // Dev-only: lets a pose be held and inspected outside the flight loop.
-        (window as BirdFlightWindow & { __crowRig?: unknown }).__crowRig = { model, mixer, flap: flapAction, glide: glideAction, rest: restAction };
-      }
-    });
+    };
+    const loadBird = (bird: Bird, preview: boolean) => {
+      const token = ++birdLoadToken;
+      new GLTFLoader().load(bird.model, (gltf) => {
+        const model = gltf.scene;
+        // A newer pick, or teardown, arrived while this one was loading.
+        if (disposed || token !== birdLoadToken) {
+          disposeBirdModel(model);
+          return;
+        }
+        if (birdModel) {
+          mixer?.stopAllAction();
+          mixer?.uncacheRoot(birdModel);
+          crow.remove(birdModel);
+          disposeBirdModel(birdModel);
+        }
+        model.scale.setScalar(bird.scale);
+        model.traverse((object) => {
+          if (object instanceof THREE.Mesh) {
+            object.castShadow = true;
+            object.receiveShadow = true;
+            const sourceMaterials = Array.isArray(object.material) ? object.material : [object.material];
+            const toonMaterials = sourceMaterials.map((material) => {
+              const toon = new THREE.MeshToonMaterial({
+                color: material.color?.clone() ?? new THREE.Color(0x1b2b2a),
+                map: material.map ?? null,
+                // Feathers are thin blades seen from above and below.
+                side: material.side,
+                gradientMap: crowToonRamp,
+              });
+              material.dispose();
+              return toon;
+            });
+            object.material = Array.isArray(object.material) ? toonMaterials : toonMaterials[0];
+          }
+        });
+        crow.add(model);
+        birdModel = model;
+        birdTraits = bird;
+        mixer = new THREE.AnimationMixer(model);
+        flapAction = mixer.clipAction(gltf.animations.find((clip) => clip.name === "Flap") ?? gltf.animations[0]);
+        glideAction = mixer.clipAction(gltf.animations.find((clip) => clip.name === "Glide") ?? gltf.animations[1]);
+        restAction = mixer.clipAction(gltf.animations.find((clip) => clip.name === "Rest") ?? gltf.animations[2]);
+        flapAction.play();
+        glideAction.play();
+        restAction.play();
+        const perched = restingRef.current;
+        flapAction.setEffectiveWeight(perched ? 0 : 0.08);
+        glideAction.setEffectiveWeight(perched ? 0.04 : 0.92);
+        restAction.setEffectiveWeight(perched ? 0.96 : 0);
+        // On the welcome screen, bring the camera in to show the new bird.
+        if (preview) birdPreviewUntil = elapsedTime + 5;
+        requestShadowUpdate();
+        if (import.meta.env.DEV) {
+          // Dev-only: lets a pose be held and inspected outside the flight loop.
+          (window as BirdFlightWindow & { __crowRig?: unknown }).__crowRig = { model, mixer, flap: flapAction, glide: glideAction, rest: restAction };
+        }
+      // A bird that fails to load leaves the current one flying.
+      }, undefined, () => {});
+    };
+    loadBirdRef.current = loadBird;
+    loadBird(birdTraits, false);
 
     let maxFrameMs = 0;
     let longFrames = 0;
@@ -6105,10 +6159,12 @@ export function BirdFlight() {
         const restWeight = THREE.MathUtils.lerp(restAction.getEffectiveWeight(), desiredRestWeight, 1 - Math.pow(0.78, dt * 60));
         restAction.setEffectiveWeight(restWeight);
         restAction.timeScale = 0.55;
-        const desiredFlapWeight = active ? (flapKick > 0 ? 0.96 : 0.16) : 0;
+        const desiredFlapWeight = active ? (flapKick > 0 ? 0.96 : birdTraits.cruiseFlap) : 0;
         const flapWeight = THREE.MathUtils.lerp(flapAction.getEffectiveWeight(), desiredFlapWeight, 1 - Math.pow(0.8, dt * 60));
         flapAction.setEffectiveWeight(flapWeight);
-        flapAction.timeScale = flapKick > 0 ? 2.15 : 0.7;
+        flapAction.timeScale = (flapKick > 0 ? 2.15 : 0.7) * birdTraits.flapRate;
+        // Birds differ in leg length, so seat each one's own feet on the perch.
+        if (birdModel) birdModel.position.y = birdTraits.restLift * restWeight;
         glideAction.setEffectiveWeight(Math.max(0, 1 - flapWeight - restWeight));
         glideAction.timeScale = 0.72;
         mixer.update(dt);
@@ -6249,11 +6305,15 @@ export function BirdFlight() {
         // Attract mode. The title screen used to hold a single frozen chase frame;
         // orbiting the drifting bird opens the game on a moving skyline instead,
         // and the lerp below turns BEGIN FLIGHT into a swoop down into the chase.
+        // Picking a bird pulls the orbit in close for a few seconds, so the
+        // choice shows itself before the camera drifts back out to the skyline.
         const orbit = elapsedTime * 0.085;
+        birdPreview = THREE.MathUtils.lerp(birdPreview, elapsedTime < birdPreviewUntil ? 1 : 0, 1 - Math.pow(0.94, dt * 60));
+        const orbitRadius = THREE.MathUtils.lerp(82, 13, birdPreview);
         desiredCamera.set(
-          crow.position.x + Math.cos(orbit) * 82,
-          crow.position.y + 27 + Math.sin(orbit * 0.7) * 9,
-          crow.position.z + Math.sin(orbit) * 82,
+          crow.position.x + Math.cos(orbit) * orbitRadius,
+          crow.position.y + THREE.MathUtils.lerp(27 + Math.sin(orbit * 0.7) * 9, 4.5, birdPreview),
+          crow.position.z + Math.sin(orbit) * orbitRadius,
         );
         desiredTarget.copy(crow.position);
       } else if (inspectionTarget) {
@@ -6376,6 +6436,8 @@ export function BirdFlight() {
       delete (window as BirdFlightWindow & { __crowRig?: unknown }).__crowRig;
       focusLandmarkRef.current = () => false;
       relabelRef.current = () => {};
+      loadBirdRef.current = () => {};
+      birdLoadToken++;
       flightActionsRef.current = null;
       flightAudio.dispose();
       airflowVfx.dispose();
@@ -6526,6 +6588,29 @@ export function BirdFlight() {
     </>
   );
   const radioStateText = radioStatus === "playing" ? t.radioOnAir : radioStatus === "buffering" ? t.radioTuning : radioStatus === "paused" ? t.radioPaused : radioStatus === "error" ? t.radioSignalLost : t.radioOff;
+
+  const selectedBird = birdById(birdId);
+  const birdPicker = (
+    <div className="bird-picker" role="group" aria-label={t.birdGroup}>
+      <span className="launch-ticker-label">{t.birdLabel}</span>
+      <div className="launch-sites">
+        {BIRDS.map((bird) => (
+          <button
+            key={bird.id}
+            type="button"
+            className={`bird-choice${bird.id === birdId ? " active" : ""}`}
+            aria-pressed={bird.id === birdId}
+            aria-label={fill(t.birdFlyAs, { name: t[bird.name] })}
+            onClick={() => chooseBird(bird.id)}
+          >
+            <i aria-hidden="true" style={{ background: `linear-gradient(90deg, ${bird.swatch[0]} 0 50%, ${bird.swatch[1]} 50% 82%, ${bird.swatch[2]} 82%)` }} />
+            {t[bird.name]}
+          </button>
+        ))}
+      </div>
+      <p className="bird-note">{t[selectedBird.note]}</p>
+    </div>
+  );
 
   return (
     <main className="flight-shell" lang={locale}>
@@ -6794,6 +6879,8 @@ export function BirdFlight() {
             <h1 className="title-wordmark" lang="bn">{t.titleWordmark}</h1>
             <p className="title-lead">{t.titleLead}</p>
             <div className="title-actions">
+              <div className="title-choices">
+              {birdPicker}
               <div className="launch-ticker" role="group" aria-label={t.launchGroup}>
                 <span className="launch-ticker-label">{t.launchLabel}</span>
                 <div className="launch-sites">
@@ -6810,6 +6897,7 @@ export function BirdFlight() {
                     </button>
                   ))}
                 </div>
+              </div>
               </div>
               <button onClick={beginFlight} className="title-start">
                 <span>{t.startFlight}</span>
@@ -6870,6 +6958,7 @@ export function BirdFlight() {
           <span className="eyebrow">{t.pauseHeading}</span>
           <h2>{t.pauseTitle}</h2>
           <p>{t.pauseBody}</p>
+          {birdPicker}
           <button ref={resumeButtonRef} className="primary-button resume-button" onClick={togglePause}><span>{t.pauseResume}</span><b>▶</b></button>
           <small>{t.pauseHint}</small>
         </section>
