@@ -4,7 +4,7 @@ Take wing as a house crow over a stylised Greater Dhaka built from real
 OpenStreetMap geometry, live weather, and the city's real solar clock.
 
 Built on [vinext](https://github.com/cloudflare/vinext) and deployed as a
-Cloudflare Worker. Platform notes for the underlying starter are further down.
+Cloudflare Worker.
 
 ## The flight
 
@@ -123,89 +123,32 @@ Notes:
 - If `npm install` fails building `sharp` on a Mac with Homebrew's `vips`
   installed, run it as `SHARP_IGNORE_GLOBAL_LIBVIPS=1 npm install`.
 
-## Included Shape
+## Project Layout
 
 - `app/BirdFlight.tsx` holds the whole experience: world building, flight model,
   render loop, audio, and HUD
 - `app/flight-collision.mjs` is shared with the tests so collision behaviour is
   verified directly rather than through the renderer
+- `app/dhaka-landmark-footprints.ts` is a snapshot of real landmark outlines from
+  OpenStreetMap, so hero buildings stay stable when the live map is unavailable
 - `app/api/osm`, `app/api/weather`, `app/api/radio` proxy Overpass, Open-Meteo,
   and the live radio streams
-- edit site code under `app/`
-- `.openai/hosting.json` declares optional Sites D1 and R2 bindings
-- `wrangler.jsonc` configures the Cloudflare Worker
-- `vite.config.ts` simulates declared bindings for local development
-- `db/schema.ts` starts intentionally empty
-- `examples/d1/` contains an optional D1 example surface
-- `drizzle.config.ts` supports local migration generation when needed
-
-## Workspace Auth Headers
-
-OpenAI workspace sites can read the current user's email from
-`oai-authenticated-user-email`.
-
-SIWC-authenticated workspace sites may also receive
-`oai-authenticated-user-full-name` when the user's SIWC profile has a non-empty
-`name` claim. The full-name value is percent-encoded UTF-8 and is accompanied by
-`oai-authenticated-user-full-name-encoding: percent-encoded-utf-8`.
-
-Treat the full name as optional and fall back to email when it is absent:
-
-```tsx
-import { headers } from "next/headers";
-
-export default async function Home() {
-  const requestHeaders = await headers();
-  const email = requestHeaders.get("oai-authenticated-user-email");
-  const encodedFullName = requestHeaders.get("oai-authenticated-user-full-name");
-  const fullName =
-    encodedFullName &&
-    requestHeaders.get("oai-authenticated-user-full-name-encoding") ===
-      "percent-encoded-utf-8"
-      ? decodeURIComponent(encodedFullName)
-      : null;
-
-  const displayName = fullName ?? email;
-  // ...
-}
-```
-
-## Optional Dispatch-Owned ChatGPT Sign-In
-
-Import the ready-to-use helpers from `app/chatgpt-auth.ts` when the site needs
-optional or required ChatGPT sign-in:
-
-- Use `getChatGPTUser()` for optional signed-in UI.
-- Use `requireChatGPTUser(returnTo)` for server-rendered pages that should send
-  anonymous visitors through Sign in with ChatGPT.
-- Use `chatGPTSignInPath(returnTo)` and `chatGPTSignOutPath(returnTo)` for
-  browser links or actions.
-- Pass a same-origin relative `returnTo` path for the destination after sign-in
-  or sign-out. The helper validates and safely encodes it.
-- Mark protected pages with `export const dynamic = "force-dynamic"` because
-  they depend on per-request identity headers.
-
-Dispatch owns `/signin-with-chatgpt`, `/signout-with-chatgpt`, `/callback`, the
-OAuth cookies, and identity header injection. Do not implement app routes for
-those reserved paths. Routes that do not import and call the helper remain
-anonymous-compatible.
-
-SIWC establishes identity only; it does not prove workspace membership. Use the
-Sites hosting platform's access policy controls for workspace-wide restrictions,
-or enforce explicit server-side membership or allowlist checks.
-
-Use SIWC for account pages, user-specific dashboards, saved records, and write
-actions tied to the current ChatGPT user. Leave public content anonymous.
+- `worker/index.ts` is the Cloudflare Worker entry point
+- `wrangler.jsonc` configures the Worker; `vite.config.ts` wires vinext to it
+- `scripts/create-crow.mjs` regenerates the crow model in `public/models/`
 
 ## Useful Commands
 
 - `npm run dev`: start local development
-- `npm run build`: verify the vinext build output
+- `npm run build`: produce the Worker and static assets in `dist/`
+- `npm run start`: serve the production build locally
 - `npm run deploy`: build and deploy to Cloudflare Workers
-- `npm test`: build the starter and verify its rendered loading skeleton
-- `npm run db:generate`: generate Drizzle migrations after schema changes
+- `npm test`: build, then check the rendered shell, source invariants, flight
+  collision, and the bundled map
+- `npm run lint` / `npm run typecheck`: ESLint and `tsc --noEmit`
+- `npm run assets:crow`: regenerate `public/models/dhaka-house-crow.glb`
 
 ## Learn More
 
 - [vinext Documentation](https://github.com/cloudflare/vinext)
-- [Drizzle D1 Guide](https://orm.drizzle.team/docs/get-started/d1-new)
+- [Cloudflare Workers Documentation](https://developers.cloudflare.com/workers/)
