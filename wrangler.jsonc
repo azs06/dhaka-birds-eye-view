@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // The Worker's name, and its default hostname: birds-eye-view.<subdomain>.workers.dev
+  "name": "birds-eye-view",
+  "main": "./worker/index.ts",
+  "compatibility_date": "2026-05-15",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "dist/client",
+    "not_found_handling": "none",
+    "binding": "ASSETS"
+  },
+  // Backs /_vinext/image (next/image optimisation) in worker/index.ts.
+  "images": { "binding": "IMAGES" },
+  "observability": { "enabled": true }
+}

@@ -86,7 +86,42 @@ npm run dev
 npm run build
 ```
 
-This starter does not use `wrangler.jsonc`.
+## Deploying to Cloudflare
+
+The app builds to a single Cloudflare Worker plus static assets. `wrangler.jsonc`
+holds the Worker's name, entry point, and bindings.
+
+```bash
+npx wrangler login   # once per machine
+npm run deploy       # vinext build, then wrangler deploy
+```
+
+The first deploy creates a Worker called `birds-eye-view` and prints its
+`*.workers.dev` URL. Rename it by changing `name` in `wrangler.jsonc`. Attach a
+custom domain from the Worker's **Settings → Domains & Routes** page, or add a
+`routes` entry with `"custom_domain": true` to `wrangler.jsonc`.
+
+To deploy on every push instead, connect the repository under **Workers & Pages
+→ Create → Import a repository** (Workers Builds) with:
+
+| Setting | Value |
+| --- | --- |
+| Build command | `npm run build` |
+| Deploy command | `npx wrangler deploy` |
+
+Notes:
+
+- `vinext build` writes the resolved config to `dist/server/wrangler.json`, and
+  `wrangler deploy` picks it up automatically. Always build before deploying;
+  `npx wrangler deploy --dry-run` shows what would be uploaded.
+- `npx wrangler dev` (after a build) runs the built Worker in the real Workers
+  runtime locally. `npx wrangler tail` streams production logs.
+- `/api/osm` depends on ten live Overpass queries and reshapes several megabytes
+  of data per request, so it is the route most likely to fail or run slowly on
+  Workers. When it errors or takes longer than 35 s the game loads the bundled
+  `public/dhaka-map.json` instead.
+- If `npm install` fails building `sharp` on a Mac with Homebrew's `vips`
+  installed, run it as `SHARP_IGNORE_GLOBAL_LIBVIPS=1 npm install`.
 
 ## Included Shape
 
@@ -98,6 +133,7 @@ This starter does not use `wrangler.jsonc`.
   and the live radio streams
 - edit site code under `app/`
 - `.openai/hosting.json` declares optional Sites D1 and R2 bindings
+- `wrangler.jsonc` configures the Cloudflare Worker
 - `vite.config.ts` simulates declared bindings for local development
 - `db/schema.ts` starts intentionally empty
 - `examples/d1/` contains an optional D1 example surface
@@ -165,6 +201,7 @@ actions tied to the current ChatGPT user. Leave public content anonymous.
 
 - `npm run dev`: start local development
 - `npm run build`: verify the vinext build output
+- `npm run deploy`: build and deploy to Cloudflare Workers
 - `npm test`: build the starter and verify its rendered loading skeleton
 - `npm run db:generate`: generate Drizzle migrations after schema changes
 
