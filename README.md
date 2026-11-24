@@ -67,6 +67,30 @@ each species as proportions, feather shapes, colours and markings, and
 `npm run assets:birds` rebuilds every file in `public/models/`. `app/birds.ts`
 lists them for the game.
 
+## Sound
+
+The world has its own sound, on from take-off: wind that builds with speed and
+in a dive, a wingbeat on every downstroke, the city and its traffic rising as
+you fly lower, car horns and rickshaw bells near the street, rain and thunder,
+and the calls of the city's birds. `♫` opens a panel with a volume slider (the
+setting is remembered) and a mute button.
+
+The radio is separate and optional. Turn it on with `◉` or `R` and it plays
+over the world's sound, which drops back but does not stop. It has its own
+volume in its panel.
+
+The bird calls are real field recordings from Wikimedia Commons: house crow,
+magpie-robin, common myna, black kite, rose-ringed parakeet and Asian koel. The
+bird you are flying calls close by; the others are heard at a distance. Wind,
+wingbeats, city, traffic, rain and thunder are synthesised in the browser, and
+so are bird calls until the recordings have loaded.
+
+`scripts/audio-sources.json` lists each recording with its author, licence and
+the seconds used. `npm run assets:audio` (needs `ffmpeg`) cuts and levels the
+clips into `public/audio/` and regenerates `public/audio/CREDITS.txt`, which the
+game links to from the flight manual. Most of the recordings are CC BY-SA, so
+the clips stay under that licence and the credits must ship with them.
+
 ## Languages
 
 The interface is in English and Bengali (বাংলা). Switch with the `বাংলা / English`

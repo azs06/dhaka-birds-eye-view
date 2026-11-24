@@ -25,6 +25,7 @@ import {
   type Strings,
 } from "./i18n";
 import { BIRDS, birdById, chooseBird, readBird, subscribeToBird, type Bird, type BirdId } from "./birds";
+import soundClips from "./sound-clips.json";
 import { DHAKA_LANDMARK_FOOTPRINTS, type LandmarkFootprintPart } from "./dhaka-landmark-footprints";
 
 type CameraMode = "CHASE" | "BIRD'S EYE";
@@ -148,10 +149,18 @@ type FlightAudio = {
   pause: () => void;
   resume: () => void;
   flap: () => void;
+  wingbeat: (strength: number) => void;
+  land: () => void;
   thunder: (strength: number, delay: number) => void;
-  setFlight: (speed: number, altitude: number) => void;
+  setFlight: (speed: number, altitude: number, verticalSpeed: number) => void;
   setWeather: (mode: WeatherMode, precipitation: number) => void;
   setRadioDucking: (active: boolean) => void;
+  /** The player's volume for the world's sound: 1 is the designed level. */
+  setVolume: (volume: number) => void;
+  /** Which species the player is, so its own call is heard close by. */
+  setBird: (id: string) => void;
+  /** Output level right now, for checking the mix without ears. */
+  probe: () => { state: string; rms: number; peak: number; above250: number; clips: number; lastCall: string };
   dispose: () => void;
 };
 type RadioStatus = "off" | "buffering" | "playing" | "paused" | "error";
@@ -492,6 +501,23 @@ function worldToCoordinates(x: number, z: number) {
     lat: MAP_CENTER.lat - z / 110_540,
     lon: MAP_CENTER.lon + x / metresPerLongitude,
   };
+}
+
+// The procedural airport runway (3.2 km) and terminal apron extend far past the
+// small landmark anchor box, so OSM roads/buildings and procedural tiles all
+// test against its rotated footprint to keep the tarmac clear of z-fighting.
+const AIRPORT_WORLD = coordinatesToWorld(23.84343, 90.39784);
+const AIRPORT_COS = Math.cos(-0.56);
+const AIRPORT_SIN = Math.sin(-0.56);
+
+function inAirportClearance(x: number, z: number, pad = 0) {
+  const dx = x - AIRPORT_WORLD.x;
+  const dz = z - AIRPORT_WORLD.y;
+  const localX = dx * AIRPORT_COS - dz * AIRPORT_SIN;
+  const localZ = dx * AIRPORT_SIN + dz * AIRPORT_COS;
+  if (Math.abs(localX) < 120 + pad && Math.abs(localZ) < 1_640 + pad) return true;
+  if (localX > -440 - pad && localX < 120 + pad && localZ > -410 - pad && localZ < 140 + pad) return true;
+  return false;
 }
 
 function weatherIcon(mode: WeatherMode, isDay: boolean) {
@@ -1212,7 +1238,7 @@ function createWeatherVfx(
     sunColor.lerp(overcastSunColor, clamp(cloudAmount * 0.55 + (raining ? 0.28 : 0), 0, 0.82));
     sun.color.copy(moonColor).lerp(sunColor, daylightStrength);
     moonDirection.set(-sunDirection.x, 0.62, -sunDirection.z).normalize();
-    sun.position.copy(moonDirection).lerp(sunDirection, daylightStrength).normalize().multiplyScalar(1_200);
+    sun.position.copy(moonDirection).lerp(sunDirection, daylightStrength).normalize().multiplyScalar(3_800);
     sun.target.position.set(0, 0, 0);
     // The key light just moved, so the cached static shadow map is now stale.
     renderer.shadowMap.needsUpdate = true;
@@ -1445,11 +1471,10 @@ async function addRoadNetworkMeshes(
 ) {
   const majorRoads = new Set(["motorway", "trunk", "primary", "secondary"]);
   const localRoads = new Set(["tertiary", "residential", "unclassified", "service"]);
-  const surfaces: THREE.BufferGeometry[] = [];
+  const shoulders: THREE.BufferGeometry[] = [];
+  const surfaces: THREE.BufferGeometry[][] = [[], [], []];
   const centerLines: THREE.BufferGeometry[] = [];
   const edgeLines: THREE.BufferGeometry[] = [];
-  const shoulderColor = new THREE.Color(0xaaa28f);
-  const surfaceColors = [0x2f3735, 0x464f4b, 0x626b65].map((color) => new THREE.Color(color));
 
   // Roads are only ever seen from above, so each strip is its top face alone:
   // two triangles where a box would spend twelve on sides and an underside
@@ -1464,7 +1489,6 @@ async function addRoadNetworkMeshes(
     height: number,
     y: number,
     lateralOffset = 0,
-    color?: THREE.Color,
   ) => {
     const dx = x2 - x1;
     const dz = z2 - z1;
@@ -1480,54 +1504,70 @@ async function addRoadNetworkMeshes(
       y + height / 2,
       (z1 + z2) / 2 + normalZ * lateralOffset,
     );
-    if (color) {
-      const colors = new Float32Array(geometry.attributes.position.count * 3);
-      for (let vertex = 0; vertex < colors.length; vertex += 3) {
-        colors[vertex] = color.r;
-        colors[vertex + 1] = color.g;
-        colors[vertex + 2] = color.b;
-      }
-      geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
-    }
     return geometry;
   };
 
   for (const road of roads) {
     const bucket = majorRoads.has(road.kind) ? 0 : localRoads.has(road.kind) ? 1 : 2;
     const width = bucket === 0 ? (road.kind === "motorway" || road.kind === "trunk" ? 17 : 14) : bucket === 1 ? 7.5 : 4.2;
-    // Stagger deck heights per class so crossing roads never share a coplanar top
-    // face — identical-height decks in different asphalt colours z-fight at every
-    // junction where a local street overlaps a major road.
-    const surfaceY = bucket === 0 ? 0.98 : bucket === 1 ? 0.9 : 0.84;
+    // Separate road classes vertically and with per-layer polygonOffset so
+    // shoulders, asphalt tiers, and markings never z-fight at distance or at
+    // junctions. A tiny deterministic per-road and per-segment stagger also
+    // separates same-class crossings and consecutive segment overlaps.
+    const roadJitter = ((Math.abs(road.id) % 7) - 3) * 0.004;
+    const surfaceY = (bucket === 0 ? 1.07 : bucket === 1 ? 0.93 : 0.79) + roadJitter;
+    const shoulderY = 0.7 + roadJitter * 0.5;
     for (let index = 1; index < road.points.length; index++) {
       const [x1, z1] = road.points[index - 1];
       const [x2, z2] = road.points[index];
-      const surface = segmentStrip(x1, z1, x2, z2, width, 0.34, surfaceY, 0, surfaceColors[bucket]);
+      if (inAirportClearance((x1 + x2) / 2, (z1 + z2) / 2, 12)) continue;
+      const segStep = (index & 1) * 0.002;
+      const surface = segmentStrip(x1, z1, x2, z2, width, 0.34, surfaceY + segStep);
       if (!surface) continue;
-      surfaces.push(surface);
-      const shoulder = segmentStrip(x1, z1, x2, z2, width + (bucket === 0 ? 5.5 : 2.4), 0.24, 0.78, 0, shoulderColor);
-      if (shoulder) surfaces.push(shoulder);
+      surfaces[bucket].push(surface);
+      const shoulder = segmentStrip(x1, z1, x2, z2, width + (bucket === 0 ? 5.5 : 2.4), 0.24, shoulderY + segStep);
+      if (shoulder) shoulders.push(shoulder);
       if (bucket === 0) {
-        const center = segmentStrip(x1, z1, x2, z2, 0.58, 0.09, 1.19);
+        const center = segmentStrip(x1, z1, x2, z2, 0.58, 0.09, 1.335 + roadJitter * 0.5 + segStep);
         if (center) centerLines.push(center);
         const edgeOffset = width / 2 - 0.85;
-        const leftEdge = segmentStrip(x1, z1, x2, z2, 0.32, 0.075, 1.18, -edgeOffset);
-        const rightEdge = segmentStrip(x1, z1, x2, z2, 0.32, 0.075, 1.18, edgeOffset);
+        const leftEdge = segmentStrip(x1, z1, x2, z2, 0.32, 0.075, 1.29 + roadJitter * 0.5 + segStep, -edgeOffset);
+        const rightEdge = segmentStrip(x1, z1, x2, z2, 0.32, 0.075, 1.29 + roadJitter * 0.5 + segStep, edgeOffset);
         if (leftEdge) edgeLines.push(leftEdge);
         if (rightEdge) edgeLines.push(rightEdge);
       }
     }
   }
 
-  // Shoulders and all three asphalt classes share one vertex-coloured material,
-  // so a map cell's whole road surface is a single draw call.
+  // Strictly ordered polygonOffset keeps shoulders, road classes, and markings
+  // cleanly layered even from kilometres away at grazing angles.
   await mergeIntoMeshBatches(
     parent,
-    surfaces,
-    new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.96 }),
-    `${name} roads`,
+    shoulders,
+    new THREE.MeshStandardMaterial({
+      color: 0xaaa28f,
+      roughness: 0.96,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
+    }),
+    `${name} shoulders`,
     isCancelled,
   );
+  const roadMaterials = [
+    { color: 0x2f3735, offset: -4 },
+    { color: 0x464f4b, offset: -3 },
+    { color: 0x626b65, offset: -2 },
+  ].map(({ color, offset }) => new THREE.MeshStandardMaterial({
+    color,
+    roughness: 0.96,
+    polygonOffset: true,
+    polygonOffsetFactor: offset,
+    polygonOffsetUnits: offset,
+  }));
+  for (let index = 0; index < surfaces.length; index++) {
+    await mergeIntoMeshBatches(parent, surfaces[index], roadMaterials[index], `${name} roads ${index}`, isCancelled);
+  }
   // Road markings are the only continuous line work in the city, so lifting them
   // at night traces every corridor from the air the way real street lighting does.
   const centerLineMaterial = new THREE.MeshStandardMaterial({
@@ -1535,6 +1575,9 @@ async function addRoadNetworkMeshes(
     roughness: 0.86,
     emissive: 0xffb347,
     emissiveIntensity: 0,
+    polygonOffset: true,
+    polygonOffsetFactor: -6,
+    polygonOffsetUnits: -6,
   });
   centerLineMaterial.userData.nightGlowIntensity = 0.92;
   const edgeLineMaterial = new THREE.MeshStandardMaterial({
@@ -1542,6 +1585,9 @@ async function addRoadNetworkMeshes(
     roughness: 0.9,
     emissive: 0xfff0c8,
     emissiveIntensity: 0,
+    polygonOffset: true,
+    polygonOffsetFactor: -5,
+    polygonOffsetUnits: -5,
   });
   edgeLineMaterial.userData.nightGlowIntensity = 0.58;
   if (scene) {
@@ -1625,13 +1671,22 @@ if ( bevNightGlow > 0.001 ) {
     vec2 bevCell = vec2( bevAcross / 4.6, bevWorldPos.y / 3.75 );
     vec2 bevId = floor( bevCell );
     vec2 bevUv = fract( bevCell );
-    float bevPane = step( 0.17, bevUv.x ) * step( bevUv.x, 0.70 )
-      * step( 0.24, bevUv.y ) * step( bevUv.y, 0.76 );
+    // Filter window edges with screen-space derivatives and blend toward the
+    // average lit density once a cell shrinks below ~2 pixels, eliminating
+    // sub-pixel moire and sparkle across distant facades at night.
+    vec2 bevFw = max( fwidth( bevCell ), vec2( 0.001 ) );
+    float bevPaneX = smoothstep( 0.17 - bevFw.x, 0.17 + bevFw.x, bevUv.x )
+      * ( 1.0 - smoothstep( 0.70 - bevFw.x, 0.70 + bevFw.x, bevUv.x ) );
+    float bevPaneY = smoothstep( 0.24 - bevFw.y, 0.24 + bevFw.y, bevUv.y )
+      * ( 1.0 - smoothstep( 0.76 - bevFw.y, 0.76 + bevFw.y, bevUv.y ) );
+    float bevPane = bevPaneX * bevPaneY;
     // Stable per-window hash so a given window keeps its state frame to frame.
     float bevNoise = fract( sin( dot( bevId, vec2( 37.31, 271.9 ) ) ) * 43758.5453 );
     float bevLit = step( 1.0 - bevWindowDensity, bevNoise );
     float bevWarmth = 0.55 + 0.75 * fract( bevNoise * 17.13 );
-    totalEmissiveRadiance += bevWindowTint * ( bevPane * bevLit * bevWall * bevStorey * bevWarmth * bevNightGlow );
+    float bevMip = smoothstep( 0.28, 1.1, max( bevFw.x, bevFw.y ) );
+    float bevWindow = mix( bevPane * bevLit * bevWarmth, 0.255 * bevWindowDensity, bevMip );
+    totalEmissiveRadiance += bevWindowTint * ( bevWindow * bevWall * bevStorey * bevNightGlow );
   }
 }`,
       );
@@ -1693,6 +1748,10 @@ function addImmediateCityMass(scene: THREE.Scene, roads: OsmMapData["roads"]) {
         intensity = Math.max(intensity, proximity * district.intensity);
       }
       if (random() > 0.36 + intensity * 0.42) continue;
+      // Keep the central Hatirjheel fallback block and airport apron clear so
+      // immediate filler buildings never intersect them while OSM is loading.
+      if (Math.abs(buildingX) < 1_090 && Math.abs(buildingZ) < 1_010) continue;
+      if (inAirportClearance(buildingX, buildingZ, 40)) continue;
       if (landmarkClearings.some((landmark) => Math.hypot(buildingX - landmark.x, buildingZ - landmark.z) < landmark.radius)) continue;
       const width = 22 + random() * 30;
       const depth = 20 + random() * 32;
@@ -1836,6 +1895,7 @@ async function addProceduralDistrictTiles(
   });
 
   const blockedByMap = (x: number, z: number, halfWidth: number, halfDepth: number) => {
+    if (inAirportClearance(x, z, Math.max(halfWidth, halfDepth) + 12)) return true;
     const key = spatialKey(Math.floor(x / spatialCellSize), Math.floor(z / spatialCellSize));
     if ((waterAreaGrid.get(key) ?? []).some((points) => pointInPolygon(x, z, points))) return true;
     const waterClearance = Math.max(halfWidth, halfDepth) + 10;
@@ -2065,61 +2125,218 @@ async function addProceduralDistrictTiles(
   return colliders;
 }
 
+// The world's own sound: wind, wings, the city below, birds, weather. It plays
+// whenever sound is on, the way a game's ambience does, and the radio is an
+// optional layer over it that ducks it rather than replacing it.
+//
+// Everything is synthesised, so there are no audio files to ship. Layer gains
+// are set so a cruise sits around -26 dBFS: the first version of this mix
+// measured -53 dBFS, which is why the game seemed to have no sound at all.
 function createFlightAudio(): FlightAudio {
   let context: AudioContext | null = null;
   let master: GainNode | null = null;
-  let windGain: GainNode | null = null;
-  let windFilter: BiquadFilterNode | null = null;
+  let mix: GainNode | null = null;
+  let analyser: AnalyserNode | null = null;
+  let windLowGain: GainNode | null = null;
+  let windAirGain: GainNode | null = null;
+  let windAirFilter: BiquadFilterNode | null = null;
   let rainGain: GainNode | null = null;
   let waterGain: GainNode | null = null;
   let cityGain: GainNode | null = null;
+  let washGain: GainNode | null = null;
+  let cityFilter: BiquadFilterNode | null = null;
+  let washFilter: BiquadFilterNode | null = null;
   let natureGain: GainNode | null = null;
+  let streetGain: GainNode | null = null;
   let flapBuffer: AudioBuffer | null = null;
   let thunderRumbleBuffer: AudioBuffer | null = null;
   let thunderCrackBuffer: AudioBuffer | null = null;
   let birdCallTimer = 0;
+  let streetTimer = 0;
   let weatherRainStrength = 0;
+  let nearness = 0;
+  let lastWingAt = 0;
+  // `enabled` is whether sound is playing; `wanted` is the player's own choice,
+  // which a later take-off must not override.
   let enabled = false;
+  let wanted = true;
   let radioDucking = false;
+  // Recorded calls, by species, as they finish downloading and decoding.
+  const recordedCalls = new Map<string, AudioBuffer[]>();
+  let clipsRequested = false;
+  let playerSpecies = "crow";
+  let lastCall = "none";
 
-  const activeGain = () => radioDucking ? RADIO_DUCKED_AMBIENCE_GAIN : FLIGHT_AMBIENCE_GAIN;
+  // The player's own volume setting, as a multiple of the designed mix.
+  let volume = 1;
+  const activeGain = () => (radioDucking ? RADIO_DUCKED_AMBIENCE_GAIN : FLIGHT_AMBIENCE_GAIN) * volume;
 
+  // Fetch the field recordings in the background once sound is on. Nothing
+  // waits for them: until a species has a decoded clip, its calls are the
+  // synthesised ones, and a failed download just leaves it that way.
+  const loadRecordedCalls = () => {
+    if (clipsRequested || !context) return;
+    clipsRequested = true;
+    const audioContext = context;
+    for (const [species, urls] of Object.entries(soundClips as Record<string, string[]>)) {
+      for (const url of urls) {
+        void fetch(url)
+          .then((response) => (response.ok ? response.arrayBuffer() : Promise.reject(new Error(String(response.status)))))
+          .then((data) => audioContext.decodeAudioData(data))
+          .then((buffer) => {
+            const clips = recordedCalls.get(species) ?? [];
+            clips.push(buffer);
+            recordedCalls.set(species, clips);
+          })
+          .catch(() => {});
+      }
+    }
+  };
+  // How often each bird is heard over Dhaka. The crow is everywhere.
+  const CALL_WEIGHTS: Record<string, number> = { crow: 4, koel: 2, shalik: 2, doel: 2, tiya: 1.5, chil: 1 };
+  const playRecordedCall = () => {
+    if (!context || !natureGain || recordedCalls.size === 0) return false;
+    const own = recordedCalls.get(playerSpecies);
+    // About one call in four is the player's own bird, close and clear; the
+    // rest are other birds at a distance, quieter and duller the further off.
+    const isOwn = Boolean(own?.length) && Math.random() < 0.26;
+    let species = playerSpecies;
+    if (!isOwn) {
+      const available = [...recordedCalls.keys()];
+      let pick = Math.random() * available.reduce((sum, key) => sum + (CALL_WEIGHTS[key] ?? 1), 0);
+      species = available[available.length - 1];
+      for (const key of available) {
+        pick -= CALL_WEIGHTS[key] ?? 1;
+        if (pick <= 0) {
+          species = key;
+          break;
+        }
+      }
+    }
+    const clips = recordedCalls.get(species);
+    if (!clips?.length) return false;
+    const buffer = clips[Math.floor(Math.random() * clips.length)];
+    const distance = isOwn ? 0 : 0.25 + Math.random() * 0.75;
+    const source = context.createBufferSource();
+    source.buffer = buffer;
+    // A little pitch variation keeps a repeated clip from sounding identical.
+    source.playbackRate.value = 0.96 + Math.random() * 0.08;
+    const air = filter(context, "lowpass", 9_000 - distance * 6_400, 0.4);
+    const gain = level(context, isOwn ? 0.5 : 0.36 - distance * 0.26);
+    const panner = context.createStereoPanner();
+    panner.pan.value = isOwn ? Math.random() * 0.3 - 0.15 : Math.random() * 1.7 - 0.85;
+    source.connect(air).connect(gain).connect(panner).connect(natureGain);
+    source.onended = () => panner.disconnect();
+    source.start();
+    lastCall = `${species}${isOwn ? " (own)" : ""}`;
+    return true;
+  };
+
+  // Filtered noise, normalised so every layer's gain means the same thing.
   const makeNoise = (audioContext: AudioContext, duration: number, softness = 0.76) => {
     const buffer = audioContext.createBuffer(1, audioContext.sampleRate * duration, audioContext.sampleRate);
     const data = buffer.getChannelData(0);
     let previous = 0;
+    let loudest = 0;
     for (let i = 0; i < data.length; i++) {
       const white = Math.random() * 2 - 1;
       previous = previous * softness + white * (1 - softness);
       data[i] = previous;
+      loudest = Math.max(loudest, Math.abs(previous));
     }
+    const gain = loudest > 0 ? 0.9 / loudest : 1;
+    for (let i = 0; i < data.length; i++) data[i] *= gain;
     return buffer;
   };
 
+  const loop = (audioContext: AudioContext, duration: number, softness: number) => {
+    const source = audioContext.createBufferSource();
+    source.buffer = makeNoise(audioContext, duration, softness);
+    source.loop = true;
+    source.start();
+    return source;
+  };
+  const filter = (audioContext: AudioContext, type: BiquadFilterType, frequency: number, q: number) => {
+    const node = audioContext.createBiquadFilter();
+    node.type = type;
+    node.frequency.value = frequency;
+    node.Q.value = q;
+    return node;
+  };
+  const level = (audioContext: AudioContext, value: number) => {
+    const node = audioContext.createGain();
+    node.gain.value = value;
+    return node;
+  };
+  // A slow wobble on a gain, so no bed is a perfectly steady hiss.
+  const sway = (audioContext: AudioContext, target: AudioParam, rate: number, depth: number) => {
+    const oscillator = audioContext.createOscillator();
+    oscillator.frequency.value = rate;
+    const amount = level(audioContext, depth);
+    oscillator.connect(amount).connect(target);
+    oscillator.start();
+  };
+
+  // One pitched note with its own envelope, panned and routed, cleaned up when done.
+  const note = (
+    destination: AudioNode,
+    options: { type: OscillatorType; from: number; to: number; start: number; length: number; gain: number; shape?: BiquadFilterNode },
+  ) => {
+    if (!context) return;
+    const oscillator = context.createOscillator();
+    oscillator.type = options.type;
+    oscillator.frequency.setValueAtTime(options.from, options.start);
+    oscillator.frequency.exponentialRampToValueAtTime(options.to, options.start + options.length);
+    const envelope = context.createGain();
+    envelope.gain.setValueAtTime(0.0001, options.start);
+    envelope.gain.exponentialRampToValueAtTime(options.gain, options.start + Math.min(0.03, options.length * 0.25));
+    envelope.gain.exponentialRampToValueAtTime(0.0001, options.start + options.length);
+    if (options.shape) oscillator.connect(options.shape).connect(envelope);
+    else oscillator.connect(envelope);
+    envelope.connect(destination);
+    oscillator.onended = () => {
+      envelope.disconnect();
+      options.shape?.disconnect();
+    };
+    oscillator.start(options.start);
+    oscillator.stop(options.start + options.length + 0.03);
+  };
+  const panned = (destination: AudioNode, lifetime: number) => {
+    const panner = context!.createStereoPanner();
+    panner.pan.value = Math.random() * 1.6 - 0.8;
+    panner.connect(destination);
+    window.setTimeout(() => panner.disconnect(), lifetime * 1000 + 400);
+    return panner;
+  };
+
+  // The city's other birds, heard from the air: a small songbird, a distant
+  // crow, and the koel's rising two-note whistle.
   const playBirdCall = () => {
     if (!enabled || !context || !natureGain) return;
-    const now = context.currentTime;
-    const panner = context.createStereoPanner();
-    panner.pan.value = Math.random() * 1.5 - 0.75;
-    panner.connect(natureGain);
-    const basePitch = 1_650 + Math.random() * 720;
-    const notes = Math.random() > 0.5 ? 3 : 2;
-
-    for (let index = 0; index < notes; index++) {
-      const startAt = now + index * (0.105 + Math.random() * 0.035);
-      const oscillator = context.createOscillator();
-      oscillator.type = "sine";
-      oscillator.frequency.setValueAtTime(basePitch * (1 + index * 0.055), startAt);
-      oscillator.frequency.exponentialRampToValueAtTime(basePitch * (1.28 + index * 0.035), startAt + 0.075);
-      oscillator.frequency.exponentialRampToValueAtTime(basePitch * 0.94, startAt + 0.19);
-      const envelope = context.createGain();
-      envelope.gain.setValueAtTime(0.0001, startAt);
-      envelope.gain.exponentialRampToValueAtTime(0.018 + Math.random() * 0.008, startAt + 0.025);
-      envelope.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.2);
-      oscillator.connect(envelope).connect(panner);
-      if (index === notes - 1) oscillator.onended = () => panner.disconnect();
-      oscillator.start(startAt);
-      oscillator.stop(startAt + 0.22);
+    if (playRecordedCall()) return;
+    lastCall = "synthesised";
+    const now = context.currentTime + 0.02;
+    const out = panned(natureGain, 1.6);
+    const kind = Math.random();
+    if (kind < 0.5) {
+      const basePitch = 1_650 + Math.random() * 720;
+      const notes = Math.random() > 0.5 ? 3 : 2;
+      for (let index = 0; index < notes; index++) {
+        const start = now + index * (0.105 + Math.random() * 0.035);
+        note(out, { type: "sine", from: basePitch * (1 + index * 0.055), to: basePitch * (1.26 + index * 0.035), start, length: 0.19, gain: 0.13 });
+      }
+    } else if (kind < 0.78) {
+      const caws = 2 + Math.floor(Math.random() * 2);
+      for (let index = 0; index < caws; index++) {
+        const start = now + index * 0.34;
+        note(out, { type: "sawtooth", from: 470, to: 360, start, length: 0.24, gain: 0.1, shape: filter(context, "bandpass", 1_250, 2.2) });
+      }
+    } else {
+      const calls = 2 + Math.floor(Math.random() * 2);
+      for (let index = 0; index < calls; index++) {
+        const start = now + index * 0.52;
+        note(out, { type: "sine", from: 760 + index * 50, to: 1_180 + index * 70, start, length: 0.36, gain: 0.11 });
+      }
     }
   };
 
@@ -2128,8 +2345,51 @@ function createFlightAudio(): FlightAudio {
     birdCallTimer = window.setTimeout(() => {
       birdCallTimer = 0;
       playBirdCall();
-      if (enabled) scheduleBirdCall(4_200 + Math.random() * 6_800);
+      if (enabled) scheduleBirdCall(3_400 + Math.random() * 5_600);
     }, delay);
+  };
+
+  // Street life, only heard low over the city: a car horn or a rickshaw bell.
+  const playStreetSound = () => {
+    if (!enabled || !context || !streetGain || nearness < 0.12) return;
+    const now = context.currentTime + 0.02;
+    const out = panned(streetGain, 1.2);
+    if (Math.random() < 0.6) {
+      const pitch = 380 + Math.random() * 120;
+      const taps = Math.random() < 0.4 ? 2 : 1;
+      for (let tap = 0; tap < taps; tap++) {
+        const start = now + tap * 0.26;
+        const length = taps === 2 ? 0.16 : 0.22 + Math.random() * 0.3;
+        for (const ratio of [1, 1.26]) {
+          note(out, { type: "square", from: pitch * ratio, to: pitch * ratio * 0.99, start, length, gain: 0.05, shape: filter(context, "lowpass", 1_900, 0.7) });
+        }
+      }
+    } else {
+      const rings = 2 + Math.floor(Math.random() * 2);
+      for (let ring = 0; ring < rings; ring++) {
+        const start = now + ring * 0.17;
+        note(out, { type: "sine", from: 2_350, to: 2_330, start, length: 0.32, gain: 0.05 });
+        note(out, { type: "sine", from: 3_520, to: 3_500, start, length: 0.2, gain: 0.025 });
+      }
+    }
+  };
+  const scheduleStreetSound = (delay = 2_500 + Math.random() * 3_500) => {
+    if (streetTimer) window.clearTimeout(streetTimer);
+    streetTimer = window.setTimeout(() => {
+      streetTimer = 0;
+      playStreetSound();
+      if (enabled) scheduleStreetSound(2_200 + Math.random() * 5_200);
+    }, delay);
+  };
+  const stopSchedules = () => {
+    if (birdCallTimer) window.clearTimeout(birdCallTimer);
+    if (streetTimer) window.clearTimeout(streetTimer);
+    birdCallTimer = 0;
+    streetTimer = 0;
+  };
+  const startSchedules = () => {
+    if (!birdCallTimer) scheduleBirdCall();
+    if (!streetTimer) scheduleStreetSound();
   };
 
   const initialize = () => {
@@ -2138,208 +2398,215 @@ function createFlightAudio(): FlightAudio {
     master = context.createGain();
     master.gain.value = 0;
     master.connect(context.destination);
+    analyser = context.createAnalyser();
+    analyser.fftSize = 4096;
+    master.connect(analyser);
+    // Every layer sums here, and one compressor keeps a thunderclap over a
+    // boost from clipping.
+    mix = context.createGain();
+    mix.gain.value = 2;
+    const compressor = context.createDynamicsCompressor();
+    compressor.threshold.value = -16;
+    compressor.knee.value = 12;
+    compressor.ratio.value = 5;
+    compressor.attack.value = 0.006;
+    compressor.release.value = 0.28;
+    mix.connect(compressor).connect(master);
 
-    const windSource = context.createBufferSource();
-    windSource.buffer = makeNoise(context, 4.5, 0.84);
-    windSource.loop = true;
-    windFilter = context.createBiquadFilter();
-    windFilter.type = "lowpass";
-    windFilter.frequency.value = 620;
-    windFilter.Q.value = 0.45;
-    windGain = context.createGain();
-    windGain.gain.value = 0.038;
-    windSource.connect(windFilter).connect(windGain).connect(master);
-    windSource.start();
+    // Wind is two bands of one noise source: a low rush that is always there,
+    // and an airy band that opens up with speed and in a dive.
+    const windSource = loop(context, 4.5, 0.55);
+    windLowGain = level(context, 0.3);
+    windSource.connect(filter(context, "lowpass", 520, 0.5)).connect(windLowGain).connect(mix);
+    windAirFilter = filter(context, "bandpass", 1_500, 0.6);
+    windAirGain = level(context, 0.08);
+    windSource.connect(windAirFilter).connect(windAirGain).connect(mix);
+    sway(context, windLowGain.gain, 0.08, 0.05);
+    sway(context, windAirGain.gain, 0.13, 0.02);
 
-    const rainSource = context.createBufferSource();
-    rainSource.buffer = makeNoise(context, 6.4, 0.79);
-    rainSource.loop = true;
-    const rainHighpass = context.createBiquadFilter();
-    rainHighpass.type = "highpass";
-    rainHighpass.frequency.value = 760;
-    rainHighpass.Q.value = 0.2;
-    const rainLowpass = context.createBiquadFilter();
-    rainLowpass.type = "lowpass";
-    rainLowpass.frequency.value = 4_600;
-    rainLowpass.Q.value = 0.28;
-    rainGain = context.createGain();
-    rainGain.gain.value = weatherRainStrength * 0.052;
-    rainSource.connect(rainHighpass).connect(rainLowpass).connect(rainGain).connect(master);
-    rainSource.start();
+    const rainSource = loop(context, 6.4, 0.5);
+    rainGain = level(context, weatherRainStrength * 0.55);
+    rainSource.connect(filter(context, "highpass", 760, 0.2)).connect(filter(context, "lowpass", 4_600, 0.28)).connect(rainGain).connect(mix);
 
-    const waterSource = context.createBufferSource();
-    waterSource.buffer = makeNoise(context, 5.2, 0.91);
-    waterSource.loop = true;
-    const waterFilter = context.createBiquadFilter();
-    waterFilter.type = "bandpass";
-    waterFilter.frequency.value = 920;
-    waterFilter.Q.value = 0.7;
-    waterGain = context.createGain();
-    waterGain.gain.value = 0.01;
-    waterSource.connect(waterFilter).connect(waterGain).connect(master);
-    waterSource.start();
+    const waterSource = loop(context, 5.2, 0.8);
+    waterGain = level(context, 0.02);
+    waterSource.connect(filter(context, "bandpass", 920, 0.7)).connect(waterGain).connect(mix);
 
     // A pitched oscillator reads as an electrical hum when it never stops.
-    // Use a very soft, filtered noise bed for distant city air instead.
-    const cityBed = context.createBufferSource();
-    cityBed.buffer = makeNoise(context, 8.6, 0.975);
-    cityBed.loop = true;
-    const cityFilter = context.createBiquadFilter();
-    cityFilter.type = "lowpass";
-    cityFilter.frequency.value = 210;
-    cityFilter.Q.value = 0.25;
-    cityGain = context.createGain();
-    cityGain.gain.value = 0.006;
-    cityBed.connect(cityFilter).connect(cityGain).connect(master);
-    cityBed.start();
+    // Use a soft, filtered noise bed for distant city air instead, with a
+    // mid-band wash of traffic over it that small speakers can reproduce.
+    const cityBed = loop(context, 8.6, 0.93);
+    cityGain = level(context, 0.1);
+    cityFilter = filter(context, "lowpass", 260, 0.25);
+    cityBed.connect(cityFilter).connect(cityGain).connect(mix);
+    const trafficWash = loop(context, 7.1, 0.7);
+    washGain = level(context, 0.02);
+    washFilter = filter(context, "bandpass", 680, 0.45);
+    trafficWash.connect(washFilter).connect(washGain).connect(mix);
+    sway(context, washGain.gain, 0.06, 0.012);
 
-    natureGain = context.createGain();
-    natureGain.gain.value = 0.72;
-    natureGain.connect(master);
+    natureGain = level(context, 0.72);
+    natureGain.connect(mix);
+    streetGain = level(context, 0);
+    streetGain.connect(mix);
 
-    const leafRustle = context.createBufferSource();
-    leafRustle.buffer = makeNoise(context, 7.4, 0.955);
-    leafRustle.loop = true;
-    const rustleFilter = context.createBiquadFilter();
-    rustleFilter.type = "bandpass";
-    rustleFilter.frequency.value = 2_350;
-    rustleFilter.Q.value = 0.32;
-    const rustleGain = context.createGain();
-    rustleGain.gain.value = 0.018;
-    leafRustle.connect(rustleFilter).connect(rustleGain).connect(natureGain);
-    leafRustle.start();
+    const leafRustle = loop(context, 7.4, 0.6);
+    const rustleGain = level(context, 0.1);
+    leafRustle.connect(filter(context, "bandpass", 2_350, 0.32)).connect(rustleGain).connect(natureGain);
+    sway(context, rustleGain.gain, 0.11, 0.04);
 
-    const breezePulse = context.createOscillator();
-    breezePulse.type = "sine";
-    breezePulse.frequency.value = 0.11;
-    const breezeDepth = context.createGain();
-    breezeDepth.gain.value = 0.009;
-    breezePulse.connect(breezeDepth).connect(rustleGain.gain);
-    breezePulse.start();
-
-    const breath = context.createOscillator();
-    breath.type = "sine";
-    breath.frequency.value = 0.08;
-    const breathDepth = context.createGain();
-    breathDepth.gain.value = 0.008;
-    breath.connect(breathDepth).connect(windGain.gain);
-    breath.start();
-
-    flapBuffer = makeNoise(context, 0.34, 0.68);
+    flapBuffer = makeNoise(context, 0.34, 0.5);
     thunderRumbleBuffer = makeNoise(context, 6.5, 0.982);
     thunderCrackBuffer = makeNoise(context, 0.72, 0.56);
+  };
+
+  // One wingbeat: a short rush of air that starts bright and closes down.
+  const wingSound = (strength: number) => {
+    if (!enabled || !context || !mix || !flapBuffer) return;
+    const now = context.currentTime;
+    if (now - lastWingAt < 0.11) return;
+    lastWingAt = now;
+    const source = context.createBufferSource();
+    source.buffer = flapBuffer;
+    source.playbackRate.value = 0.9 + Math.random() * 0.2;
+    const shape = filter(context, "lowpass", 1_700, 0.6);
+    shape.frequency.setValueAtTime(1_700, now);
+    shape.frequency.exponentialRampToValueAtTime(420, now + 0.24);
+    const gain = context.createGain();
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.exponentialRampToValueAtTime(0.7 * strength, now + 0.04);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+    source.connect(shape).connect(gain).connect(mix);
+    source.onended = () => gain.disconnect();
+    source.start(now);
   };
 
   const start = async () => {
     initialize();
     if (!context || !master) return false;
     await context.resume();
+    if (!wanted) return false;
     enabled = true;
     master.gain.cancelScheduledValues(context.currentTime);
     master.gain.setTargetAtTime(activeGain(), context.currentTime, 0.45);
-    scheduleBirdCall();
+    startSchedules();
+    loadRecordedCalls();
     return true;
   };
 
   return {
     start,
     async toggle() {
-      if (!context || !master) return start();
+      if (!context || !master) {
+        wanted = true;
+        return start();
+      }
       if (context.state === "suspended") await context.resume();
       enabled = !enabled;
+      wanted = enabled;
       master.gain.cancelScheduledValues(context.currentTime);
       master.gain.setTargetAtTime(enabled ? activeGain() : 0, context.currentTime, 0.18);
-      if (enabled) scheduleBirdCall();
-      else if (birdCallTimer) {
-        window.clearTimeout(birdCallTimer);
-        birdCallTimer = 0;
-      }
+      if (enabled) {
+        startSchedules();
+        loadRecordedCalls();
+      } else stopSchedules();
       return enabled;
     },
     pause() {
       if (!context || !master) return;
       master.gain.cancelScheduledValues(context.currentTime);
       master.gain.setTargetAtTime(0, context.currentTime, 0.22);
-      // Silencing the master still leaves the call scheduler spinning up
+      // Silencing the master still leaves the schedulers spinning up
       // oscillators nobody can hear, and a queued call would fire the instant
       // the flight resumes.
-      if (birdCallTimer) {
-        window.clearTimeout(birdCallTimer);
-        birdCallTimer = 0;
-      }
+      stopSchedules();
     },
     resume() {
       if (!enabled || !context || !master) return;
       void context.resume();
       master.gain.cancelScheduledValues(context.currentTime);
       master.gain.setTargetAtTime(activeGain(), context.currentTime, 0.35);
-      if (!birdCallTimer) scheduleBirdCall();
+      startSchedules();
     },
     flap() {
-      if (!enabled || !context || !master || !flapBuffer) return;
-      const source = context.createBufferSource();
-      source.buffer = flapBuffer;
-      const filter = context.createBiquadFilter();
-      filter.type = "lowpass";
-      filter.frequency.value = 780;
-      const gain = context.createGain();
+      wingSound(1);
+    },
+    wingbeat(strength) {
+      wingSound(clamp(strength, 0, 1) * 0.55);
+    },
+    land() {
+      if (!enabled || !context || !mix || !flapBuffer) return;
       const now = context.currentTime;
+      // Feet meeting the perch, then the wings shuffling shut.
+      const thud = context.createBufferSource();
+      thud.buffer = flapBuffer;
+      thud.playbackRate.value = 0.5;
+      const gain = context.createGain();
       gain.gain.setValueAtTime(0.001, now);
-      gain.gain.exponentialRampToValueAtTime(0.055, now + 0.045);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
-      source.connect(filter).connect(gain).connect(master);
-      source.start(now);
+      gain.gain.exponentialRampToValueAtTime(0.6, now + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+      thud.connect(filter(context, "lowpass", 240, 0.8)).connect(gain).connect(mix);
+      thud.onended = () => gain.disconnect();
+      thud.start(now);
+      lastWingAt = 0;
+      window.setTimeout(() => wingSound(0.45), 140);
     },
     thunder(strength, delay) {
-      if (!enabled || !context || !master || !thunderRumbleBuffer || !thunderCrackBuffer) return;
+      if (!enabled || !context || !mix || !thunderRumbleBuffer || !thunderCrackBuffer) return;
       const amount = clamp(strength, 0.25, 1);
       const startAt = context.currentTime + Math.max(0, delay);
       const panner = context.createStereoPanner();
       panner.pan.value = (Math.random() - 0.5) * 0.65;
-      panner.connect(master);
+      panner.connect(mix);
 
       const crack = context.createBufferSource();
       crack.buffer = thunderCrackBuffer;
       crack.playbackRate.value = 0.82 + Math.random() * 0.2;
-      const crackFilter = context.createBiquadFilter();
-      crackFilter.type = "bandpass";
-      crackFilter.frequency.value = 1_150 + Math.random() * 480;
-      crackFilter.Q.value = 0.48;
       const crackGain = context.createGain();
       crackGain.gain.setValueAtTime(0.0001, startAt);
-      crackGain.gain.exponentialRampToValueAtTime(0.17 * amount, startAt + 0.018);
+      crackGain.gain.exponentialRampToValueAtTime(0.9 * amount, startAt + 0.018);
       crackGain.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.62);
-      crack.connect(crackFilter).connect(crackGain).connect(panner);
+      crack.connect(filter(context, "bandpass", 1_150 + Math.random() * 480, 0.48)).connect(crackGain).connect(panner);
       crack.start(startAt);
       crack.stop(startAt + 0.7);
 
       const rumble = context.createBufferSource();
       rumble.buffer = thunderRumbleBuffer;
       rumble.playbackRate.value = 0.68 + Math.random() * 0.16;
-      const rumbleFilter = context.createBiquadFilter();
-      rumbleFilter.type = "lowpass";
-      rumbleFilter.frequency.setValueAtTime(260, startAt);
-      rumbleFilter.frequency.exponentialRampToValueAtTime(105, startAt + 5.8);
-      rumbleFilter.Q.value = 0.72;
+      const rumbleFilter = filter(context, "lowpass", 260, 0.72);
+      rumbleFilter.frequency.setValueAtTime(320, startAt);
+      rumbleFilter.frequency.exponentialRampToValueAtTime(120, startAt + 5.8);
       const rumbleGain = context.createGain();
       rumbleGain.gain.setValueAtTime(0.0001, startAt);
-      rumbleGain.gain.exponentialRampToValueAtTime(0.28 * amount, startAt + 0.18);
-      rumbleGain.gain.exponentialRampToValueAtTime(0.11 * amount, startAt + 1.6);
+      rumbleGain.gain.exponentialRampToValueAtTime(1.3 * amount, startAt + 0.18);
+      rumbleGain.gain.exponentialRampToValueAtTime(0.5 * amount, startAt + 1.6);
       rumbleGain.gain.exponentialRampToValueAtTime(0.0001, startAt + 6.1);
       rumble.connect(rumbleFilter).connect(rumbleGain).connect(panner);
       rumble.onended = () => panner.disconnect();
       rumble.start(startAt);
       rumble.stop(startAt + 6.2);
     },
-    setFlight(speed, altitude) {
-      if (!context || !windGain || !windFilter || !waterGain || !cityGain || !natureGain) return;
+    setFlight(speed, altitude, verticalSpeed) {
+      if (!context || !windLowGain || !windAirGain || !windAirFilter || !waterGain || !cityGain || !washGain || !natureGain || !streetGain) return;
       const now = context.currentTime;
-      windGain.gain.setTargetAtTime(0.025 + speed / 1450, now, 0.35);
-      windFilter.frequency.setTargetAtTime(420 + speed * 7.5, now, 0.4);
-      const nearness = clamp(1 - altitude / 190, 0, 1);
-      waterGain.gain.setTargetAtTime(0.004 + nearness * 0.021, now, 0.7);
-      cityGain.gain.setTargetAtTime(0.004 + nearness * 0.008, now, 0.8);
+      // Standing on a perch there is only a light breeze; at a full boost or in
+      // a steep dive the air roars.
+      const pace = clamp(speed / BOOST_SPEED, 0, 1);
+      const dive = clamp(Math.abs(verticalSpeed) / 22, 0, 1);
+      windLowGain.gain.setTargetAtTime(0.1 + pace * 0.34, now, 0.35);
+      windAirGain.gain.setTargetAtTime(0.05 + pace * pace * 0.5 + dive * 0.14, now, 0.3);
+      windAirFilter.frequency.setTargetAtTime(1_100 + pace * 1_900 + dive * 500, now, 0.4);
+      // The city rises to meet a low-flying bird and fades out with height.
+      nearness = clamp(1 - altitude / 190, 0, 1);
+      waterGain.gain.setTargetAtTime(0.012 + nearness * 0.05, now, 0.7);
+      cityGain.gain.setTargetAtTime(0.07 + nearness * 0.2, now, 0.8);
+      washGain.gain.setTargetAtTime(0.06 + nearness * nearness * 0.3, now, 0.8);
       natureGain.gain.setTargetAtTime(0.42 + nearness * 0.58, now, 1.1);
+      streetGain.gain.setTargetAtTime(nearness, now, 0.9);
+      // Distance takes the top off a sound before it takes the level, so the
+      // city is duller as well as quieter from high up.
+      cityFilter?.frequency.setTargetAtTime(200 + nearness * 260, now, 0.9);
+      washFilter?.frequency.setTargetAtTime(480 + nearness * 420, now, 0.9);
     },
     setWeather(mode, precipitation) {
       weatherRainStrength = mode === "storm"
@@ -2350,7 +2617,7 @@ function createFlightAudio(): FlightAudio {
             ? 0.3
             : 0;
       if (!context || !rainGain) return;
-      rainGain.gain.setTargetAtTime(weatherRainStrength * 0.052, context.currentTime, 1.4);
+      rainGain.gain.setTargetAtTime(weatherRainStrength * 0.55, context.currentTime, 1.4);
     },
     setRadioDucking(active) {
       radioDucking = active;
@@ -2358,10 +2625,38 @@ function createFlightAudio(): FlightAudio {
       master.gain.cancelScheduledValues(context.currentTime);
       master.gain.setTargetAtTime(activeGain(), context.currentTime, 0.28);
     },
+    setBird(id) {
+      playerSpecies = id;
+    },
+    setVolume(next) {
+      volume = clamp(next, 0, 1.5);
+      if (!enabled || !context || !master) return;
+      master.gain.cancelScheduledValues(context.currentTime);
+      master.gain.setTargetAtTime(activeGain(), context.currentTime, 0.08);
+    },
+    probe() {
+      const clips = [...recordedCalls.values()].reduce((count, list) => count + list.length, 0);
+      if (!context || !analyser) return { state: context?.state ?? "none", rms: 0, peak: 0, above250: 0, clips, lastCall };
+      const samples = new Float32Array(analyser.fftSize);
+      analyser.getFloatTimeDomainData(samples);
+      let sum = 0;
+      let peak = 0;
+      for (const sample of samples) {
+        sum += sample * sample;
+        peak = Math.max(peak, Math.abs(sample));
+      }
+      // Laptop speakers reproduce very little below about 250 Hz, so the part of
+      // the mix above that is what most players will actually hear.
+      const spectrum = new Float32Array(analyser.frequencyBinCount);
+      analyser.getFloatFrequencyData(spectrum);
+      const binWidth = context.sampleRate / analyser.fftSize;
+      let power = 0;
+      for (let bin = Math.ceil(250 / binWidth); bin < spectrum.length; bin++) power += 10 ** (spectrum[bin] / 10);
+      return { state: context.state, rms: Math.sqrt(sum / samples.length), peak, above250: Math.sqrt(power), clips, lastCall };
+    },
     dispose() {
       enabled = false;
-      if (birdCallTimer) window.clearTimeout(birdCallTimer);
-      birdCallTimer = 0;
+      stopSchedules();
       context?.close();
       context = null;
     },
@@ -2634,7 +2929,13 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
     material.customProgramCacheKey = () => `bev-night-lit-${tint}-${strength}`;
     return material;
   };
-  const archDark = nightLit(new THREE.MeshStandardMaterial({ color: 0x3d2a22, roughness: 0.9 }), 0.55);
+  const archDark = nightLit(new THREE.MeshStandardMaterial({
+    color: 0x3d2a22,
+    roughness: 0.9,
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+    polygonOffsetUnits: -1,
+  }), 0.55);
   const ribbonGlass = nightLit(new THREE.MeshStandardMaterial({ color: 0x24434c, roughness: 0.22, metalness: 0.3 }), 0.34, 0xffd9a0);
   const atriumGlass = nightLit(new THREE.MeshPhysicalMaterial({ color: 0x4f9aa6, roughness: 0.16, metalness: 0.2, clearcoat: 0.6 }), 0.3, 0xfff0c8);
   const unitBox = new THREE.BoxGeometry(1, 1, 1);
@@ -2773,6 +3074,49 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
   };
 
   type WallEdge = { ax: number; az: number; dx: number; dz: number; nx: number; nz: number; length: number; rotationY: number };
+  // Offset a closed 2D polygon along its outward edge normals so floor bands,
+  // cornices and parapets stand cleanly proud of every wall — including concave
+  // and radial faces where radial scaling would lie coplanar or cut inward.
+  const offsetPolygon = (points: MapPoint[], offset: number): MapPoint[] => {
+    const clean: MapPoint[] = [];
+    for (const point of points) {
+      const prev = clean[clean.length - 1];
+      if (!prev || Math.hypot(point[0] - prev[0], point[1] - prev[1]) > 0.05) clean.push(point);
+    }
+    if (clean.length > 1 && Math.hypot(clean[0][0] - clean[clean.length - 1][0], clean[0][1] - clean[clean.length - 1][1]) <= 0.05) {
+      clean.pop();
+    }
+    if (clean.length < 3) return points;
+    let area = 0;
+    for (let index = 0; index < clean.length; index++) {
+      const [ax, az] = clean[index];
+      const [bx, bz] = clean[(index + 1) % clean.length];
+      area += ax * bz - bx * az;
+    }
+    const side = area > 0 ? 1 : -1;
+    const normals: MapPoint[] = clean.map(([ax, az], index) => {
+      const [bx, bz] = clean[(index + 1) % clean.length];
+      const length = Math.hypot(bx - ax, bz - az) || 1;
+      return [((bz - az) / length) * side, -((bx - ax) / length) * side];
+    });
+    return clean.map(([x, z], index) => {
+      const [nx0, nz0] = normals[(index - 1 + clean.length) % clean.length];
+      const [nx1, nz1] = normals[index];
+      let bx = nx0 + nx1;
+      let bz = nz0 + nz1;
+      const bLen = Math.hypot(bx, bz);
+      if (bLen < 1e-4) {
+        bx = nx1;
+        bz = nz1;
+      } else {
+        bx /= bLen;
+        bz /= bLen;
+      }
+      const scale = offset / Math.max(bx * nx1 + bz * nz1, 0.45);
+      return [x + bx * scale, z + bz * scale] as MapPoint;
+    });
+  };
+
   // Every wall of an outline, with the normal that points away from the building.
   const wallEdges = (points: MapPoint[]): WallEdge[] => {
     let area = 0;
@@ -2837,8 +3181,8 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
       for (let index = 0; index < count; index++) {
         const along = margin + (index + 0.5) * spacing;
         for (const storey of options.storeys) {
-          if (storey.surround && options.surround) addOnWall(parent, edge, along, storey.y - 0.25, storey.surround, options.surround, 0.07);
-          addOnWall(parent, edge, along, storey.y, storey.opening, options.opening, 0.14);
+          if (storey.surround && options.surround) addOnWall(parent, edge, along, storey.y - 0.25, storey.surround, options.surround, 0.14);
+          addOnWall(parent, edge, along, storey.y, storey.opening, options.opening, 0.26);
         }
       }
       if (options.pier) {
@@ -3019,10 +3363,13 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
     let top = 0;
 
     for (const part of footprint.parts) {
-      const points = part.points.map(([lat, lon]) => {
+      const rawPoints = part.points.map(([lat, lon]) => {
         const world = coordinatesToWorld(lat, lon);
         return [world.x, world.y] as MapPoint;
       });
+      // Holy Rosary Church's bell tower shares 9 wall vertices with the white
+      // upper wings; outsetting it slightly stops the two materials z-fighting.
+      const points = part.osmId === 983631140 ? offsetPolygon(rawPoints, 0.18) : rawPoints;
       const xs = points.map(([x]) => x);
       const zs = points.map(([, z]) => z);
       const partMinX = Math.min(...xs);
@@ -3048,7 +3395,9 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
       geometry.rotateX(-Math.PI / 2);
       const mesh = new THREE.Mesh(geometry, partMaterial(landmark.kind, part));
       mesh.name = `${landmark.label} · OSM ${part.osmId} · ${part.role}`;
-      mesh.position.y = part.role === "water" ? 0.72 : 0.9;
+      // Lalbagh Fort's reflecting tank sits inside the fort's 1.4 m lawn, so it
+      // rises above the lawn instead of fighting underneath it.
+      mesh.position.y = part.role === "water" ? (part.osmId === 624024882 ? 1.32 : 0.72) : 0.9;
       mesh.castShadow = part.role !== "ground" && part.role !== "water";
       mesh.receiveShadow = true;
       mesh.userData.osmId = part.osmId;
@@ -3111,23 +3460,28 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
       return points ? wallEdges(points.map(([x, z]) => [x - group.position.x, z - group.position.z] as MapPoint)) : [];
     };
     // A slab that follows a part's outline: string courses, cornices, parapets
-    // and roof finishes. `grow` scales it about the part's centre, so above 1 it
-    // stands proud of the wall and below 1 it sits inside the parapet.
+    // and roof finishes. Outward slabs (`grow > 1`) offset every edge along its
+    // true normal so concave and radial walls never lie coplanar with the mass;
+    // inset roof finishes (`grow < 1`) are thickened enough to stay clean at
+    // distance.
     const slabGeometries = new Map<string, THREE.BufferGeometry>();
     const slab = (osmId: number, y: number, height: number, grow: number, material: THREE.Material) => {
       const local = outline(osmId);
       const seat = anchor(osmId);
       if (!local || !seat) return null;
-      const key = `${osmId}:${height}`;
+      const outset = grow > 1 ? clamp((grow - 1) * Math.min(seat.width, seat.depth) * 0.5, 0.24, 1.5) : 0;
+      const depth = grow < 1 ? Math.max(0.18, height) : height;
+      const key = `${osmId}:${depth.toFixed(3)}:${outset.toFixed(3)}`;
       let geometry = slabGeometries.get(key);
       if (!geometry) {
-        geometry = new THREE.ExtrudeGeometry(polygonShape(local), { depth: height, bevelEnabled: false, curveSegments: 1 });
+        const ring = outset > 0 ? offsetPolygon(local, outset) : local;
+        geometry = new THREE.ExtrudeGeometry(polygonShape(ring), { depth, bevelEnabled: false, curveSegments: 1 });
         geometry.rotateX(-Math.PI / 2);
         slabGeometries.set(key, geometry);
       }
       const mesh = new THREE.Mesh(geometry, material);
       mesh.position.set(seat.x, y, seat.z);
-      mesh.scale.set(grow, 1, grow);
+      if (grow < 1) mesh.scale.set(grow, 1, grow);
       mesh.castShadow = true;
       mesh.receiveShadow = true;
       group.add(mesh);
@@ -3464,25 +3818,25 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
       walls(CITADEL).forEach((edge, index) => {
         const middle = edge.length / 2;
         if (edge.length >= 26) {
-          addOnWall(group, edge, middle, 6.4, circleLargeTrim, marble, 0.08);
-          addOnWall(group, edge, middle, 7.4, circleLarge, recess, 0.16);
+          addOnWall(group, edge, middle, 6.4, circleLargeTrim, marble, 0.16);
+          addOnWall(group, edge, middle, 7.4, circleLarge, recess, 0.28);
         } else if (edge.length >= 15.5) {
           if (index % 2 === 0) {
-            addOnWall(group, edge, middle, 9.3, circleSmallTrim, marble, 0.08);
-            addOnWall(group, edge, middle, 10, circleSmall, recess, 0.16);
-            addOnWall(group, edge, middle, 23.5, slot, recess, 0.16);
+            addOnWall(group, edge, middle, 9.3, circleSmallTrim, marble, 0.16);
+            addOnWall(group, edge, middle, 10, circleSmall, recess, 0.28);
+            addOnWall(group, edge, middle, 23.5, slot, recess, 0.28);
           } else {
-            addOnWall(group, edge, middle, 7.2, triangleTrim, marble, 0.08);
-            addOnWall(group, edge, middle, 8, triangle, recess, 0.16);
+            addOnWall(group, edge, middle, 7.2, triangleTrim, marble, 0.16);
+            addOnWall(group, edge, middle, 8, triangle, recess, 0.28);
           }
         } else if (edge.length >= 11) {
-          addOnWall(group, edge, middle, 6, rectPane(2.4, 22), recess, 0.16);
+          addOnWall(group, edge, middle, 6, rectPane(2.4, 22), recess, 0.28);
         }
       });
       // Tall light slits between the folds of the star.
       const slit = rectPane(1.5, 30);
       for (const edge of walls(STAR)) {
-        if (edge.length >= 9) addOnWall(group, edge, edge.length / 2, 8, slit, recess, 0.16);
+        if (edge.length >= 9) addOnWall(group, edge, edge.length / 2, 8, slit, recess, 0.28);
       }
 
       if (chamber) {
@@ -3506,8 +3860,8 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
         addBox(group, [232, 1.2, 108], [citadel.x, 0.6, plazaZ], plazaBrick);
         addBox(group, [220, 1, 98], [citadel.x, 1.7, plazaZ - 1], terracotta);
         addBox(group, [20, 2.4, 40], [citadel.x, 1.2, southEdge + 14], plazaBrick);
-        for (const offset of [-73, 0, 73]) addBox(group, [0.6, 0.1, 98], [citadel.x + offset, 2.25, plazaZ - 1], marble);
-        for (const offset of [-16, 16]) addBox(group, [220, 0.1, 0.6], [citadel.x, 2.25, plazaZ - 1 + offset], marble);
+        for (const offset of [-73, 0, 73]) addBox(group, [0.6, 0.12, 98], [citadel.x + offset, 2.26, plazaZ - 1], marble);
+        for (const offset of [-16, 16]) addBox(group, [220, 0.12, 0.6], [citadel.x, 2.3, plazaZ - 1 + offset], marble);
         for (const side of [-1, 1]) addBox(group, [3.4, 3, 98], [citadel.x + side * 112, 1.5, plazaZ - 1], plazaBrick);
         // Presidential Plaza: white marble steps on the north side.
         addBox(group, [118, 1.2, 64], [citadel.x, 0.6, northEdge - 24], marble);
@@ -3525,9 +3879,10 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
       // Curtain wall along the real boundary, with a bastion at every corner.
       const boundary = walls(GROUNDS);
       boundary.forEach((edge, index) => {
-        const wall = addBox(group, [edge.length + 1.2, 5.2, 1.7], [edge.ax + edge.dx * edge.length / 2, 3, edge.az + edge.dz * edge.length / 2], redBrick);
+        const cornerLift = (index & 1) * 0.04;
+        const wall = addBox(group, [edge.length + 1.2, 5.2, 1.7], [edge.ax + edge.dx * edge.length / 2, 3 + cornerLift, edge.az + edge.dz * edge.length / 2], redBrick);
         wall.rotation.y = edge.rotationY;
-        const coping = addBox(group, [edge.length + 1.2, 0.5, 2.2], [edge.ax + edge.dx * edge.length / 2, 5.8, edge.az + edge.dz * edge.length / 2], brickTrim);
+        const coping = addBox(group, [edge.length + 1.2, 0.5, 2.2], [edge.ax + edge.dx * edge.length / 2, 5.8 + cornerLift, edge.az + edge.dz * edge.length / 2], brickTrim);
         coping.rotation.y = edge.rotationY;
         const next = boundary[(index + 1) % boundary.length];
         const turn = Math.abs(edge.dx * next.dz - edge.dz * next.dx);
@@ -3620,11 +3975,11 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
           addBox(g, [18, 0.7, hz * 2 + 6], [0, 17, 0], brickTrim);
           for (const side of [-1, 1]) {
             const arch = new THREE.Mesh(pointedArch(6.4, 11.5), archDark);
-            arch.position.set(0, 0.6, side * (hz + 2.56));
+            arch.position.set(0, 0.6, side * (hz + 2.74));
             if (side < 0) arch.rotation.y = Math.PI;
             g.add(arch);
             const trim = new THREE.Mesh(pointedArch(8, 13), cream);
-            trim.position.set(0, 0.3, side * (hz + 2.52));
+            trim.position.set(0, 0.3, side * (hz + 2.62));
             if (side < 0) trim.rotation.y = Math.PI;
             g.add(trim);
           }
@@ -3642,9 +3997,9 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
         const from = axis[index];
         const to = axis[index + 1];
         const length = Math.hypot(to.x - from.x, to.z - from.z);
-        const path = addBox(group, [length, 0.16, 5], [(from.x + to.x) / 2, 0.62, (from.z + to.z) / 2], paleConcrete);
+        const path = addBox(group, [length, 0.2, 5], [(from.x + to.x) / 2, 0.66 + index * 0.02, (from.z + to.z) / 2], paleConcrete);
         path.rotation.y = Math.atan2(-(to.z - from.z), to.x - from.x);
-        const channel = addBox(group, [length * 0.6, 0.2, 1.4], [(from.x + to.x) / 2, 0.66, (from.z + to.z) / 2], water);
+        const channel = addBox(group, [length * 0.6, 0.22, 1.4], [(from.x + to.x) / 2, 0.78 + index * 0.02, (from.z + to.z) / 2], water);
         channel.rotation.y = path.rotation.y;
       }
     } else if (landmark.kind === "ahsan-manzil") {
@@ -3670,7 +4025,7 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
         slab(osmId, height - 0.5, 0.7, 1.024, salmonTrim);
         slab(osmId, height, 1.2, 1.004, salmon);
         slab(osmId, height + 1.2, 0.22, 1.016, salmonTrim);
-        slab(osmId, height + 1.2, 0.08, 0.95, roofTerrace);
+        slab(osmId, height + 1.42, 0.18, 0.95, roofTerrace);
       };
       const palace = anchor(PALACE);
       if (palace) {
@@ -3711,7 +4066,7 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
           for (let face = 0; face < 4; face++) {
             const angle = (face / 4) * Math.PI * 2;
             for (const offset of [-3, 0, 3]) {
-              for (const [geometry, material, proud, lift] of [[towerArchTrim, salmonTrim, 5.56, -0.2], [towerArch, archDark, 5.62, 0]] as const) {
+              for (const [geometry, material, proud, lift] of [[towerArchTrim, salmonTrim, 5.64, -0.2], [towerArch, archDark, 5.76, 0]] as const) {
                 const pane = new THREE.Mesh(geometry, material);
                 pane.position.set(Math.sin(angle) * proud + Math.cos(angle) * offset, towerBase + 2.9 + lift, tz + Math.cos(angle) * proud - Math.sin(angle) * offset);
                 pane.rotation.y = angle;
@@ -3742,7 +4097,7 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
           const doorArch = roundArch(2.6, 5);
           const doorArchTrim = roundArch(3.4, 5.6);
           for (const offset of [-4.1, 0, 4.1]) {
-            for (const [geometry, material, proud, lift] of [[doorArchTrim, salmonTrim, 3.27, -0.2], [doorArch, archDark, 3.33, 0]] as const) {
+            for (const [geometry, material, proud, lift] of [[doorArchTrim, salmonTrim, 3.34, -0.2], [doorArch, archDark, 3.46, 0]] as const) {
               const pane = new THREE.Mesh(geometry, material);
               pane.position.set(offset, H * 0.46 + 1.1 + lift, hz + proud);
               g.add(pane);
@@ -3764,8 +4119,8 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
             addBox(g, [1.5, 2.6, 1.5], [side * 8.2, 1.3, stairStart + run + 0.4], salmonTrim);
           }
           // Forecourt walk down to the river gate.
-          addBox(g, [7, 0.14, 46], [0, 0.6, stairStart + run + 23], paleConcrete);
-          addBox(g, [58, 0.14, 4], [0, 0.6, stairStart + run + 3], paleConcrete);
+          addBox(g, [7, 0.18, 46], [0, 0.64, stairStart + run + 23], paleConcrete);
+          addBox(g, [58, 0.18, 4], [0, 0.68, stairStart + run + 3], paleConcrete);
         }
       }
       const andarmahal = anchor(ANDARMAHAL);
@@ -3784,8 +4139,9 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
     } else if (landmark.kind === "shaheed-minar") {
       // The Language Martyrs' monument: a mother and her fallen sons as five
       // marble frames on a stepped plinth, her head bowed, the red sun behind.
-      addBox(group, [58, 0.5, 40], [0, 0.25, 5], paleConcrete);
-      addBox(group, [50, 1.1, 30], [0, 1.05, 2], whiteStone);
+      // Base tier clears the 0.5 m OSM ground footprint underneath it.
+      addBox(group, [58, 0.72, 40], [0, 0.36, 5], paleConcrete);
+      addBox(group, [50, 1.1, 30], [0, 1.16, 2], whiteStone);
       addBox(group, [44, 1, 22], [0, 2.1, 0], marble);
       for (let step = 0; step < 4; step++) addBox(group, [26 - step * 1.2, 0.5, 1.4], [0, 0.75 + step * 0.5, 17.6 - step * 1.4], whiteStone);
       const BASE = 2.6;
@@ -3899,7 +4255,7 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
           addBox(g, [5.6, 1, 31], [portalX + 2.5, H + 6.5, 0], marble);
           for (const [offset, archWidth, archHeight] of [[-9.6, 5.4, 11.5], [0, 7, 14.5], [9.6, 5.4, 11.5]] as const) {
             const arch = new THREE.Mesh(pointedArch(archWidth, archHeight), archDark);
-            arch.position.set(portalX + 5.06, 1.6, offset);
+            arch.position.set(portalX + 5.18, 1.6, offset);
             arch.rotation.y = Math.PI / 2;
             g.add(arch);
           }
@@ -4062,23 +4418,54 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
     const RAIL_TOP_Y = METRO_DECK_Y + 0.9;
     const TRACK_OFFSET = 2.6;
 
-    // Box-girder guideway: a chain of rectangular boxes swept along the curve, resting on the piers.
-    // Sample counts scale with the line's true length so the dense OSM track geometry
-    // and the coarse station-to-station fallback both render smoothly.
+    // Box-girder guideway: one continuous swept rectangular tube along the curve
+    // so adjacent spans never overlap on coplanar top/bottom faces and z-fight.
     const GIRDER_SAMPLES = Math.min(560, Math.max(160, Math.round(curveLength / 90)));
-    let girderPrev = metroCurve.getPointAt(0);
-    for (let index = 1; index <= GIRDER_SAMPLES; index++) {
-      const point = metroCurve.getPointAt(index / GIRDER_SAMPLES);
-      const midX = (girderPrev.x + point.x) / 2;
-      const midY = (girderPrev.y + point.y) / 2;
-      const midZ = (girderPrev.z + point.z) / 2;
-      const dx = point.x - girderPrev.x;
-      const dz = point.z - girderPrev.z;
-      const segLength = Math.hypot(dx, dz) + 0.7;
-      const girder = addBox(metroRoot, [segLength, 2.4, 9.6], [midX, midY - 1.2, midZ], guidewayMaterial);
-      girder.rotation.y = Math.atan2(-dz, dx);
-      girderPrev = point;
+    const girderPositions: number[] = [];
+    const girderUvs: number[] = [];
+    const pushQuad = (a: [number, number, number], b: [number, number, number], c: [number, number, number], d: [number, number, number]) => {
+      girderPositions.push(...a, ...b, ...c, ...a, ...c, ...d);
+      girderUvs.push(0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1);
+    };
+    const girderRings: Array<[[number, number, number], [number, number, number], [number, number, number], [number, number, number]]> = [];
+    for (let index = 0; index <= GIRDER_SAMPLES; index++) {
+      const u = index / GIRDER_SAMPLES;
+      const point = metroCurve.getPointAt(u);
+      const tangent = metroCurve.getTangentAt(u);
+      const perpLen = Math.hypot(tangent.x, tangent.z) || 1;
+      const nx = (-tangent.z / perpLen) * 4.8;
+      const nz = (tangent.x / perpLen) * 4.8;
+      const topY = point.y;
+      const botY = point.y - 2.4;
+      girderRings.push([
+        [point.x - nx, topY, point.z - nz],
+        [point.x + nx, topY, point.z + nz],
+        [point.x + nx, botY, point.z + nz],
+        [point.x - nx, botY, point.z - nz],
+      ]);
     }
+    for (let index = 0; index < girderRings.length - 1; index++) {
+      const [tl0, tr0, br0, bl0] = girderRings[index];
+      const [tl1, tr1, br1, bl1] = girderRings[index + 1];
+      pushQuad(tl0, tr0, tr1, tl1); // top
+      pushQuad(bl0, bl1, br1, br0); // bottom
+      pushQuad(tr0, br0, br1, tr1); // right
+      pushQuad(tl0, tl1, bl1, bl0); // left
+    }
+    if (girderRings.length >= 2) {
+      const [tl0, tr0, br0, bl0] = girderRings[0];
+      pushQuad(tl0, bl0, br0, tr0);
+      const [tln, trn, brn, bln] = girderRings[girderRings.length - 1];
+      pushQuad(tln, trn, brn, bln);
+    }
+    const girderGeometry = new THREE.BufferGeometry();
+    girderGeometry.setAttribute("position", new THREE.Float32BufferAttribute(girderPositions, 3));
+    girderGeometry.setAttribute("uv", new THREE.Float32BufferAttribute(girderUvs, 2));
+    girderGeometry.computeVertexNormals();
+    const girderMesh = new THREE.Mesh(girderGeometry, guidewayMaterial);
+    girderMesh.castShadow = true;
+    girderMesh.receiveShadow = true;
+    metroRoot.add(girderMesh);
     // Two running rails sitting on top of the girder deck, offset perpendicular to the track (dual-track).
     const RAIL_SAMPLES = GIRDER_SAMPLES;
     for (const track of [-1, 1]) {
@@ -4139,13 +4526,13 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
       stationGroup.rotation.y = Math.atan2(-tangent.z, tangent.x);
       // Platform deck (station long axis runs along local X, over the tracks).
       addBox(stationGroup, [98, 3, 22], [0, 0.5, 0], concrete);
-      for (const side of [-1, 1]) addBox(stationGroup, [98, 0.35, 0.6], [0, 2.1, side * 10.4], metroRed);
+      for (const side of [-1, 1]) addBox(stationGroup, [98, 0.35, 0.6], [0, 2.2, side * 10.4], metroRed);
       // Supporting columns and glazed side walls up to the eaves.
       for (const side of [-1, 1]) {
         for (const x of [-40, -20, 0, 20, 40]) addBox(stationGroup, [1.8, ROOF_BASE_Y - 2, 1.8], [x, (ROOF_BASE_Y + 2) / 2, side * 11.4], concrete);
-        addBox(stationGroup, [90, ROOF_BASE_Y - 2, 0.4], [0, (ROOF_BASE_Y + 2) / 2, side * 11.4], metroGlass);
+        addBox(stationGroup, [89.2, ROOF_BASE_Y - 2.3, 0.4], [0, (ROOF_BASE_Y + 2) / 2, side * 11.4], metroGlass);
       }
-      for (const end of [-1, 1]) addBox(stationGroup, [0.6, ROOF_BASE_Y - 2, 24], [end * 45, (ROOF_BASE_Y + 2) / 2, 0], metroGlass);
+      for (const end of [-1, 1]) addBox(stationGroup, [0.6, ROOF_BASE_Y - 2.4, 22.4], [end * 45, (ROOF_BASE_Y + 2) / 2, 0], metroGlass);
       // Vaulted roof (half-cylinder arch), flattened a little, with a red line-colour accent along the eaves and ridge.
       const vault = new THREE.Mesh(stationVaultGeometry, whiteStone);
       vault.rotation.z = Math.PI / 2;
@@ -4180,19 +4567,18 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
       for (let car = 0; car < CAR_COUNT; car++) {
         const z = (car - (CAR_COUNT - 1) / 2) * CAR_PITCH;
         addBox(train, [CAR_W, 3.2, CAR_LEN], [0, 2.6, z], metroSteel);
-        addBox(train, [CAR_W + 0.04, 1.1, CAR_LEN - 2.4], [0, 3.1, z], darkGlass);
-        addBox(train, [CAR_W + 0.06, 0.55, CAR_LEN - 0.6], [0, 2.15, z], metroRed);
+        addBox(train, [CAR_W + 0.14, 1.1, CAR_LEN - 2.4], [0, 3.1, z], darkGlass);
+        addBox(train, [CAR_W + 0.18, 0.55, CAR_LEN - 0.6], [0, 2.15, z], metroRed);
         addBox(train, [CAR_W - 0.5, 0.5, CAR_LEN - 0.4], [0, 4.35, z], metroSteel);
-        addBox(train, [0.8, 0.22, CAR_LEN - 0.4], [0, 4.62, z], metroRed);
+        addBox(train, [0.8, 0.24, CAR_LEN - 0.4], [0, 4.72, z], metroRed);
         for (const b of [-1, 1]) addBox(train, [2.4, 0.9, 3.6], [0, 0.35, z + b * 6.4], recess);
         // Nose cab detailing on the two end cars.
         if (car === 0 || car === CAR_COUNT - 1) {
           const dir = car === 0 ? -1 : 1;
           const tip = z + dir * (CAR_LEN / 2);
-          addBox(train, [CAR_W - 0.4, 2.6, 1.4], [0, 2.4, tip - dir * 0.7], metroSteel);
-          const windshield = addBox(train, [CAR_W - 0.1, 2.2, 0.5], [0, 3.2, tip - dir * 0.9], darkGlass);
+          const windshield = addBox(train, [CAR_W - 0.1, 2.2, 0.5], [0, 3.2, tip + dir * 0.08], darkGlass);
           windshield.rotation.x = dir * 0.42;
-          addBox(train, [CAR_W - 0.2, 0.5, 0.35], [0, 1.9, tip - dir * 0.2], metroRed);
+          addBox(train, [CAR_W - 0.2, 0.5, 0.35], [0, 1.9, tip + dir * 0.12], metroRed);
         }
       }
       bakeGroup(train);
@@ -4350,7 +4736,14 @@ function addCity(scene: THREE.Scene) {
 
   const ground = new THREE.Mesh(
     new THREE.PlaneGeometry(34_000, 34_000),
-    new THREE.MeshStandardMaterial({ color: 0x87937a, map: makeGroundTexture(), roughness: 1 }),
+    new THREE.MeshStandardMaterial({
+      color: 0x87937a,
+      map: makeGroundTexture(),
+      roughness: 1,
+      polygonOffset: true,
+      polygonOffsetFactor: 4,
+      polygonOffsetUnits: 4,
+    }),
   );
   ground.rotation.x = -Math.PI / 2;
   ground.receiveShadow = true;
@@ -4371,7 +4764,16 @@ function addCity(scene: THREE.Scene) {
   waterShape.closePath();
   const water = new THREE.Mesh(
     new THREE.ShapeGeometry(waterShape),
-    new THREE.MeshPhysicalMaterial({ color: 0x397f88, roughness: 0.24, metalness: 0.02, clearcoat: 0.7, clearcoatRoughness: 0.28 }),
+    new THREE.MeshPhysicalMaterial({
+      color: 0x397f88,
+      roughness: 0.24,
+      metalness: 0.02,
+      clearcoat: 0.7,
+      clearcoatRoughness: 0.28,
+      polygonOffset: true,
+      polygonOffsetFactor: 2,
+      polygonOffsetUnits: 2,
+    }),
   );
   water.rotation.x = -Math.PI / 2;
   water.position.y = 0.45;
@@ -4386,7 +4788,15 @@ function addCity(scene: THREE.Scene) {
     const center = Math.sin(x * 0.0042) * 90 + Math.sin(x * 0.009) * 24;
     const ribbon = new THREE.Mesh(
       ribbonGeometry,
-      new THREE.MeshBasicMaterial({ color: i % 3 === 0 ? 0xc9e1d7 : 0x7eb7b2, transparent: true, opacity: 0.18, depthWrite: false }),
+      new THREE.MeshBasicMaterial({
+        color: i % 3 === 0 ? 0xc9e1d7 : 0x7eb7b2,
+        transparent: true,
+        opacity: 0.18,
+        depthWrite: false,
+        polygonOffset: true,
+        polygonOffsetFactor: -1,
+        polygonOffsetUnits: -1,
+      }),
     );
     ribbon.rotation.x = -Math.PI / 2;
     ribbon.rotation.z = (random() - 0.5) * 0.14;
@@ -4746,7 +5156,7 @@ function addCity(scene: THREE.Scene) {
   scene.userData.perchMarkers = perchMarkers;
 
   const clouds: THREE.Group[] = [];
-  const cloudMaterial = new THREE.MeshStandardMaterial({ color: 0xe9e5d5, roughness: 1, transparent: true, opacity: 0.55 });
+  const cloudMaterial = new THREE.MeshStandardMaterial({ color: 0xe9e5d5, roughness: 1, transparent: true, opacity: 0.55, depthWrite: false });
   for (let i = 0; i < 14; i++) {
     const cloud = new THREE.Group();
     for (let puff = 0; puff < 5; puff++) {
@@ -4866,6 +5276,9 @@ async function selectSpatiallyEvenBuildings(
 async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCancelled: () => boolean) {
   const root = new THREE.Group();
   root.name = "Live OpenStreetMap world";
+  // Keep the incoming OSM world hidden until every batch is built so it never
+  // overlaps and z-fights with the fallback world mid-load.
+  root.visible = false;
   scene.add(root);
   const colliders: BuildingCollider[] = [];
   const yieldIfNeeded = createMainThreadYielder();
@@ -4873,10 +5286,11 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
   const waterAreas: THREE.BufferGeometry[] = [];
   const waterLines: THREE.BufferGeometry[] = [];
   for (const feature of data.water) {
+    const waterJitter = (Math.abs(feature.id) % 7) * 0.008;
     if (feature.area && feature.points.length >= 3) {
       const geometry = new THREE.ShapeGeometry(polygonShape(feature.points));
       geometry.rotateX(-Math.PI / 2);
-      geometry.translate(0, 0.68, 0);
+      geometry.translate(0, 0.48 + waterJitter, 0);
       waterAreas.push(geometry);
       continue;
     }
@@ -4885,26 +5299,39 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
       const [x2, z2] = feature.points[index];
       const length = Math.hypot(x2 - x1, z2 - z1);
       if (length < 1) continue;
-      // Top face only, at the height the old 0.24 m box's lid sat.
+      // Top face only, staggered slightly per segment to avoid corner overlap z-fighting.
       const geometry = new THREE.PlaneGeometry(length, 8);
       geometry.rotateX(-Math.PI / 2);
       geometry.rotateY(-Math.atan2(z2 - z1, x2 - x1));
-      geometry.translate((x1 + x2) / 2, 0.86, (z1 + z2) / 2);
+      geometry.translate((x1 + x2) / 2, 0.64 + waterJitter + (index & 1) * 0.004, (z1 + z2) / 2);
       waterLines.push(geometry);
     }
     await yieldIfNeeded(isCancelled);
   }
-  const waterMaterial = new THREE.MeshPhysicalMaterial({ color: 0x397f88, roughness: 0.24, metalness: 0.02, clearcoat: 0.7, clearcoatRoughness: 0.28 });
-  await mergeIntoMeshBatches(root, waterAreas, waterMaterial, "OSM water areas", isCancelled);
-  await mergeIntoMeshBatches(root, waterLines, waterMaterial, "OSM waterways", isCancelled);
+  const waterAreaMaterial = new THREE.MeshPhysicalMaterial({
+    color: 0x397f88,
+    roughness: 0.24,
+    metalness: 0.02,
+    clearcoat: 0.7,
+    clearcoatRoughness: 0.28,
+    polygonOffset: true,
+    polygonOffsetFactor: 2,
+    polygonOffsetUnits: 2,
+  });
+  const waterLineMaterial = new THREE.MeshPhysicalMaterial({
+    color: 0x397f88,
+    roughness: 0.24,
+    metalness: 0.02,
+    clearcoat: 0.7,
+    clearcoatRoughness: 0.28,
+    polygonOffset: true,
+    polygonOffsetFactor: 1,
+    polygonOffsetUnits: 1,
+  });
+  await mergeIntoMeshBatches(root, waterAreas, waterAreaMaterial, "OSM water areas", isCancelled);
+  await mergeIntoMeshBatches(root, waterLines, waterLineMaterial, "OSM waterways", isCancelled);
 
   await addRoadNetworkMeshes(root, data.roads, "OSM", isCancelled, scene);
-  // Hide the immediate fallback network the moment real OSM roads exist — both are
-  // built at identical elevations, so any overlap window z-fights badly.
-  if (data.roads.length > 0) {
-    const roadFallback = scene.userData.proceduralRoadFallback as THREE.Group | undefined;
-    if (roadFallback) roadFallback.visible = false;
-  }
 
   // Roads and water are ground-level features. Reject any building footprint that would
   // sit on top of them so extruded walls never occlude the asphalt or the lake surface.
@@ -4969,6 +5396,7 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
 
   const buildingBuckets: THREE.BufferGeometry[][] = [[], [], [], []];
   const landmarkOsmIds = scene.userData.landmarkOsmIds as Set<number> | undefined;
+  const landmarkColliders = (scene.userData.landmarkColliders as BuildingCollider[] | undefined) ?? [];
   // The full Dhaka payload can contain tens of thousands of footprints. Keep the
   // live mesh deterministic and geographically even; procedural tiles fill the gaps.
   for (const building of await selectSpatiallyEvenBuildings(data.buildings, isCancelled)) {
@@ -4983,12 +5411,22 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
     const centerZ = (minZ + maxZ) / 2;
     const halfWidth = Math.max(2, (maxX - minX) / 2);
     const halfDepth = Math.max(2, (maxZ - minZ) / 2);
-    if (footprintBlockedByGround(centerX, centerZ, halfWidth, halfDepth)) {
+    if (
+      inAirportClearance(centerX, centerZ, Math.max(halfWidth, halfDepth) + 10)
+      || landmarkColliders.some((collider) => (
+        Math.abs(centerX - collider.x) < halfWidth + collider.halfWidth + 2
+        && Math.abs(centerZ - collider.z) < halfDepth + collider.halfDepth + 2
+      ))
+      || footprintBlockedByGround(centerX, centerZ, halfWidth, halfDepth)
+    ) {
       await yieldIfNeeded(isCancelled);
       continue;
     }
+    // Slight deterministic height jitter separates coplanar roofs where OSM
+    // footprints touch or overlap at identical tagged heights.
+    const height = Math.max(3, building.height + ((Math.abs(building.id) % 7) - 3) * 0.04);
     const geometry = new THREE.ExtrudeGeometry(polygonShape(building.points), {
-      depth: building.height,
+      depth: height,
       bevelEnabled: false,
       curveSegments: 1,
     });
@@ -4999,7 +5437,7 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
       z: centerZ,
       halfWidth,
       halfDepth,
-      top: building.height,
+      top: height,
     });
     await yieldIfNeeded(isCancelled);
   }
@@ -5031,8 +5469,17 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
     fallbackTraffic?.dispose();
     scene.userData.trafficSimulation = trafficSimulation;
   }
+  // Atomically swap out the fallback layers and reveal the live OSM world so
+  // roads, water, and buildings never overlap across two layers on screen.
+  if (data.roads.length > 0) {
+    const roadFallback = scene.userData.proceduralRoadFallback as THREE.Group | undefined;
+    if (roadFallback) roadFallback.visible = false;
+  }
   const fallback = scene.userData.fallbackWorld as THREE.Group | undefined;
   if (fallback) fallback.visible = false;
+  const immediateCityMass = scene.userData.immediateCityMass as THREE.Group | undefined;
+  if (immediateCityMass) immediateCityMass.visible = false;
+  root.visible = true;
   return colliders;
 }
 
@@ -5059,6 +5506,16 @@ function readTouchPreference() {
 
 function noopSubscribe() {
   return () => {};
+}
+
+const SOUND_VOLUME_KEY = "bev-sound-volume";
+function readSavedSoundVolume() {
+  try {
+    const saved = Number(window.localStorage.getItem(SOUND_VOLUME_KEY) ?? "1");
+    return Number.isFinite(saved) ? clamp(saved, 0, 1.5) : 1;
+  } catch {
+    return 1;
+  }
 }
 
 function readSkyPresetFromUrl() {
@@ -5246,6 +5703,11 @@ export function BirdFlight() {
   const [chosenSkyPresetId, setChosenSkyPresetId] = useState<string | null>(null);
   const skyPresetId = chosenSkyPresetId ?? urlSkyPresetId;
   const [skyOpen, setSkyOpen] = useState(false);
+  const [soundOpen, setSoundOpen] = useState(false);
+  // The server renders the designed level; a saved setting swaps in on the client.
+  const savedSoundVolume = useSyncExternalStore(noopSubscribe, readSavedSoundVolume, () => 1);
+  const [chosenSoundVolume, setChosenSoundVolume] = useState<number | null>(null);
+  const soundVolume = chosenSoundVolume ?? savedSoundVolume;
   const [shareState, setShareState] = useState<"idle" | "copied" | "failed">("idle");
   const [sharedLink, setSharedLink] = useState("");
   // With an hour pinned, the sun/moon glyph has to follow the rendered sky rather
@@ -5327,6 +5789,10 @@ export function BirdFlight() {
         setRadioOpen(false);
         return true;
       }
+      if (soundOpen) {
+        setSoundOpen(false);
+        return true;
+      }
       if (skyOpen) {
         setSkyOpen(false);
         return true;
@@ -5337,7 +5803,20 @@ export function BirdFlight() {
       }
       return false;
     };
-  }, [controlsOpen, radioOpen, skyOpen]);
+  }, [controlsOpen, radioOpen, skyOpen, soundOpen]);
+
+  // Keep the engine at the chosen volume, including one restored from a past visit.
+  useEffect(() => {
+    audioRef.current?.setVolume(soundVolume);
+  }, [soundVolume]);
+  const changeSoundVolume = useCallback((next: number) => {
+    setChosenSoundVolume(next);
+    try {
+      window.localStorage.setItem(SOUND_VOLUME_KEY, String(next));
+    } catch {
+      // The setting still holds for this visit.
+    }
+  }, []);
 
   useEffect(() => {
     if (!flying) return;
@@ -5372,6 +5851,7 @@ export function BirdFlight() {
     if (!mount) return;
     const flightAudio = createFlightAudio();
     audioRef.current = flightAudio;
+    flightAudio.setVolume(readSavedSoundVolume());
     const reducedMotionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
     // Read live: a player can flip the OS setting without reloading the flight.
     let reducedMotion = reducedMotionQuery.matches;
@@ -5385,7 +5865,9 @@ export function BirdFlight() {
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x91c7c0);
     scene.fog = new THREE.FogExp2(0x91b8a8, 0.00028);
-    const camera = new THREE.PerspectiveCamera(58, mount.clientWidth / mount.clientHeight, 0.5, 8000);
+    // A 2 m near plane quadruples 24-bit depth-buffer precision across the city
+    // compared to 0.5 m while staying well clear of every camera mode.
+    const camera = new THREE.PerspectiveCamera(58, mount.clientWidth / mount.clientHeight, 2, 8000);
     // Phones pay for MSAA and a 2048² shadow map in both fill rate and memory, and
     // they are exactly the devices that cannot afford either. Detect them once.
     const renderer = new THREE.WebGLRenderer({ antialias: !lowPowerDevice, powerPreference: "high-performance" });
@@ -5427,16 +5909,19 @@ export function BirdFlight() {
     const hemisphere = new THREE.HemisphereLight(0xe8f3ee, 0x5d6c58, 1.8);
     scene.add(hemisphere);
     const sun = new THREE.DirectionalLight(0xffd6a0, 3.35);
-    sun.position.set(-400, 650, 280);
+    sun.position.set(-1_200, 1_950, 840);
     sun.castShadow = true;
     sun.shadow.mapSize.set(lowPowerDevice ? 1024 : 2048, lowPowerDevice ? 1024 : 2048);
     sun.shadow.camera.left = -3400;
     sun.shadow.camera.right = 3400;
     sun.shadow.camera.top = 3800;
     sun.shadow.camera.bottom = -3800;
-    sun.shadow.camera.far = 4200;
-    sun.shadow.bias = -0.00012;
-    sun.shadow.normalBias = 0.035;
+    sun.shadow.camera.near = 200;
+    sun.shadow.camera.far = 8_000;
+    // Shadow texels span ~3.5 m across the city box; bias and normalBias need
+    // to match that scale to avoid striped self-shadow acne on roofs and domes.
+    sun.shadow.bias = -0.0004;
+    sun.shadow.normalBias = 0.75;
     scene.add(sun);
     const skyFill = new THREE.DirectionalLight(0x9bc8d2, 0.48);
     skyFill.position.set(500, 260, -600);
@@ -5624,7 +6109,9 @@ export function BirdFlight() {
         model.traverse((object) => {
           if (object instanceof THREE.Mesh) {
             object.castShadow = true;
-            object.receiveShadow = true;
+            // The citywide shadow map has ~3.5 m texels and refreshes every 12
+            // frames; receiving it on a 2 m moving bird causes 5 Hz self-shadow flicker.
+            object.receiveShadow = false;
             const sourceMaterials = Array.isArray(object.material) ? object.material : [object.material];
             const toonMaterials = sourceMaterials.map((material) => {
               const toon = new THREE.MeshToonMaterial({
@@ -5643,6 +6130,7 @@ export function BirdFlight() {
         crow.add(model);
         birdModel = model;
         birdTraits = bird;
+        flightAudio.setBird(bird.id);
         mixer = new THREE.AnimationMixer(model);
         flapAction = mixer.clipAction(gltf.animations.find((clip) => clip.name === "Flap") ?? gltf.animations[0]);
         glideAction = mixer.clipAction(gltf.animations.find((clip) => clip.name === "Glide") ?? gltf.animations[1]);
@@ -5675,6 +6163,7 @@ export function BirdFlight() {
       devWindow.__scene = scene;
       devWindow.__renderer = renderer;
       devWindow.__THREE = THREE;
+      (window as BirdFlightWindow & { __audioProbe?: unknown }).__audioProbe = () => flightAudio.probe();
     }
     (window as BirdFlightWindow).__birdFlightDiagnostics = () => {
       const trafficSimulation = scene.userData.trafficSimulation as TrafficSimulation | null | undefined;
@@ -5782,6 +6271,7 @@ export function BirdFlight() {
       landingCommit = null;
       crow.position.copy(perch.position);
       crow.position.y += 1.28;
+      flightAudio.land();
       // Treetops have no meaningful facing; settle in the direction flown.
       yaw = perch.kind === "tree" ? yaw : perch.heading;
       yawRate = 0;
@@ -5930,10 +6420,14 @@ export function BirdFlight() {
     // A ResizeObserver tracks the canvas box itself, so it also catches phone
     // orientation flips and the browser chrome sliding in and out — and it
     // coalesces to one callback per frame instead of firing on every resize event.
+    let viewportWidth = mount.clientWidth;
+    let viewportHeight = mount.clientHeight;
     const applyViewportSize = () => {
       const width = mount.clientWidth;
       const height = mount.clientHeight;
-      if (width === 0 || height === 0) return;
+      if (width === 0 || height === 0 || (width === viewportWidth && height === viewportHeight)) return;
+      viewportWidth = width;
+      viewportHeight = height;
       camera.aspect = width / height;
       camera.updateProjectionMatrix();
       renderer.setSize(width, height);
@@ -6167,7 +6661,15 @@ export function BirdFlight() {
         if (birdModel) birdModel.position.y = birdTraits.restLift * restWeight;
         glideAction.setEffectiveWeight(Math.max(0, 1 - flapWeight - restWeight));
         glideAction.timeScale = 0.72;
+        // Sound each wingbeat as the flap clip starts its downstroke, so what is
+        // heard matches the wings: the kite barely beats, the parakeet never stops.
+        const flapPhaseBefore = flapAction.time;
         mixer.update(dt);
+        const flapPhase = flapAction.time;
+        const crossedDownstroke = flapPhaseBefore <= flapPhase
+          ? flapPhaseBefore < 0.42 && flapPhase >= 0.42
+          : flapPhaseBefore < 0.42 || flapPhase >= 0.42;
+        if (crossedDownstroke && flapWeight > 0.03 && restWeight < 0.5) flightAudio.wingbeat(0.35 + flapWeight * 0.65);
       }
 
       nearestPerch = null;
@@ -6368,7 +6870,7 @@ export function BirdFlight() {
         flightEffectRef.current.style.opacity = effectStrength.toFixed(3);
         flightEffectRef.current.style.transform = `translateY(${clamp(verticalSpeed * -0.32, -7, 7)}px) scale(${1 + effectStrength * 0.025})`;
       }
-      flightAudio.setFlight(speed, crow.position.y);
+      flightAudio.setFlight(restingRef.current ? 0 : speed, crow.position.y, restingRef.current ? 0 : verticalSpeed);
       if (compassRef.current) {
         // Forward is (-sin yaw, 0, -cos yaw), so the true compass bearing
         // (clockwise from north) is -yaw — using +yaw mirrors east and west.
@@ -6642,9 +7144,12 @@ export function BirdFlight() {
           </div>
           <button
             className={`icon-button sound-button${soundOn ? " active" : ""}`}
-            onClick={toggleSound}
-            aria-label={soundOn ? t.soundMute : t.soundEnable}
-            aria-pressed={soundOn}
+            onClick={() => {
+              setSoundOpen((value) => !value);
+              setSkyOpen(false);
+            }}
+            aria-label={t.soundOpen}
+            aria-expanded={soundOpen}
             title={soundOn ? t.soundOnTitle : t.soundOffTitle}
           >♫</button>
           <button
@@ -6655,7 +7160,10 @@ export function BirdFlight() {
           >◉</button>
           <button
             className={`icon-button sky-toggle${skyPresetId !== "live" ? " active" : ""}`}
-            onClick={() => setSkyOpen((value) => !value)}
+            onClick={() => {
+              setSkyOpen((value) => !value);
+              setSoundOpen(false);
+            }}
             aria-label={t.skyOpen}
             aria-expanded={skyOpen}
           >◐</button>
@@ -6663,6 +7171,32 @@ export function BirdFlight() {
           <button className="icon-button" onClick={() => setControlsOpen((value) => !value)} aria-label={t.controlsOpen}>?</button>
         </div>
       </header>
+
+      {soundOpen && (
+        <section className={`sky-panel sound-panel${flying ? " in-flight" : ""}`} aria-label={t.soundPanel}>
+          <button className="radio-close" onClick={() => setSoundOpen(false)} aria-label={t.soundClose}>×</button>
+          <span className="eyebrow">{t.soundHeading}</span>
+          <p>{t.soundBody}</p>
+          <label className="radio-volume sound-volume">
+            <span>{t.soundVolumeShort}</span>
+            <input
+              type="range"
+              min="0"
+              max="1.5"
+              step="0.05"
+              value={soundVolume}
+              onChange={(event) => changeSoundVolume(Number(event.target.value))}
+              aria-label={t.soundVolume}
+              aria-valuetext={`${Math.round(soundVolume * 100)}%`}
+            />
+            <b>{localDigits(locale, Math.round(soundVolume * 100))}%</b>
+          </label>
+          <button type="button" className="sound-switch" aria-pressed={soundOn} onClick={toggleSound}>
+            {soundOn ? t.soundMute : t.soundEnable}
+          </button>
+          <small>{t.soundNote}</small>
+        </section>
+      )}
 
       {skyOpen && (
         <section className={`sky-panel${flying ? " in-flight" : ""}`} aria-label={t.skyPanel}>
@@ -6950,6 +7484,7 @@ export function BirdFlight() {
             <div><dt>♫</dt><dd>{t.manualSoundText}</dd></div>
             <div><dt lang="en">R / [ ]</dt><dd>{t.manualRadioText}</dd></div>
           </dl>
+          <a className="sound-credits" href="/audio/CREDITS.txt" target="_blank" rel="noreferrer">{t.soundCredits}</a>
         </section>
       )}
 

@@ -1,0 +1,166 @@
+[
+  {
+    "cache": "crow-b.ogg",
+    "species": "crow",
+    "subject": "House crow (Corvus splendens)",
+    "title": "Corvus splendens.ogg",
+    "author": "Vladimir Yu. Arkhipov, Arkhivov",
+    "licence": "CC BY-SA 3.0",
+    "licenceUrl": "https://creativecommons.org/licenses/by-sa/3.0",
+    "page": "https://commons.wikimedia.org/wiki/File:Corvus_splendens.ogg",
+    "download": "https://commons.wikimedia.org/wiki/Special:FilePath/Corvus_splendens.ogg",
+    "clips": [
+      {
+        "name": "crow-1",
+        "start": 1.3,
+        "end": 3.3
+      },
+      {
+        "name": "crow-2",
+        "start": 11.3,
+        "end": 12.9
+      }
+    ]
+  },
+  {
+    "cache": "crow-a.ogg",
+    "species": "crow",
+    "subject": "House crow (Corvus splendens)",
+    "title": "House crow, Corvus splendens.ogg",
+    "author": "Iamsalin",
+    "licence": "CC BY-SA 4.0",
+    "licenceUrl": "https://creativecommons.org/licenses/by-sa/4.0",
+    "page": "https://commons.wikimedia.org/wiki/File:House_crow,_Corvus_splendens.ogg",
+    "download": "https://commons.wikimedia.org/wiki/Special:FilePath/House_crow,_Corvus_splendens.ogg",
+    "clips": [
+      {
+        "name": "crow-3",
+        "start": 4.4,
+        "end": 6.1
+      }
+    ]
+  },
+  {
+    "cache": "doel-a.ogg",
+    "species": "doel",
+    "subject": "Oriental magpie-robin (Copsychus saularis)",
+    "title": "Oriental magpie-robin call.ogg",
+    "author": "Saurmandal",
+    "licence": "CC0",
+    "licenceUrl": "http://creativecommons.org/publicdomain/zero/1.0/deed.en",
+    "page": "https://commons.wikimedia.org/wiki/File:Oriental_magpie-robin_call.ogg",
+    "download": "https://commons.wikimedia.org/wiki/Special:FilePath/Oriental_magpie-robin_call.ogg",
+    "clips": [
+      {
+        "name": "doel-1",
+        "start": 0,
+        "end": 1.36
+      }
+    ]
+  },
+  {
+    "cache": "doel-b.ogg",
+    "species": "doel",
+    "subject": "Oriental magpie-robin (Copsychus saularis)",
+    "title": "Magpie robin.ogg",
+    "author": "Shajiarikkad",
+    "licence": "CC BY-SA 3.0",
+    "licenceUrl": "https://creativecommons.org/licenses/by-sa/3.0",
+    "page": "https://commons.wikimedia.org/wiki/File:Magpie_robin.ogg",
+    "download": "https://commons.wikimedia.org/wiki/Special:FilePath/Magpie_robin.ogg",
+    "clips": [
+      {
+        "name": "doel-2",
+        "start": 0.6,
+        "end": 3.6
+      }
+    ]
+  },
+  {
+    "cache": "koel-a.wav",
+    "species": "koel",
+    "subject": "Asian koel (Eudynamys scolopaceus)",
+    "title": "Asian Koel.wav",
+    "author": "Vinay bhat",
+    "licence": "CC BY-SA 4.0",
+    "licenceUrl": "https://creativecommons.org/licenses/by-sa/4.0",
+    "page": "https://commons.wikimedia.org/wiki/File:Asian_Koel.wav",
+    "download": "https://commons.wikimedia.org/wiki/Special:FilePath/Asian_Koel.wav",
+    "clips": [
+      {
+        "name": "koel-1",
+        "start": 1.3,
+        "end": 3.45
+      },
+      {
+        "name": "koel-2",
+        "start": 4.1,
+        "end": 6.45
+      }
+    ]
+  },
+  {
+    "cache": "shalik-a.mp3",
+    "species": "shalik",
+    "subject": "Common myna (Acridotheres tristis)",
+    "title": "Acridotheres tristis - Common Myna XC446210.mp3",
+    "author": "James Ray",
+    "licence": "CC BY-SA 4.0",
+    "licenceUrl": "https://creativecommons.org/licenses/by-sa/4.0",
+    "page": "https://commons.wikimedia.org/wiki/File:Acridotheres_tristis_-_Common_Myna_XC446210.mp3",
+    "download": "https://commons.wikimedia.org/wiki/Special:FilePath/Acridotheres_tristis_-_Common_Myna_XC446210.mp3",
+    "clips": [
+      {
+        "name": "shalik-1",
+        "start": 0,
+        "end": 2.85
+      }
+    ]
+  },
+  {
+    "cache": "chil-a.wav",
+    "species": "chil",
+    "subject": "Black kite (Milvus migrans)",
+    "title": "Black kite.wav",
+    "author": "Vinay bhat",
+    "licence": "CC BY-SA 4.0",
+    "licenceUrl": "https://creativecommons.org/licenses/by-sa/4.0",
+    "page": "https://commons.wikimedia.org/wiki/File:Black_kite.wav",
+    "download": "https://commons.wikimedia.org/wiki/Special:FilePath/Black_kite.wav",
+    "clips": [
+      {
+        "name": "chil-1",
+        "start": 2.2,
+        "end": 3.9
+      },
+      {
+        "name": "chil-2",
+        "start": 5.1,
+        "end": 6.4
+      }
+    ]
+  },
+  {
+    "cache": "tiya-b.mp3",
+    "species": "tiya",
+    "subject": "Rose-ringed parakeet (Psittacula krameri)",
+    "title": "Psittacula krameri - Rose-ringed Parakeet XC35091.mp3",
+    "author": "Sander Pieterse",
+    "licence": "CC BY-SA 3.0",
+    "licenceUrl": "https://creativecommons.org/licenses/by-sa/3.0",
+    "page": "https://commons.wikimedia.org/wiki/File:Psittacula_krameri_-_Rose-ringed_Parakeet_XC35091.mp3",
+    "download": "https://commons.wikimedia.org/wiki/Special:FilePath/Psittacula_krameri_-_Rose-ringed_Parakeet_XC35091.mp3",
+    "clips": [
+      {
+        "name": "tiya-1",
+        "start": 3.3,
+        "end": 4.8
+      },
+      {
+        "name": "tiya-2",
+        "start": 5.3,
+        "end": 6.0
+      }
+    ]
+  }
+]

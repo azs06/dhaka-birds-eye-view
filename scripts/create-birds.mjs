@@ -460,7 +460,7 @@ function buildBird(spec) {
       lay(upper, feather((1.75 - index * 0.06) * K, 0.5 * S), index % 2 ? C.flightB : C.flightA, 0.12 + index * 0.25, -0.02 - index * 0.006, 0.06 + index * 0.03, -0.1 + index * 0.05);
     }
     for (let index = 0; index < 4; index++) {
-      lay(upper, feather(0.95 * K, 0.46 * S), bar ?? (index % 2 ? C.covertA : C.covertB), 0.1 + index * 0.26, 0.03, -0.06, -0.14 + index * 0.06, 0.09);
+      lay(upper, feather(0.95 * K, 0.46 * S), bar ?? (index % 2 ? C.covertA : C.covertB), 0.1 + index * 0.26, 0.03 - index * 0.004, -0.06, -0.14 + index * 0.06, 0.09);
     }
     upper.finish();
 
@@ -472,9 +472,9 @@ function buildBird(spec) {
     }
     for (let index = 0; index < 7; index++) {
       const along = index / 6;
-      lay(middle, feather((1.02 - along * 0.08) * K, 0.42 * S), bar ?? (index % 2 ? C.covertB : C.covertA), 0.1 + along * 1.5, 0.025, -0.05 - along * 0.32, 0.02 + along * 0.1, 0.09);
-      lay(middle, feather(0.55 * K, 0.36 * S), index % 2 ? C.covertA : C.covertB, 0.12 + along * 1.5, 0.05, -0.12 - along * 0.32, 0.02 + along * 0.1, 0.12);
-      lay(middle, feather(0.9 * K, 0.42 * S), C.underCovert, 0.1 + along * 1.5, -0.085, -0.04 - along * 0.32, 0.02 + along * 0.1, 0.02);
+      lay(middle, feather((1.02 - along * 0.08) * K, 0.42 * S), bar ?? (index % 2 ? C.covertB : C.covertA), 0.1 + along * 1.5, 0.028 - index * 0.004, -0.05 - along * 0.32, 0.02 + along * 0.1, 0.09);
+      lay(middle, feather(0.55 * K, 0.36 * S), index % 2 ? C.covertA : C.covertB, 0.12 + along * 1.5, 0.056 - index * 0.004, -0.12 - along * 0.32, 0.02 + along * 0.1, 0.12);
+      lay(middle, feather(0.9 * K, 0.42 * S), C.underCovert, 0.1 + along * 1.5, -0.085 - index * 0.004, -0.04 - along * 0.32, 0.02 + along * 0.1, 0.02);
     }
     middle.finish();
 
@@ -492,14 +492,14 @@ function buildBird(spec) {
       lay(outer, feather(length, (0.4 - along * 0.08) * S, fingered ? W.taper : 0.2), color, 0.05 + along * 0.82, -0.02 - index * 0.006, 0.02 + along * 0.24, angle, 0.04, -0.05 * along);
       // A pale patch across the bases of the primaries flashes in flight.
       if (C.wingPatch && index < W.primaries - 1) {
-        lay(outer, feather(length * 0.42, (0.4 - along * 0.08) * S), C.wingPatch, 0.05 + along * 0.82, -0.008 - index * 0.004, 0.02 + along * 0.24, angle, 0.04, -0.05 * along);
-        lay(outer, feather(length * 0.42, (0.4 - along * 0.08) * S), C.wingPatch, 0.05 + along * 0.82, -0.075 - index * 0.004, 0.02 + along * 0.24, angle, 0.04, -0.05 * along);
+        lay(outer, feather(length * 0.42, (0.4 - along * 0.08) * S), C.wingPatch, 0.05 + along * 0.82, 0.012 - index * 0.006, 0.02 + along * 0.24, angle, 0.04, -0.05 * along);
+        lay(outer, feather(length * 0.42, (0.4 - along * 0.08) * S), C.wingPatch, 0.05 + along * 0.82, -0.054 - index * 0.006, 0.02 + along * 0.24, angle, 0.04, -0.05 * along);
       }
     }
     for (let index = 0; index < 6; index++) {
       const along = index / 5;
-      lay(outer, feather((0.92 - along * 0.2) * K, 0.36 * S), index % 2 ? C.covertA : C.covertB, 0.06 + along * 0.72, 0.025, -0.03 + along * 0.2, 0.2 + along * 0.9, 0.09);
-      lay(outer, feather((0.8 - along * 0.16) * K, 0.34 * S), C.underCovert, 0.06 + along * 0.72, -0.1, -0.02 + along * 0.2, 0.2 + along * 0.9, 0.02);
+      lay(outer, feather((0.92 - along * 0.2) * K, 0.36 * S), index % 2 ? C.covertA : C.covertB, 0.06 + along * 0.72, 0.03 - index * 0.004, -0.03 + along * 0.2, 0.2 + along * 0.9, 0.09);
+      lay(outer, feather((0.8 - along * 0.16) * K, 0.34 * S), C.underCovert, 0.06 + along * 0.72, -0.1 - index * 0.004, -0.02 + along * 0.2, 0.2 + along * 0.9, 0.02);
     }
     // The alula, the small thumb feathers at the wrist.
     lay(outer, feather(0.52 * K, 0.2 * S), C.flightB, 0.06, 0.04, -0.06, 0.5, 0.02);
@@ -520,7 +520,7 @@ function buildBird(spec) {
       : T.length;
     const isOuter = T.outer && Math.abs(offset) > middleIndex - T.outer;
     const color = isOuter && C.tailOuter ? C.tailOuter : index % 2 ? C.tailB : C.tailA;
-    const placement = [[offset * 0.065 * G, -Math.abs(offset) * 0.012, 0], [0.02, offset * T.fan, 0]];
+    const placement = [[offset * 0.065 * G, -Math.abs(offset) * 0.012 + (offset > 0 ? 0.004 : 0), 0], [0.02, offset * T.fan, 0]];
     tail.add(feather(length, 0.4 * G), color, transform(...placement));
     if (C.tailTip && spread > 0.1) {
       const tip = feather(length * 0.2, 0.4 * G);

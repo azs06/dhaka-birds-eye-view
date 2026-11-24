@@ -1,0 +1,26 @@
+{
+  "crow": [
+    "/audio/crow-1.mp3",
+    "/audio/crow-2.mp3",
+    "/audio/crow-3.mp3"
+  ],
+  "doel": [
+    "/audio/doel-1.mp3",
+    "/audio/doel-2.mp3"
+  ],
+  "koel": [
+    "/audio/koel-1.mp3",
+    "/audio/koel-2.mp3"
+  ],
+  "shalik": [
+    "/audio/shalik-1.mp3"
+  ],
+  "chil": [
+    "/audio/chil-1.mp3",
+    "/audio/chil-2.mp3"
+  ],
+  "tiya": [
+    "/audio/tiya-1.mp3",
+    "/audio/tiya-2.mp3"
+  ]
+}

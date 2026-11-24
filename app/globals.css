@@ -12,7 +12,7 @@ body { --font-latin-display: var(--font-display); --font-latin-mono: var(--font-
 .flight-shell[lang="bn"] [lang="en"] { --font-display: var(--font-latin-display); --font-mono: var(--font-latin-mono); }
 .flight-shell[lang="bn"] *:not([lang="en"]) { letter-spacing: 0; }
 .flight-shell[lang="bn"] :is(p, dd, h2, .title-lead) { line-height: 1.6; }
-.flight-shell[lang="bn"] :is(.eyebrow, .weather-chip, .radio-status, .radio-display > span, .radio-volume, .radio-stations span, .radio-stations i, .radio-meta, .radio-panel > small, .radio-now-playing span, .flight-mode, .minimap small, .camera-chip, .perch-legend, .flight-hint, .perch-prompt, .resting-chip, .pause-overlay small, .desktop-note, .map-source, .inspect-exit span, .inspect-exit b, .share-view, .share-fallback span, .sky-panel > small, .sky-presets button, .controls-panel dt, .primary-button) { font-size: 12px; font-weight: 600; line-height: 1.45; }
+.flight-shell[lang="bn"] :is(.sound-switch, .sound-volume b, .eyebrow, .weather-chip, .radio-status, .radio-display > span, .radio-volume, .radio-stations span, .radio-stations i, .radio-meta, .radio-panel > small, .radio-now-playing span, .flight-mode, .minimap small, .camera-chip, .perch-legend, .flight-hint, .perch-prompt, .resting-chip, .pause-overlay small, .desktop-note, .map-source, .inspect-exit span, .inspect-exit b, .share-view, .share-fallback span, .sky-panel > small, .sky-presets button, .controls-panel dt, .primary-button) { font-size: 12px; font-weight: 600; line-height: 1.45; }
 .flight-shell[lang="bn"] .telemetry small { font-size: 10px; line-height: 1.4; }
 .flight-shell[lang="bn"] .controls-panel dd { font-size: 13px; }
 .flight-shell[lang="bn"] .radio-transport button { font-size: 14px; font-weight: 700; }
@@ -211,6 +211,8 @@ kbd { display: inline-grid; min-width: 23px; height: 22px; padding: 0 5px; place
 .controls-panel { position: absolute; z-index: 10; top: 50%; right: 34px; width: 320px; padding: 27px; transform: translateY(-50%); background: rgba(9,27,22,.94); border: 1px solid rgba(241,235,216,.2); backdrop-filter: blur(18px); box-shadow: 0 24px 70px rgba(4,18,14,.35); }
 /* The manual is the tallest panel: keep it clear of the top bar and let it scroll. */
 .controls-panel { max-height: calc(100% - 132px); margin-top: 28px; overflow-y: auto; scrollbar-width: thin; touch-action: pan-y; }
+.sound-credits { display: block; margin-top: 16px; color: rgba(255,240,196,.7); font-size: 12px; line-height: 1.5; }
+.sound-credits:hover { color: var(--cream); }
 .controls-panel > button { position: absolute; right: 13px; top: 10px; border: 0; color: var(--cream); background: none; font-size: 25px; cursor: pointer; }
 .controls-panel .eyebrow { color: var(--acid); opacity: 1; }
 .controls-panel h2 { margin: 10px 0 20px; font-size: 27px; }
@@ -269,6 +271,11 @@ kbd { display: inline-grid; min-width: 23px; height: 22px; padding: 0 5px; place
 .sky-toggle.active { color: var(--acid); border-color: rgba(216,255,98,.65); opacity: 1; }
 .sky-panel { position: absolute; z-index: 12; top: 88px; right: 30px; width: 300px; padding: 22px; color: var(--cream); background: rgba(7,23,19,.95); border: 3px solid var(--cream); box-shadow: 8px 8px 0 var(--magenta), 14px 14px 0 rgba(29,53,48,.55); backdrop-filter: blur(22px); }
 .sky-panel.in-flight { top: 151px; }
+.sound-volume { grid-template-columns: 30px 1fr 38px; }
+.sound-volume b { color: var(--acid); font: 600 10px var(--font-mono); text-align: right; }
+.sound-switch { width: 100%; min-height: 38px; border: 1px solid rgba(241,235,216,.2); background: rgba(241,235,216,.04); color: var(--cream); cursor: pointer; font: 600 10px var(--font-mono); letter-spacing: .1em; text-transform: uppercase; }
+.sound-switch[aria-pressed="true"] { border-color: var(--acid); }
+.sound-switch:hover { background: rgba(241,235,216,.1); }
 .sky-panel .eyebrow { color: var(--acid); opacity: 1; }
 .sky-panel p { margin: 11px 0 15px; font-size: 11px; line-height: 1.5; opacity: .6; }
 .sky-presets { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }

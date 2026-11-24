@@ -1,0 +1,54 @@
+Bird's Eye View: sound recording credits
+
+The bird calls in this game are field recordings shared on Wikimedia Commons.
+Each clip below is an adaptation of the named recording and is offered under
+the same licence as its source. Everything else you hear (wind, wingbeats,
+city, traffic, rain and thunder) is synthesised by the game.
+
+House crow (Corvus splendens): crow-1.mp3, crow-2.mp3
+  From "Corvus splendens.ogg" by Vladimir Yu. Arkhipov, Arkhivov
+  https://commons.wikimedia.org/wiki/File:Corvus_splendens.ogg
+  Licence: CC BY-SA 3.0 (https://creativecommons.org/licenses/by-sa/3.0)
+  Changes: trimmed to single calls, high-pass filtered, faded, levelled, converted to mono MP3.
+
+House crow (Corvus splendens): crow-3.mp3
+  From "House crow, Corvus splendens.ogg" by Iamsalin
+  https://commons.wikimedia.org/wiki/File:House_crow,_Corvus_splendens.ogg
+  Licence: CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0)
+  Changes: trimmed to single calls, high-pass filtered, faded, levelled, converted to mono MP3.
+
+Oriental magpie-robin (Copsychus saularis): doel-1.mp3
+  From "Oriental magpie-robin call.ogg" by Saurmandal
+  https://commons.wikimedia.org/wiki/File:Oriental_magpie-robin_call.ogg
+  Licence: CC0 (http://creativecommons.org/publicdomain/zero/1.0/deed.en)
+  Changes: trimmed to single calls, high-pass filtered, faded, levelled, converted to mono MP3.
+
+Oriental magpie-robin (Copsychus saularis): doel-2.mp3
+  From "Magpie robin.ogg" by Shajiarikkad
+  https://commons.wikimedia.org/wiki/File:Magpie_robin.ogg
+  Licence: CC BY-SA 3.0 (https://creativecommons.org/licenses/by-sa/3.0)
+  Changes: trimmed to single calls, high-pass filtered, faded, levelled, converted to mono MP3.
+
+Asian koel (Eudynamys scolopaceus): koel-1.mp3, koel-2.mp3
+  From "Asian Koel.wav" by Vinay bhat
+  https://commons.wikimedia.org/wiki/File:Asian_Koel.wav
+  Licence: CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0)
+  Changes: trimmed to single calls, high-pass filtered, faded, levelled, converted to mono MP3.
+
+Common myna (Acridotheres tristis): shalik-1.mp3
+  From "Acridotheres tristis - Common Myna XC446210.mp3" by James Ray
+  https://commons.wikimedia.org/wiki/File:Acridotheres_tristis_-_Common_Myna_XC446210.mp3
+  Licence: CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0)
+  Changes: trimmed to single calls, high-pass filtered, faded, levelled, converted to mono MP3.
+
+Black kite (Milvus migrans): chil-1.mp3, chil-2.mp3
+  From "Black kite.wav" by Vinay bhat
+  https://commons.wikimedia.org/wiki/File:Black_kite.wav
+  Licence: CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0)
+  Changes: trimmed to single calls, high-pass filtered, faded, levelled, converted to mono MP3.
+
+Rose-ringed parakeet (Psittacula krameri): tiya-1.mp3, tiya-2.mp3
+  From "Psittacula krameri - Rose-ringed Parakeet XC35091.mp3" by Sander Pieterse
+  https://commons.wikimedia.org/wiki/File:Psittacula_krameri_-_Rose-ringed_Parakeet_XC35091.mp3
+  Licence: CC BY-SA 3.0 (https://creativecommons.org/licenses/by-sa/3.0)
+  Changes: trimmed to single calls, high-pass filtered, faded, levelled, converted to mono MP3.

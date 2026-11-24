@@ -45,3 +45,4 @@ tsconfig.tsbuildinfo
 # local tooling scratch
 /.playwright-mcp/
 /.pnpm-store/
+/.audio-cache/

@@ -103,7 +103,12 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(component, /const leafRustle/);
   assert.match(component, /const cityBed/);
   assert.doesNotMatch(component, /const crickets/);
-  assert.match(strings, /Nature ambience: birds, leaves, water, and breeze/);
+  assert.match(strings, /Game sound: wind, wings, the city, real bird calls and rain/);
+  // The world's sound has to be audible on its own, with the radio optional on
+  // top: wingbeats follow the flap clip and street sounds exist.
+  assert.match(component, /flightAudio\.wingbeat\(/);
+  assert.match(component, /const scheduleStreetSound/);
+  assert.match(component, /if \(!wanted\) return false;/);
   // Ducking must stay a step listeners can actually hear (~7 dB), not ~1 dB.
   assert.match(component, /RADIO_DUCKED_AMBIENCE_GAIN = 0\.12/);
   assert.match(component, /Monsoon Drift/);
@@ -355,6 +360,21 @@ test("every playable bird ships a model the game can animate", async () => {
     }
   }
   assert.ok(BIRDS.length >= 6);
+
+  // Recorded calls must exist, be credited, and be traceable to their source.
+  const clips = JSON.parse(await readFile(new URL("../app/sound-clips.json", import.meta.url), "utf8"));
+  const sources = JSON.parse(await readFile(new URL("../scripts/audio-sources.json", import.meta.url), "utf8"));
+  const credits = await readFile(new URL("../public/audio/CREDITS.txt", import.meta.url), "utf8");
+  const allowed = /^(CC0|Public domain|CC BY(-SA)? \d\.\d)$/;
+  for (const source of sources) {
+    assert.match(source.licence, allowed, `${source.title} has an unusable licence`);
+    assert.match(source.page, /^https:\/\/commons\.wikimedia\.org\/wiki\/File:/);
+    assert.ok(credits.includes(source.author) && credits.includes(source.page), `${source.title} is not credited`);
+  }
+  for (const url of Object.values(clips).flat()) {
+    await access(new URL(`../public${url}`, import.meta.url));
+    assert.ok(credits.includes(url.split("/").pop()), `${url} is missing from the credits`);
+  }
   assert.equal(new Set(BIRDS.map((bird) => bird.id)).size, BIRDS.length);
 });
 
