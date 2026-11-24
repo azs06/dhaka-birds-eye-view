@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { access, readFile } from "node:fs/promises";
 import test from "node:test";
 import { resolveBuildingCollision } from "../app/flight-collision.mjs";
+import { PLACE_NAMES_BN, STATION_TEXT_BN, STRINGS } from "../app/i18n.ts";
 
 async function render() {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
@@ -38,6 +39,8 @@ test("keeps the finished flight experience free of starter preview code", async 
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
   ]);
+  // Interface text lives in the strings file, in English and Bengali.
+  const strings = await readFile(new URL("../app/i18n.ts", import.meta.url), "utf8");
 
   assert.match(page, /import \{ BirdFlight \}/);
   assert.match(page, /<BirdFlight \/>/);
@@ -50,7 +53,7 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(component, /addOpenStreetMapWorld/);
   assert.match(component, /MeshToonMaterial/);
   assert.doesNotMatch(component, /folk-poster-frame/);
-  assert.match(component, /GREATER DHAKA &amp; ITS RIVERS/);
+  assert.match(strings, /Greater Dhaka and its rivers/);
   for (const area of ["Moghbazar", "Tejgaon I\/A", "Niketan", "Gulshan 1", "Badda Link Road", "Rampura Bridge"]) {
     assert.match(component, new RegExp(area));
   }
@@ -98,7 +101,7 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(component, /const leafRustle/);
   assert.match(component, /const cityBed/);
   assert.doesNotMatch(component, /const crickets/);
-  assert.match(component, /Nature ambience: birds, leaves, water, and breeze/);
+  assert.match(strings, /Nature ambience: birds, leaves, water, and breeze/);
   // Ducking must stay a step listeners can actually hear (~7 dB), not ~1 dB.
   assert.match(component, /RADIO_DUCKED_AMBIENCE_GAIN = 0\.12/);
   assert.match(component, /Monsoon Drift/);
@@ -137,7 +140,7 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(component, /const DEFAULT_FLIGHT_ALTITUDE = 130/);
   assert.match(component, /const MAX_FLIGHT_ALTITUDE = 650/);
   assert.match(component, /const CEILING_EASE_DEPTH = 90/);
-  assert.match(component, /Inspect next landmark/);
+  assert.match(strings, /Inspect next landmark/);
   assert.match(component, /const MIN_CEILING_CLIMB_SPEED = 1\.8/);
   assert.match(component, /const spawnAlt = Number\(spawnParams\.get\("alt"\)\) \|\| DEFAULT_FLIGHT_ALTITUDE/);
   assert.match(component, /crow\.position\.set\(spawnWorld\.x, spawnAlt, spawnWorld\.y\)/);
@@ -153,7 +156,7 @@ test("keeps the finished flight experience free of starter preview code", async 
   // A slide at a concave corner must not deposit the crow inside the neighbour.
   assert.match(component, /if \(buildingAt\(crow\.position\.x, crow\.position\.y, crow\.position\.z\)\) \{\s*\n\s*resolveBuildingCollision\(crow\.position, previousPosition\);/);
   assert.match(component, /Ctrl \/ Q/);
-  assert.match(component, /VERT M\/S/);
+  assert.match(strings, /VERT M\/S/);
   assert.match(mapRoute, /south: 23\.655/);
   assert.match(mapRoute, /north: 23\.905/);
   assert.match(mapRoute, /CORE_BUILDING_BOUNDS/);
@@ -173,7 +176,7 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(component, /createTrafficSimulation/);
   assert.match(component, /Sampled real-time traffic/);
   assert.match(component, /trafficSimulation\?\.update\(dt, frameMs\)/);
-  assert.match(component, /SAMPLED SIM TRAFFIC/);
+  assert.match(strings, /SAMPLED SIM TRAFFIC/);
   assert.match(mapRoute, /way\["building"\]/);
   assert.match(mapRoute, /relation\["building"\]\["type"="multipolygon"\]/);
   assert.match(mapRoute, /relation\["natural"="water"\]\["type"="multipolygon"\]/);
@@ -182,7 +185,7 @@ test("keeps the finished flight experience free of starter preview code", async 
   for (const landmark of ["Holy Rosary Church", "Bashundhara City", "Hatirjheel Amphitheatre", "Police Plaza Concord", "BRAC Centre", "Four Points by Sheraton"]) {
     assert.match(component, new RegExp(landmark));
   }
-  assert.match(component, /© OpenStreetMap contributors/);
+  assert.match(strings, /© OpenStreetMap contributors/);
   assert.doesNotMatch(component, /className="mission-card"/);
 
   // Night city lighting: the merged OSM batches are the city the player actually
@@ -234,7 +237,11 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(component, /className={`launch-code/);
   // The lower third is a scrim over the live city, not an opaque panel over it.
   assert.match(component, /className="title-scrim"/);
-  assert.match(component, /"TAP TO FLY" : "PRESS ENTER TO FLY"/);
+  // The start button names its action, and the name is set in Bengali whatever
+  // the interface language.
+  assert.match(component, /className="title-start"/);
+  assert.match(component, /<h1 className="title-wordmark" lang="bn">/);
+  assert.equal(STRINGS.en.startFlight, "Take off");
 
   // Keyboard fixes: focused controls keep their own keys, and Escape dismisses
   // the topmost layer before it doubles as the pause key.
@@ -279,6 +286,49 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.doesNotMatch(radioRoute, /signal: AbortSignal\.timeout/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
   await assert.rejects(access(new URL("../app/_sites-preview", import.meta.url)));
+});
+
+test("Bengali translations cover the whole interface", async () => {
+  const component = await readFile(new URL("../app/BirdFlight.tsx", import.meta.url), "utf8");
+  const bengali = /[\u0980-\u09FF]/;
+
+  // Both languages must define exactly the same strings, with the same placeholders.
+  assert.deepEqual(Object.keys(STRINGS.bn).sort(), Object.keys(STRINGS.en).sort());
+  for (const [key, english] of Object.entries(STRINGS.en)) {
+    const translated = STRINGS.bn[key];
+    assert.ok(translated.trim().length > 0, `${key} is empty in Bengali`);
+    assert.deepEqual(
+      (translated.match(/\{\w+\}/g) ?? []).sort(),
+      (english.match(/\{\w+\}/g) ?? []).sort(),
+      `${key} has different placeholders in Bengali`,
+    );
+  }
+
+  // A Bengali string that is still Latin is an untranslated one. The product
+  // name and the Enter key cap are the only ones meant to stay as they are.
+  const latinByDesign = new Set(["brandName", "startKeyHint"]);
+  for (const [key, translated] of Object.entries(STRINGS.bn)) {
+    if (latinByDesign.has(key)) continue;
+    assert.match(translated, bengali, `${key} has no Bengali text`);
+  }
+
+  // Every place, landmark, launch site and station named in the game has a
+  // Bengali name, so nothing falls back to English mid-flight.
+  const labels = new Set([...component.matchAll(/\blabel: "([^"]+)"/g)].map((match) => match[1]));
+  for (const skip of ["LIVE", "DAWN", "NOON", "GOLDEN", "DUSK", "NIGHT", "Weather loading"]) labels.delete(skip);
+  assert.ok(labels.size > 60, "expected the place labels to be found in the component");
+  for (const label of labels) {
+    assert.match(PLACE_NAMES_BN[label] ?? "", bengali, `${label} has no Bengali name`);
+  }
+  for (const id of [...component.matchAll(/^    id: "([^"]+)",$/gm)].map((match) => match[1])) {
+    assert.match(STATION_TEXT_BN[id]?.name ?? "", bengali, `radio station ${id} has no Bengali name`);
+  }
+
+  // The scene is built once, so the frame loop must read the language through a
+  // ref, and styling hooks must stay in English whatever is displayed.
+  assert.match(component, /const locale = localeRef\.current;/);
+  assert.match(component, /flightModeRef\.current\.dataset\.mode = mode;/);
+  assert.match(component, /<main className="flight-shell" lang=\{locale\}>/);
 });
 
 test("building collision recovery lets a perched crow climb clear on takeoff", () => {

@@ -39,16 +39,27 @@ Cloudflare Worker.
 | `P` / `Esc` | pause button | Pause. `Esc` closes the topmost panel first |
 | `R` / `[` `]` | radio panel | Radio power / tune station |
 
-## The title screen
+## The welcome screen
 
 The camera orbits the skyline while the map loads, so the game opens on a moving
-city. Pick a launch site to fly the attract camera there before you start, then
-`BEGIN FLIGHT` or just press `Enter`. The build-status line reports whether the
-world came from live Overpass or the bundled snapshot.
+city under its Bengali name, পাখির চোখে ঢাকা. Pick where to take off from to fly
+the camera there before you start, then press `Take off` or just `Enter`. The
+status line reports whether the city came from the live map or the saved one.
 
 Touch controls appear automatically on devices with no mouse. Tap a pink diamond
 on the minimap to fly the camera to that landmark, and use `◐` to hold the sky at
 dawn, noon, golden hour, or night instead of following Dhaka's current time.
+
+## Languages
+
+The interface is in English and Bengali (বাংলা). Switch with the `বাংলা / English`
+control in the top bar at any time, including mid-flight; the choice is remembered
+on that device. A first visit follows the browser's language, and `?lang=bn` or
+`?lang=en` in the link overrides it.
+
+All interface text lives in `app/i18n.ts`, alongside the Bengali names of every
+landmark, neighbourhood, river, and metro station. Key caps (`W`, `Ctrl`, `Enter`)
+and the three-letter minimap codes stay in Latin script in both languages.
 
 ## Deep links
 
@@ -61,6 +72,7 @@ work by hand:
 | `alt` | Spawn altitude in metres |
 | `yaw` | Initial heading in radians |
 | `sky` | `live`, `dawn`, `noon`, `golden`, `dusk`, or `night` |
+| `lang` | `en` or `bn` |
 | `touch` | `1` forces the touch HUD on, `0` forces it off |
 
 Example: `/?lat=23.7280&lon=90.4090&alt=190&yaw=2.4&sky=dusk` — dusk over the
@@ -127,6 +139,7 @@ Notes:
 
 - `app/BirdFlight.tsx` holds the whole experience: world building, flight model,
   render loop, audio, and HUD
+- `app/i18n.ts` holds the English and Bengali interface text and place names
 - `app/flight-collision.mjs` is shared with the tests so collision behaviour is
   verified directly rather than through the renderer
 - `app/dhaka-landmark-footprints.ts` is a snapshot of real landmark outlines from

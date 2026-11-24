@@ -1,9 +1,12 @@
 import type { Metadata } from "next";
-import { Archivo, IBM_Plex_Mono } from "next/font/google";
+import { Anek_Bangla, Archivo, IBM_Plex_Mono } from "next/font/google";
 import "./globals.css";
 
 const archivo = Archivo({ variable: "--font-display", subsets: ["latin"] });
 const plexMono = IBM_Plex_Mono({ variable: "--font-mono", weight: ["400", "500", "600"], subsets: ["latin"] });
+// Bengali UI and the title wordmark. Anek Bangla carries matching Latin and
+// digits, so mixed-script lines stay in one face.
+const anekBangla = Anek_Bangla({ variable: "--font-bangla", subsets: ["bengali", "latin"], axes: ["wdth"] });
 
 export const metadata: Metadata = {
   title: "Bird's Eye View — Fly over Dhaka",
@@ -13,5 +16,5 @@ export const metadata: Metadata = {
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="en"><body className={`${archivo.variable} ${plexMono.variable}`}>{children}</body></html>;
+  return <html lang="en"><body className={`${archivo.variable} ${plexMono.variable} ${anekBangla.variable}`}>{children}</body></html>;
 }

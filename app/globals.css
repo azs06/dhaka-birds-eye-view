@@ -3,7 +3,22 @@
 :root { --ink: #1d3530; --cream: #fff0c4; --acid: #f5d65a; --river: #32a6b2; --vermillion: #dc5b3f; --magenta: #bd3f70; --leaf: #3f6f49; --paper: #f3dca8; --glass: rgba(25, 48, 43, .84); }
 * { box-sizing: border-box; }
 html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #8ec2ba; color: var(--cream); }
-body { font-family: var(--font-display), sans-serif; }
+body { --font-latin-display: var(--font-display); --font-latin-mono: var(--font-mono); font-family: var(--font-display), sans-serif; }
+/* Bengali is not English in another font. It has no capitals and no monospace
+   tradition, its conjuncts break apart under letter-spacing, and its vowel signs
+   need more room above and below the line. In Bengali the whole interface moves
+   to Anek Bangla; key caps and map codes marked lang="en" keep the Latin faces. */
+.flight-shell[lang="bn"] { --font-display: var(--font-bangla); --font-mono: var(--font-bangla); font-family: var(--font-bangla), sans-serif; }
+.flight-shell[lang="bn"] [lang="en"] { --font-display: var(--font-latin-display); --font-mono: var(--font-latin-mono); }
+.flight-shell[lang="bn"] *:not([lang="en"]) { letter-spacing: 0; }
+.flight-shell[lang="bn"] :is(p, dd, h2, .title-lead) { line-height: 1.6; }
+.flight-shell[lang="bn"] :is(.eyebrow, .weather-chip, .radio-status, .radio-display > span, .radio-volume, .radio-stations span, .radio-stations i, .radio-meta, .radio-panel > small, .radio-now-playing span, .flight-mode, .minimap small, .camera-chip, .perch-legend, .flight-hint, .perch-prompt, .resting-chip, .pause-overlay small, .desktop-note, .map-source, .inspect-exit span, .inspect-exit b, .share-view, .share-fallback span, .sky-panel > small, .sky-presets button, .controls-panel dt, .primary-button) { font-size: 12px; font-weight: 600; line-height: 1.45; }
+.flight-shell[lang="bn"] .telemetry small { font-size: 10px; line-height: 1.4; }
+.flight-shell[lang="bn"] .controls-panel dd { font-size: 13px; }
+.flight-shell[lang="bn"] .radio-transport button { font-size: 14px; font-weight: 700; }
+.flight-shell[lang="bn"] .radio-stations button { grid-template-columns: 86px 1fr auto; }
+.flight-shell[lang="bn"] .radio-stations :is(span, b, i) { white-space: nowrap; }
+.flight-shell[lang="bn"] .radio-stations b { font-size: 13px; }
 button { font: inherit; }
 /* The HUD had no focus styling at all, which made keyboard navigation invisible.
    A two-tone ring stays visible against both the dark glass panels and the cream
@@ -28,14 +43,8 @@ button { font: inherit; }
 .flight-dynamics { position: absolute; z-index: 2; inset: -4%; pointer-events: none; opacity: 0; background: radial-gradient(circle at 50% 47%, transparent 22%, rgba(215,255,244,.045) 52%, rgba(8,30,27,.34) 100%); box-shadow: inset 0 0 120px rgba(5,25,22,.34); mix-blend-mode: screen; will-change: opacity, transform; transition: opacity .1s linear; }
 .topbar { position: absolute; z-index: 4; top: 0; left: 0; width: 100%; height: 92px; padding: 20px 34px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; background: linear-gradient(180deg, rgba(21,48,41,.86), rgba(21,48,41,.28) 66%, transparent); }
 .brand { display: flex; align-items: center; gap: 12px; }
-.brand-mark { display: grid; place-items: center; width: 48px; height: 48px; color: var(--ink); background: conic-gradient(from 22.5deg, var(--acid), var(--acid) 12.5%, var(--vermillion) 12.5% 25%, var(--acid) 25% 37.5%, var(--magenta) 37.5% 50%, var(--acid) 50% 62.5%, var(--vermillion) 62.5% 75%, var(--acid) 75% 87.5%, var(--magenta) 87.5%); border: 3px solid var(--cream); font: 800 11px/1 var(--font-mono); clip-path: polygon(50% 0, 63% 14%, 81% 6%, 86% 24%, 100% 32%, 91% 50%, 100% 68%, 82% 75%, 78% 94%, 59% 86%, 45% 100%, 33% 84%, 13% 91%, 9% 71%, 0 61%, 11% 45%, 2% 27%, 21% 21%, 29% 3%); text-shadow: 0 1px var(--cream); }
-.brand strong { display: block; font-size: 13px; letter-spacing: .13em; }
-.brand small, .eyebrow { display: block; margin-top: 3px; font: 500 9px/1.3 var(--font-mono); letter-spacing: .17em; opacity: .66; }
-.location { padding: 10px 15px; border: 2px solid var(--ink); background: rgba(243,220,168,.92); color: var(--ink); box-shadow: 4px 4px 0 var(--vermillion); font: 600 10px var(--font-mono); letter-spacing: .12em; }
-/* The chip has a cream background, so the acid yellow used elsewhere on dark
-   glass was very nearly invisible here. Use the ink colour instead. */
-.location b { margin-left: 12px; color: var(--vermillion); font-weight: 700; }
-.header-center { display: grid; justify-items: center; gap: 6px; }
+.brand strong { display: block; font-family: var(--font-latin-display), sans-serif; font-size: 15px; font-weight: 700; letter-spacing: .01em; }
+.eyebrow { display: block; margin-top: 3px; font: 500 9px/1.3 var(--font-mono); letter-spacing: .17em; opacity: .66; }
 .weather-chip { display: inline-flex; align-items: center; gap: 8px; min-height: 27px; padding: 5px 9px; border: 1px solid rgba(241,235,216,.2); background: rgba(8,25,21,.58); color: var(--cream); backdrop-filter: blur(12px); font: 600 8px var(--font-mono); letter-spacing: .09em; text-transform: uppercase; box-shadow: 0 8px 24px rgba(4,18,14,.12); }
 .weather-chip strong { min-width: 13px; color: #cde8ed; font-size: 14px; line-height: 1; text-align: center; }
 .weather-chip span { opacity: .84; }
@@ -46,7 +55,13 @@ button { font: inherit; }
 .weather-flight { position: absolute; z-index: 4; top: 49px; left: 50%; transform: translateX(-50%); }
 .pulse { display: inline-block; width: 6px; height: 6px; margin-right: 8px; border-radius: 50%; background: var(--acid); box-shadow: 0 0 0 4px rgba(216,255,98,.13); }
 .icon-button { justify-self: end; width: 38px; height: 38px; border-radius: 50%; border: 1px solid rgba(241,235,216,.35); color: var(--cream); background: rgba(8,25,21,.42); cursor: pointer; }
-.top-actions { justify-self: end; display: flex; gap: 8px; }
+.top-actions { grid-column: 3; justify-self: end; display: flex; align-items: center; gap: 8px; }
+/* Both languages are always on offer, each written in its own script. */
+.language-switch { display: inline-flex; align-items: center; height: 38px; margin-right: 4px; padding: 3px; border: 1px solid rgba(241,235,216,.35); border-radius: 19px; background: rgba(8,25,21,.42); }
+.language-switch button { height: 30px; padding: 0 12px; border: 0; border-radius: 15px; background: none; color: rgba(255,240,196,.72); cursor: pointer; font: 600 13px/1 var(--font-latin-display), sans-serif; }
+.language-switch button[lang="bn"] { font-family: var(--font-bangla), sans-serif; font-size: 14px; }
+.language-switch button:hover { color: var(--cream); }
+.language-switch button.selected { background: var(--cream); color: var(--ink); }
 .topbar.in-flight { top: 30px; display: block; height: auto; padding: 18px 24px; background: none; pointer-events: none; }
 .topbar.in-flight .top-actions { float: right; pointer-events: auto; }
 .sound-button { font-size: 13px; opacity: .68; transition: color .2s ease, border-color .2s ease, opacity .2s ease; }
@@ -96,43 +111,39 @@ button { font: inherit; }
 .primary-button b { display: grid; place-items: center; width: 28px; height: 28px; border: 1px solid rgba(16,36,31,.35); font-size: 17px; }
 .primary-button:hover { transform: translate(-2px, -2px); box-shadow: 8px 8px 0 var(--magenta); }
 
-/* Title screen. This is a cinematic opener, not a poster: the city keeps the
-   whole frame and the only opaque element is a bottom scrim dark enough to carry
-   type. Everything stacks upward from the bottom edge (justify-content: flex-end),
-   so no amount of furniture can push the start prompt off a short viewport. */
+/* Welcome screen. The city keeps the whole frame and the only opaque element
+   is a bottom scrim dark enough to carry type. Everything stacks upward from the
+   bottom edge (justify-content: flex-end), so nothing can push the start button
+   off a short viewport. */
 .title-screen { position: absolute; z-index: 3; inset: 0; display: flex; flex-direction: column; justify-content: flex-end; padding: 0 clamp(24px, 5.4vw, 96px) clamp(26px, 3.6vh, 42px); overflow: hidden; pointer-events: none; }
-.title-scrim { position: absolute; inset: 0; background: linear-gradient(0deg, rgba(4,17,15,.94) 0%, rgba(4,17,15,.84) 20%, rgba(4,17,15,.46) 43%, rgba(4,17,15,.12) 60%, transparent 72%); }
-.title-lower { position: relative; display: grid; justify-items: start; max-width: 780px; pointer-events: auto; }
-.title-kicker { color: var(--acid); font: 700 9px/1.3 var(--font-mono); letter-spacing: .32em; text-transform: uppercase; opacity: .88; }
-/* min(vw, vh) keeps the wordmark from swallowing the screen on short laptops —
-   pure vw sizing is what used to push the panel off the bottom edge. */
-.title-wordmark { margin: 15px 0 0; max-width: 20ch; color: var(--cream); font-size: clamp(34px, min(5.6vw, 10vh), 84px); line-height: .92; letter-spacing: -.035em; font-weight: 800; text-transform: uppercase; text-wrap: balance; text-shadow: 0 6px 40px rgba(2,12,10,.9), 0 2px 4px rgba(2,12,10,.7); }
-.title-wordmark em { font-style: normal; color: var(--acid); }
-.title-rule { width: clamp(170px, 24vw, 340px); height: 4px; margin-top: clamp(14px, 2.2vh, 22px); background: linear-gradient(90deg, var(--acid), var(--magenta) 58%, transparent); }
-.title-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 15px; margin: clamp(12px, 1.8vh, 18px) 0 0; color: rgba(255,240,196,.76); font: 500 11px/1.5 var(--font-mono); letter-spacing: .11em; text-transform: uppercase; }
-.title-meta span + span::before { content: "·"; margin-right: 15px; color: var(--river); }
-.launch-ticker { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; margin-top: clamp(16px, 2.6vh, 26px); }
-.launch-ticker-label { color: var(--magenta); font: 700 9px var(--font-mono); letter-spacing: .24em; text-transform: uppercase; }
-.launch-ticker-arrow { color: rgba(255,240,196,.3); font-size: 15px; line-height: 1; }
-/* Three-letter codes, not name cards: the old full-width buttons were what broke
-   out of the panel edge, and a ticker of codes cannot outgrow its row. */
-.launch-code { padding: 7px 11px; border: 1px solid rgba(255,240,196,.22); background: rgba(5,20,17,.46); color: rgba(255,240,196,.72); cursor: pointer; font: 700 11px var(--font-mono); letter-spacing: .14em; transition: color .18s ease, border-color .18s ease, background .18s ease; }
-.launch-code:hover { color: var(--cream); border-color: rgba(255,240,196,.52); background: rgba(255,240,196,.08); }
-.launch-code.active { color: var(--ink); background: var(--acid); border-color: var(--acid); box-shadow: 0 0 24px rgba(245,214,90,.34); }
-.launch-ticker-name { color: rgba(255,240,196,.58); font: 500 11px var(--font-mono); letter-spacing: .1em; }
-/* The start prompt is the single loudest thing on screen — the old BEGIN FLIGHT
-   button was 11px, smaller than the stat numbers beside it, so the eye never
-   found it. Size, glow, and the ring pulse all exist to fix that hierarchy. */
-.title-start { display: inline-flex; align-items: center; gap: 14px; margin-top: clamp(20px, 3.2vh, 32px); padding: 15px 30px 15px 22px; border: 2px solid var(--acid); background: rgba(245,214,90,.1); color: var(--acid); cursor: pointer; font: 700 clamp(12px, 1.2vw, 15px) var(--font-mono); letter-spacing: .22em; animation: title-start-pulse 2.6s ease-out infinite; transition: color .2s ease, background .2s ease, transform .2s ease; }
-.title-start b { font-size: 17px; line-height: 1; }
-.title-start:hover { transform: translateY(-2px); background: var(--acid); color: var(--ink); }
-@keyframes title-start-pulse {
-  0% { box-shadow: 0 0 0 0 rgba(245,214,90,.34); }
-  70% { box-shadow: 0 0 0 18px rgba(245,214,90,0); }
-  100% { box-shadow: 0 0 0 0 rgba(245,214,90,0); }
-}
-.title-controls { position: relative; display: flex; flex-wrap: wrap; gap: 6px 20px; margin-top: clamp(18px, 2.6vh, 28px); color: rgba(255,240,196,.42); font: 500 9px var(--font-mono); letter-spacing: .14em; pointer-events: auto; }
-.title-load { display: flex; align-items: center; gap: 9px; margin-top: clamp(14px, 2.2vh, 22px); color: rgba(255,240,196,.55); font: 600 9px var(--font-mono); letter-spacing: .14em; }
+.title-scrim { position: absolute; inset: 0; background: linear-gradient(0deg, rgba(4,17,15,.95) 0%, rgba(4,17,15,.86) 22%, rgba(4,17,15,.5) 46%, rgba(4,17,15,.14) 64%, transparent 76%); }
+.title-lower { position: relative; display: grid; justify-items: start; width: 100%; max-width: 1180px; pointer-events: auto; }
+/* The name is the one loud thing on the screen. Bengali letters hang from a
+   headline bar (the matra); here that bar carries on past the last letter and
+   runs off the right edge, the horizon the crow is about to fly along. The
+   offsets are tuned to Anek Bangla at this weight and width.
+   min(vw, vh) keeps the wordmark from swallowing short laptop screens. */
+.title-wordmark { --matra-top: .303em; --matra-height: .083em; position: relative; margin: 0; color: var(--cream); font-family: var(--font-bangla), sans-serif; font-size: clamp(40px, min(8.2vw, 15vh), 128px); font-weight: 800; font-stretch: 84%; line-height: 1.22; letter-spacing: 0; white-space: nowrap; text-shadow: 0 6px 40px rgba(2,12,10,.9), 0 2px 4px rgba(2,12,10,.7); }
+.title-wordmark::after { content: ""; position: absolute; left: calc(100% + .1em); top: var(--matra-top); width: 100vw; height: var(--matra-height); background: var(--cream); box-shadow: 0 6px 40px rgba(2,12,10,.9); }
+.title-lead { max-width: 44ch; margin: clamp(6px, 1.2vh, 14px) 0 0; color: rgba(255,240,196,.88); font-size: clamp(15px, 1.3vw, 19px); line-height: 1.5; text-wrap: pretty; }
+.title-actions { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 20px 44px; margin-top: clamp(18px, 3.2vh, 36px); }
+.launch-ticker { display: grid; gap: 8px; }
+.launch-ticker-label { color: rgba(255,240,196,.62); font-size: 13px; }
+.launch-sites { display: flex; flex-wrap: wrap; gap: 6px 24px; }
+/* Each place hangs from its own bar, as the letters of the wordmark do; the
+   chosen one is the bar that lights up. */
+.launch-code { padding: 8px 0 4px; border: 0; border-top: 3px solid rgba(255,240,196,.24); background: none; color: rgba(255,240,196,.8); cursor: pointer; font: 600 16px/1.3 var(--font-display), sans-serif; transition: color .18s ease, border-color .18s ease; }
+.launch-code:hover { color: var(--cream); border-top-color: rgba(255,240,196,.6); }
+.launch-code.active { color: var(--acid); border-top-color: var(--acid); }
+/* The start button says what it does and is the only filled shape on screen. */
+.title-start { display: inline-flex; align-items: center; gap: 16px; padding: 13px 16px 13px 24px; border: 0; background: var(--acid); color: var(--ink); box-shadow: 5px 5px 0 var(--vermillion); cursor: pointer; font: 700 clamp(17px, 1.5vw, 21px)/1.2 var(--font-display), sans-serif; transition: transform .16s ease, box-shadow .16s ease; }
+.title-start:hover { transform: translate(-2px, -2px); box-shadow: 7px 7px 0 var(--vermillion); }
+.title-start:active { transform: translate(3px, 3px); box-shadow: 2px 2px 0 var(--vermillion); }
+.title-start kbd { height: 26px; margin: 0; padding: 0 8px; border-color: rgba(29,53,48,.5); background: rgba(29,53,48,.1); color: var(--ink); font-size: 11px; }
+.title-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 36px; margin-top: clamp(16px, 2.8vh, 30px); color: rgba(255,240,196,.62); font-size: 13px; line-height: 1.4; }
+.title-controls { display: flex; flex-wrap: wrap; gap: 6px 18px; }
+.title-controls span { display: inline-flex; align-items: center; }
+.title-load { display: flex; align-items: center; gap: 9px; }
 .title-load i { flex: none; width: 7px; height: 7px; border-radius: 50%; background: #6fce8a; }
 .title-load.loading i { background: var(--acid); animation: title-load-pulse 1.05s ease-in-out infinite; }
 .title-load.fallback i { background: var(--vermillion); }
@@ -184,6 +195,8 @@ kbd { display: inline-grid; min-width: 23px; height: 22px; padding: 0 5px; place
 .resting-chip { position: absolute; z-index: 4; left: 50%; top: 108px; transform: translateX(-50%); padding: 9px 13px; background: rgba(9,27,22,.72); border: 1px solid rgba(241,235,216,.18); font: 500 8px var(--font-mono); letter-spacing: .14em; backdrop-filter: blur(10px); }
 .resting-chip i { display: inline-block; width: 5px; height: 5px; margin-right: 7px; border-radius: 50%; background: var(--acid); }
 .controls-panel { position: absolute; z-index: 10; top: 50%; right: 34px; width: 320px; padding: 27px; transform: translateY(-50%); background: rgba(9,27,22,.94); border: 1px solid rgba(241,235,216,.2); backdrop-filter: blur(18px); box-shadow: 0 24px 70px rgba(4,18,14,.35); }
+/* The manual is the tallest panel: keep it clear of the top bar and let it scroll. */
+.controls-panel { max-height: calc(100% - 132px); margin-top: 28px; overflow-y: auto; scrollbar-width: thin; touch-action: pan-y; }
 .controls-panel > button { position: absolute; right: 13px; top: 10px; border: 0; color: var(--cream); background: none; font-size: 25px; cursor: pointer; }
 .controls-panel .eyebrow { color: var(--acid); opacity: 1; }
 .controls-panel h2 { margin: 10px 0 20px; font-size: 27px; }
@@ -203,19 +216,12 @@ kbd { display: inline-grid; min-width: 23px; height: 22px; padding: 0 5px; place
 .map-source.live i { background: var(--acid); box-shadow: 0 0 5px rgba(216,255,98,.55); }
 .map-source a { color: inherit; text-decoration: none; }
 .map-source a:hover { color: var(--cream); text-decoration: underline; }
-/* Shrunk and lifted clear of the lower third: at full size it read as a second
-   headline competing with the wordmark. It is a studio mark now, not a poster
-   element, so it scales as a unit rather than being re-measured piece by piece. */
-.folk-river-seal { position: absolute; z-index: 3; right: clamp(48px, 7vw, 132px); top: 40%; width: 236px; height: 236px; display: grid; align-content: center; justify-items: center; padding: 40px 25px 30px; transform: translateY(-50%) rotate(3deg) scale(.7); transform-origin: 100% 50%; opacity: .9; border: 6px solid var(--cream); border-radius: 50%; color: var(--cream); background: radial-gradient(circle at 50% 34%, var(--acid) 0 13%, transparent 13.5%), repeating-conic-gradient(from 7deg, var(--vermillion) 0 12deg, #bf4770 12deg 24deg, #f0aa47 24deg 36deg, #2f9eaa 36deg 48deg); box-shadow: 0 0 0 7px var(--ink), 12px 14px 0 rgba(29,53,48,.56); text-align: center; pointer-events: none; overflow: hidden; }
-.folk-river-seal::before { content: ""; position: absolute; inset: 21px; border: 4px double var(--cream); border-radius: inherit; background: rgba(29,53,48,.8); }
-.folk-river-seal strong, .folk-river-seal small { position: relative; z-index: 2; }
-.folk-river-seal strong { margin-top: 34px; font-family: sans-serif; font-size: 31px; line-height: 1; letter-spacing: .02em; }
-.folk-river-seal small { margin-top: 8px; color: var(--acid); font: 700 8px var(--font-mono); letter-spacing: .22em; }
-.folk-sun { position: absolute; z-index: 2; top: 42px; width: 32px; height: 32px; border: 4px solid var(--ink); border-radius: 50%; background: var(--acid); box-shadow: 0 0 0 5px var(--vermillion); }
-.folk-wave { position: absolute; z-index: 2; left: 42px; width: 152px; height: 18px; border-radius: 50%; border-top: 5px solid var(--river); }
-.folk-wave.one { bottom: 54px; transform: rotate(-4deg); }
-.folk-wave.two { bottom: 41px; transform: rotate(4deg); border-color: var(--cream); }
-.folk-wave.three { bottom: 29px; transform: rotate(-3deg); border-color: var(--river); }
+/* The river seal is the brand emblem: a sun over two waves. */
+.folk-river-seal { position: relative; flex: none; width: 44px; height: 44px; overflow: hidden; border: 2px solid var(--cream); border-radius: 50%; background: var(--ink); }
+.folk-sun { position: absolute; left: 50%; top: 8px; width: 13px; height: 13px; margin-left: -6.5px; border-radius: 50%; background: var(--acid); box-shadow: 0 0 0 2px var(--vermillion); }
+.folk-wave { position: absolute; left: 4px; width: 32px; height: 9px; border-radius: 50%; border-top: 2px solid var(--river); }
+.folk-wave.one { bottom: 8px; transform: rotate(-4deg); }
+.folk-wave.two { bottom: 3px; transform: rotate(4deg); border-color: var(--cream); }
 .flight-mode, .camera-chip, .perch-legend, .resting-chip, .perch-prompt, .radio-now-playing { border-width: 2px; border-color: rgba(255,240,196,.48); box-shadow: 3px 3px 0 rgba(220,91,63,.54); }
 .controls-panel, .pause-overlay, .radio-panel { border: 3px solid var(--cream); box-shadow: 8px 8px 0 var(--magenta), 14px 14px 0 rgba(29,53,48,.55); }
 
@@ -257,17 +263,25 @@ kbd { display: inline-grid; min-width: 23px; height: 22px; padding: 0 5px; place
 .sky-panel > small { display: block; margin-top: 12px; font: 600 7px var(--font-mono); letter-spacing: .12em; opacity: .6; }
 
 @media (max-width: 900px) {
-  .header-center, .flight-hint { display: none; }
+  .topbar > .weather-chip, .flight-hint { display: none; }
   .topbar { grid-template-columns: 1fr auto; }
   .weather-flight { left: 18px; top: 50px; transform: none; }
   .weather-flight span, .weather-flight i { display: none; }
   .title-screen { padding: 0 20px 22px; }
-  /* .32em tracking is a wide-screen luxury; at phone widths it pushed the kicker
-     onto a second line and broke the run-in to the wordmark. */
-  .title-kicker { font-size: 8px; letter-spacing: .18em; }
-  .title-wordmark { max-width: 100%; font-size: clamp(32px, min(11vw, 9vh), 58px); }
-  .title-meta { font-size: 10px; }
-  .title-controls { gap: 5px 14px; }
+  .topbar { padding: 16px 18px; }
+  .topbar.in-flight { padding: 14px 14px; }
+  .top-actions { gap: 6px; }
+  .brand strong { display: none; }
+  .language-switch { margin-right: 0; }
+  .language-switch button { padding: 0 9px; }
+  /* In flight a phone's top bar also has to fit the weather chip, so the switch
+     folds down to the one language you are not using. */
+  .topbar.in-flight .language-switch button.selected { display: none; }
+  .map-source { max-width: calc(100vw - 140px); line-height: 1.5; }
+  .flight-shell[lang="bn"] .map-source { top: 132px; }
+  .title-wordmark { font-size: clamp(34px, min(11.4vw, 13vh), 76px); }
+  .title-actions { gap: 16px 28px; }
+  .launch-code { font-size: 15px; }
   /* The bottom edge now belongs to the thumb controls, so the readouts sit
      above them instead of underneath. */
   .telemetry { left: 50%; bottom: 178px; max-width: calc(100vw - 28px); padding: 8px 12px; transform: translateX(-50%); }
@@ -284,7 +298,6 @@ kbd { display: inline-grid; min-width: 23px; height: 22px; padding: 0 5px; place
   .resting-chip { top: 140px; }
   .inspect-exit { top: 140px; }
   .map-source { left: 16px; bottom: auto; top: 118px; }
-  .folk-river-seal { display: none; }
   .radio-panel, .radio-panel.in-flight { top: 130px; right: 14px; left: 14px; width: auto; max-height: calc(100vh - 146px); overflow-y: auto; padding: 20px; }
   .radio-now-playing, .radio-now-playing.in-flight { top: 130px; right: auto; left: 20px; }
   .radio-display { margin-top: 15px; }
@@ -316,28 +329,23 @@ kbd { display: inline-grid; min-width: 23px; height: 22px; padding: 0 5px; place
   .radio-panel > small { margin-top: 7px; }
 }
 
-@media (min-width: 901px) and (max-width: 1180px) { .folk-river-seal { right: 54px; width: 190px; height: 190px; } }
-
 @media (prefers-reduced-motion: reduce) {
   .primary-button, .flight-dynamics, .launch-code, .title-start { transition: none; }
-  .perch-prompt[data-state="commit"], .title-start, .title-load.loading i { animation: none; }
-  /* The pulse ring carried the start prompt's emphasis, so a static ring stands
-     in for it rather than leaving the button flat. */
-  .title-start { box-shadow: 0 0 0 4px rgba(245,214,90,.18); }
+  .perch-prompt[data-state="commit"], .title-load.loading i { animation: none; }
 }
 
 /* The lower third stacks up from the bottom edge, so it can never be cut off —
    but on short viewports it can still climb far enough to cover the skyline.
    These steps trade type size for headroom so the city stays the subject. */
 @media (max-height: 680px) {
-  .title-wordmark { font-size: clamp(28px, min(4.6vw, 8.5vh), 52px); }
-  .title-rule { height: 3px; }
-  .title-meta { font-size: 10px; }
-  .title-start { padding: 11px 22px 11px 17px; }
+  .title-wordmark { font-size: clamp(32px, min(6.4vw, 13vh), 70px); }
+  .title-lead { font-size: 14px; }
+  .title-start { padding: 10px 14px 10px 18px; }
   .title-controls { display: none; }
 }
 
 @media (max-height: 560px) {
-  .title-kicker, .title-rule, .title-load { display: none; }
-  .title-wordmark { margin-top: 0; font-size: clamp(24px, 6vh, 38px); }
+  .title-lead, .title-foot { display: none; }
+  .title-wordmark { font-size: clamp(28px, 11vh, 52px); }
+  .title-actions { margin-top: 8px; }
 }
