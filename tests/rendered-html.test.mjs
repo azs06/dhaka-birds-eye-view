@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { access, readFile } from "node:fs/promises";
 import test from "node:test";
 import { resolveBuildingCollision } from "../app/flight-collision.mjs";
+import { buildMetroCorridor, metroGirderSampleCount } from "../app/metro-corridor.ts";
 import { BIRDS } from "../app/birds.ts";
 import { PLACE_NAMES_BN, STATION_TEXT_BN, STRINGS } from "../app/i18n.ts";
 
@@ -505,4 +506,97 @@ test("bundled Dhaka roads preserve connected major corridors", async () => {
     unmatchedMajorInteriorEndpoints / majorInteriorEndpoints < 0.05,
     `too many major roads terminate inside the map: ${unmatchedMajorInteriorEndpoints}/${majorInteriorEndpoints}`,
   );
+});
+
+test("metro corridor clearance keeps procedural and OSM buildings out of the viaduct and stations", async () => {
+  const component = await readFile(new URL("../app/BirdFlight.tsx", import.meta.url), "utf8");
+  assert.match(component, /metroCorridor\.blocksCircle\(buildingX, buildingZ, buildingRadius\)/);
+  assert.match(component, /metroCorridor\.blocksCircle\(x, z, Math\.hypot\(halfWidth, halfDepth\)\)/);
+  assert.match(component, /metroCorridor\.blocksPolygon\(building\.points\)/);
+  assert.match(component, /const GIRDER_SAMPLES = metroGirderSampleCount\(curveLength\)/);
+
+  // Unit checks on an east-west viaduct with a station at the origin.
+  const corridor = buildMetroCorridor(
+    [[-200, 0], [0, 0], [200, 0]],
+    [{ x: 0, z: 0, tx: 1, tz: 0 }],
+  );
+  assert.equal(corridor.blocksCircle(120, 4, 8), true, "procedural building clipping the viaduct is rejected");
+  assert.equal(corridor.blocksCircle(120, 30, 8), false, "procedural building safely clear of the viaduct stays");
+  assert.equal(corridor.blocksCircle(35, 16, 6), true, "building touching the station hall is rejected");
+  assert.equal(corridor.blocksCircle(0, 38, 6), true, "building touching the station stair entrance is rejected");
+  assert.equal(corridor.blocksCircle(35, 42, 6), false, "building clear of both hall and stairs stays");
+
+  const crossingPoly = [[90, -25], [110, -25], [110, 25], [90, 25]];
+  assert.equal(corridor.blocksPolygon(crossingPoly), true, "OSM footprint crossing the viaduct is rejected");
+  const clearPoly = [[90, 20], [110, 20], [110, 40], [90, 40]];
+  assert.equal(corridor.blocksPolygon(clearPoly), false, "OSM footprint clear of the viaduct stays");
+
+  // Against the real bundled Dhaka map: blocks the Khamarbari curve & OSM station footprints without clearing the city.
+  const THREE = await import("three");
+  const snapshot = JSON.parse(await readFile(new URL("../public/dhaka-map.json", import.meta.url), "utf8"));
+  const line0 = snapshot.metroLines[0];
+  const curve = new THREE.CatmullRomCurve3(
+    line0.map(([x, z]) => new THREE.Vector3(x, 18, z)),
+    false,
+    "centripetal",
+    0.28,
+  );
+  const samples = metroGirderSampleCount(curve.getLength());
+  const sampled = [];
+  for (let i = 0; i <= samples; i++) {
+    const p = curve.getPointAt(i / samples);
+    sampled.push([p.x, p.z]);
+  }
+  const stations = snapshot.metroStations.map((station) => {
+    let bestU = 0;
+    let bestD2 = Infinity;
+    for (let i = 0; i <= 1600; i++) {
+      const p = curve.getPointAt(i / 1600);
+      const d2 = (p.x - station.point[0]) ** 2 + (p.z - station.point[1]) ** 2;
+      if (d2 < bestD2) {
+        bestD2 = d2;
+        bestU = i / 1600;
+      }
+    }
+    const p = curve.getPointAt(bestU);
+    const t = curve.getTangentAt(bestU);
+    const len = Math.hypot(t.x, t.z) || 1;
+    return { x: p.x, z: p.z, tx: t.x / len, tz: t.z / len };
+  });
+  const dhakaCorridor = buildMetroCorridor(sampled, stations);
+
+  // Khamarbari/Bijoy Sarani curve off the main road (where procedural boxes used to spawn on the viaduct).
+  assert.equal(dhakaCorridor.blocksCircle(-3415, 1200, 12), true);
+  let rejected = 0;
+  for (const building of snapshot.buildings) {
+    if (dhakaCorridor.blocksPolygon(building.points)) rejected++;
+  }
+  assert.ok(rejected >= 10, `expected OSM metro station/overlapping buildings to be rejected, got ${rejected}`);
+  assert.ok(rejected < 80, `expected clearance to remain surgical, rejected ${rejected}/${snapshot.buildings.length}`);
+});
+
+test("climb and dive orientation pitches the bird nose-up on ascent and nose-down into stoops", async () => {
+  const [component, THREE] = await Promise.all([
+    readFile(new URL("../app/BirdFlight.tsx", import.meta.url), "utf8"),
+    import("three"),
+  ]);
+
+  // Bird models face -Z with +Y up, so euler.set(pitch, yaw, roll) must keep +pitch
+  // (never -pitch, which inverted nose-down on climbs and nose-up on dives).
+  assert.match(component, /euler\.set\(pitch, yaw, roll\)/);
+  assert.doesNotMatch(component, /euler\.set\(-pitch, yaw, roll\)/);
+
+  const climbQuat = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.42, 0, 0, "YXZ"));
+  const diveQuat = new THREE.Quaternion().setFromEuler(new THREE.Euler(-0.48, 0, 0, "YXZ"));
+  const climbBeak = new THREE.Vector3(0, 0, -1).applyQuaternion(climbQuat);
+  const diveBeak = new THREE.Vector3(0, 0, -1).applyQuaternion(diveQuat);
+  assert.ok(climbBeak.y > 0.35, `climbing pitch must lift the beak (+Y), got ${climbBeak.y}`);
+  assert.ok(diveBeak.y < -0.4, `diving pitch must point the beak downward (-Y), got ${diveBeak.y}`);
+
+  // Climbing drives active wingbeats, diving folds wings into a stoop, and airflow
+  // lives in world space rather than spinning with the bird group.
+  assert.match(component, /const airflowVfx = createAirflowVfx\(scene, crow\)/);
+  assert.match(component, /const climbFlap = clamp\(/);
+  assert.match(component, /const diveSuppression = clamp\(/);
+  assert.match(component, /swoopMomentum/);
 });

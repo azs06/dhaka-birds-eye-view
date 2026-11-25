@@ -9,6 +9,13 @@ import { Sky } from "three/examples/jsm/objects/Sky.js";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { resolveBuildingCollision } from "./flight-collision.mjs";
 import {
+  METRO_GIRDER_HALF_WIDTH,
+  METRO_PIER_CAP_WIDTH,
+  buildMetroCorridor,
+  metroGirderSampleCount,
+  type MetroStationFootprint,
+} from "./metro-corridor";
+import {
   STRINGS,
   chooseLocale,
   fill,
@@ -84,7 +91,19 @@ type DhakaLandmark = AreaLandmark & {
     | "curzon-hall"
     | "baitul-mukarram"
     | "bangladesh-bank"
-    | "airport";
+    | "airport"
+    | "ramna-park"
+    | "suhrawardy-udyan"
+    | "rabindra-sarobar"
+    | "baldha-garden"
+    | "botanical-garden"
+    | "national-zoo"
+    | "national-museum"
+    | "liberation-museum"
+    | "military-museum"
+    | "science-museum"
+    | "shishu-park"
+    | "shishu-mela";
 };
 type ProceduralDistrictTile = { group: THREE.Group; centerX: number; centerZ: number; colliders: BuildingCollider[] };
 type WaterRibbon = THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
@@ -181,7 +200,17 @@ type FlightRadio = {
   dispose: () => void;
 };
 type AirflowVfx = {
-  update: (dt: number, speedAmount: number, verticalSpeed: number, boosting: boolean, reducedMotion: boolean) => void;
+  setWingtips: (left: THREE.Object3D | null, right: THREE.Object3D | null) => void;
+  update: (
+    dt: number,
+    velocity: THREE.Vector3,
+    cameraPosition: THREE.Vector3,
+    speedAmount: number,
+    verticalSpeed: number,
+    boosting: boolean,
+    active: boolean,
+    reducedMotion: boolean,
+  ) => void;
   dispose: () => void;
 };
 type WeatherVfx = {
@@ -228,7 +257,20 @@ const BOOST_SPEED = 78;
 const DEFAULT_FLIGHT_ALTITUDE = 130;
 const MIN_FLIGHT_ALTITUDE = 10;
 const MAX_FLIGHT_ALTITUDE = 650;
+// The lowest puff bottom sits about 30 m below a cloud's origin at full
+// weather scale, so this keeps about 100 m between the clouds and the bird at
+// the ceiling, and about 84 m above a level chase camera there.
+const CLOUD_BASE_ALTITUDE = MAX_FLIGHT_ALTITUDE + 130;
+const CLOUD_LAYER_DEPTH = 260;
+// Clouds wrap within this distance of the camera on both axes, so the sky
+// stays populated anywhere in the flight area.
+const CLOUD_FIELD_RADIUS = 2800;
+// Clouds fade to nothing over this outer band of the field before they wrap.
+const CLOUD_EDGE_FADE = 400;
 const CEILING_EASE_DEPTH = 90;
+// Descent eases out over the last stretch above the floor, so the bird levels
+// off into a skim instead of hitting the floor and being kicked back up.
+const FLOOR_EASE_DEPTH = 16;
 const MIN_CEILING_CLIMB_SPEED = 1.8;
 // Landing reach: landmark perches are big rooftop targets, treetops are tighter.
 const LANDMARK_LANDING_RADIUS = 34;
@@ -387,7 +429,7 @@ const AREA_LANDMARKS: AreaLandmark[] = [
 ];
 const WATER_LANDMARKS: WaterLandmark[] = [
   { label: "Hatirjheel Lake", shortLabel: "HJL", lat: 23.77051, lon: 90.41635, minimap: true },
-  { label: "Dhanmondi Lake", shortLabel: "DHL", lat: 23.74608, lon: 90.37506 },
+  { label: "Dhanmondi Lake", shortLabel: "DHL", lat: 23.74608, lon: 90.37506, minimap: true },
   { label: "Gulshan Lake", shortLabel: "GLL", lat: 23.79308, lon: 90.41693 },
   { label: "Buriganga River", shortLabel: "BUR", lat: 23.70396, lon: 90.39277, minimap: true },
   { label: "Turag River", shortLabel: "TUR", lat: 23.80258, lon: 90.33982, minimap: true },
@@ -410,6 +452,19 @@ const DHAKA_LANDMARKS: DhakaLandmark[] = [
   { label: "Baitul Mukarram", shortLabel: "BTM", lat: 23.7294725, lon: 90.412617, altitude: 72, heading: Math.PI, kind: "baitul-mukarram", minimap: true },
   { label: "Bangladesh Bank Tower", shortLabel: "BBT", lat: 23.72596, lon: 90.42228, altitude: 108, heading: -Math.PI / 2, kind: "bangladesh-bank", minimap: true },
   { label: "Hazrat Shahjalal Airport", shortLabel: "DAC", lat: 23.84343, lon: 90.39784, altitude: 48, heading: -0.56, kind: "airport", minimap: true },
+  // Iconic Dhaka parks, gardens, zoo, museums & children's parks
+  { label: "Ramna Park", shortLabel: "RMP", lat: 23.7380, lon: 90.4025, altitude: 24, heading: 0.12, kind: "ramna-park", minimap: true },
+  { label: "Suhrawardy Udyan", shortLabel: "SUD", lat: 23.73346, lon: 90.39852, altitude: 54, heading: 0.08, kind: "suhrawardy-udyan" },
+  { label: "Rabindra Sarobar", shortLabel: "RBS", lat: 23.7458, lon: 90.3768, altitude: 18, heading: 0.3, kind: "rabindra-sarobar" },
+  { label: "Baldha Garden", shortLabel: "BLG", lat: 23.7177, lon: 90.4187, altitude: 18, heading: 0.05, kind: "baldha-garden" },
+  { label: "National Botanical Garden", shortLabel: "NBG", lat: 23.8211, lon: 90.3478, altitude: 24, heading: 0.1, kind: "botanical-garden" },
+  { label: "Bangladesh National Zoo", shortLabel: "ZOO", lat: 23.8136, lon: 90.3469, altitude: 24, heading: 0.05, kind: "national-zoo", minimap: true },
+  { label: "Bangladesh National Museum", shortLabel: "BNM", lat: 23.7375, lon: 90.3945, altitude: 26, heading: 0, kind: "national-museum" },
+  { label: "Liberation War Museum", shortLabel: "LWM", lat: 23.77556, lon: 90.36943, altitude: 32, heading: 0.1, kind: "liberation-museum", minimap: true },
+  { label: "Bangladesh Military Museum", shortLabel: "BMM", lat: 23.7633, lon: 90.3872, altitude: 28, heading: 0, kind: "military-museum" },
+  { label: "National Science Museum", shortLabel: "NSM", lat: 23.7788, lon: 90.3716, altitude: 28, heading: 0.08, kind: "science-museum" },
+  { label: "Shishu Park", shortLabel: "SHP", lat: 23.7360, lon: 90.3987, altitude: 26, heading: 0, kind: "shishu-park" },
+  { label: "Shishu Mela", shortLabel: "SHM", lat: 23.7727, lon: 90.3685, altitude: 24, heading: 0, kind: "shishu-mela" },
 ];
 
 // Launch sites offered on the title screen. Picking one moves the attract-mode
@@ -517,15 +572,206 @@ function worldToCoordinates(x: number, z: number) {
 const AIRPORT_WORLD = coordinatesToWorld(23.84343, 90.39784);
 const AIRPORT_COS = Math.cos(-0.56);
 const AIRPORT_SIN = Math.sin(-0.56);
+const AIRPORT_CLEARANCE_RECTS = [
+  { minX: -120, maxX: 120, minZ: -1_640, maxZ: 1_640 },
+  { minX: -440, maxX: 120, minZ: -410, maxZ: 140 },
+] as const;
 
-function inAirportClearance(x: number, z: number, pad = 0) {
+function toAirportLocal(x: number, z: number): [number, number] {
   const dx = x - AIRPORT_WORLD.x;
   const dz = z - AIRPORT_WORLD.y;
-  const localX = dx * AIRPORT_COS - dz * AIRPORT_SIN;
-  const localZ = dx * AIRPORT_SIN + dz * AIRPORT_COS;
-  if (Math.abs(localX) < 120 + pad && Math.abs(localZ) < 1_640 + pad) return true;
-  if (localX > -440 - pad && localX < 120 + pad && localZ > -410 - pad && localZ < 140 + pad) return true;
+  return [dx * AIRPORT_COS - dz * AIRPORT_SIN, dx * AIRPORT_SIN + dz * AIRPORT_COS];
+}
+
+function inAirportClearance(x: number, z: number, pad = 0) {
+  const [localX, localZ] = toAirportLocal(x, z);
+  for (const rect of AIRPORT_CLEARANCE_RECTS) {
+    if (localX > rect.minX - pad && localX < rect.maxX + pad && localZ > rect.minZ - pad && localZ < rect.maxZ + pad) {
+      return true;
+    }
+  }
   return false;
+}
+
+// Major real Dhaka green parks & urban lungs. Anchoring greenery to actual
+// Dhaka parks lets the rest of the ground read as dense concrete/brick urban
+// fabric instead of a forest.
+const DHAKA_PARKS = [
+  { name: "Ramna Park", lat: 23.7378, lon: 90.4007, rx: 225, rz: 260, angle: 0.12, hasLoop: false },
+  { name: "Suhrawardy Udyan", lat: 23.7332, lon: 90.3992, rx: 155, rz: 255, angle: 0.08, hasLoop: false },
+  { name: "Chandrima Udyan", lat: 23.7679, lon: 90.3788, rx: 215, rz: 150, angle: -0.05, hasLoop: true },
+  { name: "National Botanical Garden", lat: 23.8211, lon: 90.3478, rx: 460, rz: 350, angle: 0.1, hasLoop: false },
+  { name: "Bangladesh National Zoo", lat: 23.8136, lon: 90.3469, rx: 370, rz: 320, angle: 0.06, hasLoop: false },
+  { name: "Kurmitola Golf Club", lat: 23.8165, lon: 90.4050, rx: 260, rz: 340, angle: -0.18, hasLoop: true },
+  { name: "Sher-e-Bangla Nagar North Lawn", lat: 23.7641, lon: 90.3785, rx: 175, rz: 55, angle: 0, hasLoop: false },
+  { name: "Sher-e-Bangla Nagar South Lawn", lat: 23.7580, lon: 90.3786, rx: 145, rz: 85, angle: 0, hasLoop: false },
+  { name: "Dhaka University Mall Green", lat: 23.7322, lon: 90.3940, rx: 120, rz: 145, angle: 0.15, hasLoop: false },
+  { name: "Curzon Hall Garden", lat: 23.7266, lon: 90.4034, rx: 105, rz: 85, angle: 0.05, hasLoop: false },
+  // Continuous greenbelt hugging the winding crescent of Dhanmondi Lake
+  { name: "Dhanmondi Lake North Park", lat: 23.7506, lon: 90.3766, rx: 95, rz: 195, angle: 0.14, hasLoop: false },
+  { name: "Dhanmondi Rabindra Sarobar", lat: 23.7458, lon: 90.3768, rx: 110, rz: 200, angle: 0.22, hasLoop: false },
+  { name: "Dhanmondi Lake South Park", lat: 23.7414, lon: 90.3752, rx: 90, rz: 185, angle: -0.16, hasLoop: false },
+  { name: "Justice Shahabuddin Park", lat: 23.7907, lon: 90.4152, rx: 78, rz: 105, angle: 0.05, hasLoop: false },
+  { name: "Gulshan Tank Park", lat: 23.7988, lon: 90.4158, rx: 72, rz: 92, angle: 0, hasLoop: false },
+  { name: "Tajuddin Ahmad Smriti Park", lat: 23.7882, lon: 90.4168, rx: 62, rz: 78, angle: 0, hasLoop: false },
+  { name: "Banani Lake Park", lat: 23.7925, lon: 90.4042, rx: 68, rz: 95, angle: -0.1, hasLoop: false },
+  { name: "Baridhara Park", lat: 23.8038, lon: 90.4212, rx: 62, rz: 82, angle: 0, hasLoop: false },
+  { name: "Uttara Sector 3 & 7 Park", lat: 23.8685, lon: 90.3995, rx: 85, rz: 135, angle: 0.05, hasLoop: false },
+  { name: "Osmani Udyan", lat: 23.7267, lon: 90.4071, rx: 105, rz: 78, angle: 0, hasLoop: false },
+  { name: "Baldha Garden", lat: 23.7177, lon: 90.4187, rx: 56, rz: 52, angle: 0.05, hasLoop: false },
+  { name: "Bahadur Shah Park", lat: 23.7096, lon: 90.4126, rx: 52, rz: 62, angle: 0.1, hasLoop: false },
+  { name: "Shishu Park Grounds", lat: 23.7360, lon: 90.3987, rx: 72, rz: 66, angle: 0, hasLoop: false },
+  { name: "Shishu Mela Grounds", lat: 23.7727, lon: 90.3685, rx: 68, rz: 62, angle: 0, hasLoop: false },
+].map((park) => {
+  const world = coordinatesToWorld(park.lat, park.lon);
+  return {
+    ...park,
+    x: world.x,
+    z: world.y,
+    cos: Math.cos(-park.angle),
+    sin: Math.sin(-park.angle),
+    fwdCos: Math.cos(park.angle),
+    fwdSin: Math.sin(park.angle),
+  };
+});
+
+function inDhakaPark(x: number, z: number, pad = 0) {
+  for (const park of DHAKA_PARKS) {
+    const dx = x - park.x;
+    const dz = z - park.z;
+    const lx = dx * park.cos - dz * park.sin;
+    const lz = dx * park.sin + dz * park.cos;
+    const rx = Math.max(1, park.rx + pad);
+    const rz = Math.max(1, park.rz + pad);
+    if ((lx * lx) / (rx * rx) + (lz * lz) / (rz * rz) <= 1) return true;
+  }
+  return false;
+}
+
+// Neighborhood canopy density anchors independent of building height: leafy
+// garden/planned districts (Ramna, DU, Sangsad, Dhanmondi, Gulshan, Banani,
+// Uttara, Cantonment) contrast with wall-to-wall masonry cores (Old Dhaka,
+// Motijheel, Tejgaon, Kamrangirchar).
+const DHAKA_GREEN_ZONES = [
+  // Leafy institutional & garden cores
+  { name: "Ramna & Mintoo Road", lat: 23.7365, lon: 90.4025, radius: 1_050, weight: 1.85 },
+  { name: "Dhaka University & Shahbagh", lat: 23.7305, lon: 90.3955, radius: 1_000, weight: 1.75 },
+  { name: "Sangsad & Agargaon", lat: 23.7660, lon: 90.3790, radius: 1_200, weight: 1.65 },
+  { name: "Dhaka Cantonment", lat: 23.8180, lon: 90.3940, radius: 1_650, weight: 1.55 },
+  { name: "Botanical & Zoo", lat: 23.8145, lon: 90.3455, radius: 1_200, weight: 1.75 },
+  // Planned leafy residential & lakeside districts
+  { name: "Dhanmondi & Lalmatia", lat: 23.7495, lon: 90.3725, radius: 1_300, weight: 1.38 },
+  { name: "Gulshan, Banani & Baridhara", lat: 23.7925, lon: 90.4135, radius: 1_700, weight: 1.35 },
+  { name: "Hatirjheel & Niketan", lat: 23.7710, lon: 90.4135, radius: 1_100, weight: 1.28 },
+  { name: "Uttara Sectors", lat: 23.8720, lon: 90.3975, radius: 1_800, weight: 1.25 },
+  { name: "Bashundhara", lat: 23.8185, lon: 90.4365, radius: 1_400, weight: 1.15 },
+  { name: "Mohammadpur", lat: 23.7620, lon: 90.3610, radius: 1_100, weight: 1.02 },
+  // Peri-urban riverine belts
+  { name: "Diabari", lat: 23.8850, lon: 90.3760, radius: 1_500, weight: 1.22 },
+  { name: "Purbachal", lat: 23.8360, lon: 90.4900, radius: 2_200, weight: 1.28 },
+  { name: "Demra", lat: 23.7240, lon: 90.4930, radius: 1_700, weight: 1.18 },
+  { name: "Keraniganj", lat: 23.6940, lon: 90.3860, radius: 1_600, weight: 1.16 },
+  // Hyper-dense masonry & commercial cores
+  { name: "Old Dhaka & Sadarghat", lat: 23.7105, lon: 90.4065, radius: 1_300, weight: 0.30 },
+  { name: "Kamrangirchar", lat: 23.7160, lon: 90.3655, radius: 950, weight: 0.34 },
+  { name: "Motijheel", lat: 23.7275, lon: 90.4205, radius: 850, weight: 0.36 },
+  { name: "Tejgaon & Karwan Bazar", lat: 23.7595, lon: 90.3990, radius: 1_000, weight: 0.40 },
+  { name: "Farmgate & Moghbazar", lat: 23.7515, lon: 90.4010, radius: 950, weight: 0.50 },
+  { name: "Jatrabari", lat: 23.7105, lon: 90.4350, radius: 950, weight: 0.40 },
+].map((zone) => {
+  const world = coordinatesToWorld(zone.lat, zone.lon);
+  return { x: world.x, z: world.y, radius: zone.radius, weight: zone.weight };
+});
+
+function dhakaGreenWeight(x: number, z: number) {
+  let weightedSum = 0.80 * 0.35;
+  let totalInfluence = 0.35;
+  for (const zone of DHAKA_GREEN_ZONES) {
+    const dist = Math.hypot(x - zone.x, z - zone.z);
+    if (dist >= zone.radius) continue;
+    const t = 1 - dist / zone.radius;
+    const influence = t * t * (3 - 2 * t);
+    weightedSum += zone.weight * influence;
+    totalInfluence += influence;
+  }
+  return weightedSum / totalInfluence;
+}
+
+function polygonArea2D(points: MapPoint[]) {
+  let area = 0;
+  for (let index = 0; index < points.length; index++) {
+    const [x1, z1] = points[index];
+    const [x2, z2] = points[(index + 1) % points.length];
+    area += x1 * z2 - x2 * z1;
+  }
+  return Math.abs(area) * 0.5;
+}
+
+/** Clip a world-space segment against the rotated airport runway and apron rectangles. */
+function clipSegmentOutsideAirport(
+  x1: number,
+  z1: number,
+  x2: number,
+  z2: number,
+  pad = 0,
+): Array<[number, number, number, number]> {
+  const [lx1, lz1] = toAirportLocal(x1, z1);
+  const [lx2, lz2] = toAirportLocal(x2, z2);
+  const dlx = lx2 - lx1;
+  const dlz = lz2 - lz1;
+  let surviving: Array<[number, number]> = [[0, 1]];
+
+  for (const rect of AIRPORT_CLEARANCE_RECTS) {
+    const minX = rect.minX - pad;
+    const maxX = rect.maxX + pad;
+    const minZ = rect.minZ - pad;
+    const maxZ = rect.maxZ + pad;
+    let tEnter = 0;
+    let tExit = 1;
+    let intersects = true;
+
+    if (Math.abs(dlx) < 1e-9) {
+      if (lx1 <= minX || lx1 >= maxX) intersects = false;
+    } else {
+      let tx0 = (minX - lx1) / dlx;
+      let tx1 = (maxX - lx1) / dlx;
+      if (tx0 > tx1) [tx0, tx1] = [tx1, tx0];
+      tEnter = Math.max(tEnter, tx0);
+      tExit = Math.min(tExit, tx1);
+    }
+
+    if (intersects) {
+      if (Math.abs(dlz) < 1e-9) {
+        if (lz1 <= minZ || lz1 >= maxZ) intersects = false;
+      } else {
+        let tz0 = (minZ - lz1) / dlz;
+        let tz1 = (maxZ - lz1) / dlz;
+        if (tz0 > tz1) [tz0, tz1] = [tz1, tz0];
+        tEnter = Math.max(tEnter, tz0);
+        tExit = Math.min(tExit, tz1);
+      }
+    }
+
+    if (!intersects || tEnter >= tExit) continue;
+    const next: Array<[number, number]> = [];
+    for (const [start, end] of surviving) {
+      if (tExit <= start || tEnter >= end) {
+        next.push([start, end]);
+        continue;
+      }
+      if (tEnter > start + 1e-4) next.push([start, tEnter]);
+      if (tExit < end - 1e-4) next.push([tExit, end]);
+    }
+    surviving = next;
+    if (surviving.length === 0) return [];
+  }
+
+  return surviving.map(([a, b]) => [
+    x1 + (x2 - x1) * a,
+    z1 + (z2 - z1) * a,
+    x1 + (x2 - x1) * b,
+    z1 + (z2 - z1) * b,
+  ]);
 }
 
 const DHAKA_SKY_LOCATION = { lat: 23.7715, lon: 90.4165 };
@@ -900,60 +1146,279 @@ function createTrafficSimulation(
   };
 }
 
-function createAirflowVfx(crow: THREE.Group): AirflowVfx {
+function createAirflowVfx(scene: THREE.Scene, crow: THREE.Group): AirflowVfx {
   const random = seededRandom(2_606);
-  const streakCount = 52;
+  // World-space air motes sit in the sky around the bird rather than rotating
+  // with its pitch and roll, so climbing carries you up through falling wisps
+  // and diving plunges you down through rising ones.
+  const streakCount = 44;
   const positions = new Float32Array(streakCount * 6);
   const streaks = Array.from({ length: streakCount }, () => ({
-    x: (random() - 0.5) * 36,
-    y: (random() - 0.5) * 22,
-    z: -70 + random() * 88,
-    length: 1.2 + random() * 4.4,
-    drift: 0.78 + random() * 0.52,
+    x: 0,
+    y: 0,
+    z: 0,
+    lengthScale: 0.65 + random() * 0.85,
+    drift: (random() - 0.5) * 1.4,
   }));
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
   const material = new THREE.LineBasicMaterial({
-    color: 0xd9ffff,
+    color: 0xe8f6f8,
     transparent: true,
     opacity: 0,
     depthWrite: false,
-    blending: THREE.AdditiveBlending,
     toneMapped: false,
   });
   const lines = new THREE.LineSegments(geometry, material);
   lines.frustumCulled = false;
   lines.renderOrder = 20;
-  crow.add(lines);
+  lines.visible = false;
+  scene.add(lines);
+
+  // Twin gossamer slipstream ribbons peel off the outermost primary tips during
+  // steep dives, swoops, climbs, and boost surges, tracing the bird's 3D arc.
+  const trailSamples = 20;
+  const ribbonVertexCount = 2 * trailSamples * 2;
+  const ribbonPositions = new Float32Array(ribbonVertexCount * 3);
+  const ribbonAlphas = new Float32Array(ribbonVertexCount);
+  const ribbonIndices: number[] = [];
+  for (let wing = 0; wing < 2; wing++) {
+    const base = wing * trailSamples * 2;
+    for (let i = 0; i < trailSamples; i++) {
+      const t = i / (trailSamples - 1);
+      // Fade in just behind the feather tip and taper smoothly to nothing.
+      const fade = Math.sin(Math.min(1, t * 5.5) * (Math.PI * 0.5)) * Math.pow(1 - t, 1.45);
+      ribbonAlphas[base + i * 2] = fade;
+      ribbonAlphas[base + i * 2 + 1] = fade;
+      if (i + 1 < trailSamples) {
+        const a = base + i * 2;
+        const b = a + 1;
+        const c = a + 2;
+        const d = a + 3;
+        ribbonIndices.push(a, c, b, b, c, d);
+      }
+    }
+  }
+  const ribbonGeometry = new THREE.BufferGeometry();
+  const ribbonPosAttr = new THREE.BufferAttribute(ribbonPositions, 3);
+  ribbonGeometry.setAttribute("position", ribbonPosAttr);
+  ribbonGeometry.setAttribute("aAlpha", new THREE.BufferAttribute(ribbonAlphas, 1));
+  ribbonGeometry.setIndex(ribbonIndices);
+  const ribbonUniforms = {
+    uColor: { value: new THREE.Color(0xf0fafb) },
+    uOpacity: { value: 0 },
+  };
+  const ribbonMaterial = new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    toneMapped: false,
+    side: THREE.DoubleSide,
+    uniforms: ribbonUniforms,
+    vertexShader: `
+      attribute float aAlpha;
+      varying float vAlpha;
+      void main() {
+        vAlpha = aAlpha;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      uniform vec3 uColor;
+      uniform float uOpacity;
+      varying float vAlpha;
+      void main() {
+        gl_FragColor = vec4(uColor, vAlpha * uOpacity);
+      }
+    `,
+  });
+  const ribbon = new THREE.Mesh(ribbonGeometry, ribbonMaterial);
+  ribbon.frustumCulled = false;
+  ribbon.renderOrder = 19;
+  ribbon.visible = false;
+  scene.add(ribbon);
+
+  const leftHistory = new Float32Array(trailSamples * 3);
+  const rightHistory = new Float32Array(trailSamples * 3);
+  let leftTip: THREE.Object3D | null = null;
+  let rightTip: THREE.Object3D | null = null;
+  let trailPrimed = false;
+  let streaksPrimed = false;
+  let smoothedTrailOpacity = 0;
+  const lastBirdPos = new THREE.Vector3();
+  const anchor = new THREE.Vector3();
+  const velDir = new THREE.Vector3(0, 0, -1);
+  const tipL = new THREE.Vector3();
+  const tipR = new THREE.Vector3();
+  const prevTipL = new THREE.Vector3();
+  const tangent = new THREE.Vector3();
+  const toCam = new THREE.Vector3();
+  const sideVec = new THREE.Vector3();
+
+  const halfX = 28;
+  const halfY = 22;
+  const halfZ = 28;
+
+  const respawnStreak = (streak: (typeof streaks)[number], forwardBias: boolean) => {
+    let ox = (random() - 0.5) * halfX * 2;
+    let oy = (random() - 0.5) * halfY * 2;
+    let oz = (random() - 0.5) * halfZ * 2;
+    if (forwardBias) {
+      const along = ox * velDir.x + oy * velDir.y + oz * velDir.z;
+      if (along < 4) {
+        const push = (4 - along) + random() * 16;
+        ox += velDir.x * push;
+        oy += velDir.y * push;
+        oz += velDir.z * push;
+      }
+    }
+    streak.x = anchor.x + clamp(ox, -halfX, halfX);
+    streak.y = anchor.y + clamp(oy, -halfY, halfY);
+    streak.z = anchor.z + clamp(oz, -halfZ, halfZ);
+    // Keep wisps out of the bird's immediate body & camera line so streaks frame
+    // the periphery rather than stabbing across the wings.
+    const bx = streak.x - crow.position.x;
+    const by = streak.y - crow.position.y;
+    const bz = streak.z - crow.position.z;
+    const distSq = bx * bx + by * by + bz * bz;
+    if (distSq < 36) {
+      const inv = 6.2 / Math.max(Math.sqrt(distSq), 0.001);
+      streak.x = crow.position.x + bx * inv;
+      streak.y = crow.position.y + by * inv;
+      streak.z = crow.position.z + bz * inv;
+    }
+  };
+
+  const writeRibbonWing = (history: Float32Array, wingIndex: number, cameraPosition: THREE.Vector3, widthScale: number) => {
+    const baseVertex = wingIndex * trailSamples * 2;
+    for (let i = 0; i < trailSamples; i++) {
+      const idx = i * 3;
+      const px = history[idx];
+      const py = history[idx + 1];
+      const pz = history[idx + 2];
+      const prevIdx = Math.max(0, i - 1) * 3;
+      const nextIdx = Math.min(trailSamples - 1, i + 1) * 3;
+      tangent.set(
+        history[prevIdx] - history[nextIdx],
+        history[prevIdx + 1] - history[nextIdx + 1],
+        history[prevIdx + 2] - history[nextIdx + 2],
+      );
+      if (tangent.lengthSq() < 1e-6) tangent.copy(velDir);
+      else tangent.normalize();
+      toCam.set(cameraPosition.x - px, cameraPosition.y - py, cameraPosition.z - pz);
+      sideVec.crossVectors(tangent, toCam);
+      if (sideVec.lengthSq() < 1e-6) sideVec.set(1, 0, 0);
+      else sideVec.normalize();
+
+      const t = i / (trailSamples - 1);
+      const halfWidth = widthScale * Math.sin(Math.pow(1 - t, 0.72) * Math.PI * 0.88);
+      const v0 = (baseVertex + i * 2) * 3;
+      const v1 = v0 + 3;
+      ribbonPositions[v0] = px - sideVec.x * halfWidth;
+      ribbonPositions[v0 + 1] = py - sideVec.y * halfWidth;
+      ribbonPositions[v0 + 2] = pz - sideVec.z * halfWidth;
+      ribbonPositions[v1] = px + sideVec.x * halfWidth;
+      ribbonPositions[v1 + 1] = py + sideVec.y * halfWidth;
+      ribbonPositions[v1 + 2] = pz + sideVec.z * halfWidth;
+    }
+  };
 
   return {
-    update(dt, speedAmount, verticalSpeed, boosting, reducedMotion) {
-      const intensity = reducedMotion ? 0 : clamp((speedAmount - 0.28) / 0.72 + (boosting ? 0.28 : 0), 0, 1);
-      lines.visible = intensity > 0.015;
-      material.opacity = intensity * 0.48;
-      const climbStretch = 1 + Math.abs(verticalSpeed) / 28;
-      for (let index = 0; index < streaks.length; index++) {
-        const streak = streaks[index];
-        streak.z += dt * (22 + speedAmount * 112) * streak.drift;
-        if (streak.z > 19) {
-          streak.z = -72 - random() * 18;
-          streak.x = (random() - 0.5) * 36;
-          streak.y = (random() - 0.5) * 22;
+    setWingtips(left, right) {
+      leftTip = left;
+      rightTip = right;
+      trailPrimed = false;
+    },
+    update(dt, velocity, cameraPosition, speedAmount, verticalSpeed, boosting, active, reducedMotion) {
+      const flowSpeed = velocity.length();
+      if (flowSpeed > 0.5) velDir.copy(velocity).divideScalar(flowSpeed);
+
+      const verticalEffort = clamp((Math.abs(verticalSpeed) - 2.2) / 16.5, 0, 1);
+      const speedRush = clamp((speedAmount - 0.44) / 0.56, 0, 1);
+      const wispIntensity = !active || reducedMotion
+        ? 0
+        : clamp(verticalEffort * 0.78 + speedRush * 0.52 + (boosting ? 0.36 : 0), 0, 1);
+
+      lines.visible = wispIntensity > 0.015;
+      if (lines.visible) {
+        material.opacity = wispIntensity * 0.24;
+        anchor.copy(crow.position).addScaledVector(velDir, 14);
+        const teleported = !streaksPrimed || crow.position.distanceToSquared(lastBirdPos) > 10_000;
+        lastBirdPos.copy(crow.position);
+        if (teleported) {
+          for (let i = 0; i < streaks.length; i++) respawnStreak(streaks[i], false);
+          streaksPrimed = true;
         }
-        const offset = index * 6;
-        positions[offset] = streak.x;
-        positions[offset + 1] = streak.y;
-        positions[offset + 2] = streak.z;
-        positions[offset + 3] = streak.x;
-        positions[offset + 4] = streak.y - clamp(verticalSpeed / 14, -1.4, 1.4);
-        positions[offset + 5] = streak.z + streak.length * (0.7 + speedAmount * 1.8) * climbStretch;
+        const tailSpanBase = clamp(flowSpeed * (0.026 + wispIntensity * 0.04), 0.75, 4.8);
+        for (let index = 0; index < streaks.length; index++) {
+          const streak = streaks[index];
+          streak.y += dt * streak.drift;
+          if (
+            Math.abs(streak.x - anchor.x) > halfX ||
+            Math.abs(streak.y - anchor.y) > halfY ||
+            Math.abs(streak.z - anchor.z) > halfZ
+          ) {
+            respawnStreak(streak, true);
+          }
+          const span = tailSpanBase * streak.lengthScale;
+          const offset = index * 6;
+          positions[offset] = streak.x;
+          positions[offset + 1] = streak.y;
+          positions[offset + 2] = streak.z;
+          positions[offset + 3] = streak.x - velDir.x * span;
+          positions[offset + 4] = streak.y - velDir.y * span;
+          positions[offset + 5] = streak.z - velDir.z * span;
+        }
+        geometry.attributes.position.needsUpdate = true;
       }
-      geometry.attributes.position.needsUpdate = true;
+
+      const targetTrail = !active || reducedMotion || !leftTip || !rightTip
+        ? 0
+        : clamp(verticalEffort * 0.88 + clamp((speedAmount - 0.5) / 0.5, 0, 1) * 0.65 + (boosting ? 0.45 : 0), 0, 1);
+      smoothedTrailOpacity = THREE.MathUtils.lerp(smoothedTrailOpacity, targetTrail, 1 - Math.exp(-7 * dt));
+
+      if (leftTip && rightTip && (smoothedTrailOpacity > 0.012 || !trailPrimed)) {
+        leftTip.getWorldPosition(tipL);
+        rightTip.getWorldPosition(tipR);
+        prevTipL.set(leftHistory[0], leftHistory[1], leftHistory[2]);
+        if (!trailPrimed || tipL.distanceToSquared(prevTipL) > 36) {
+          for (let i = 0; i < trailSamples; i++) {
+            const idx = i * 3;
+            leftHistory[idx] = tipL.x;
+            leftHistory[idx + 1] = tipL.y;
+            leftHistory[idx + 2] = tipL.z;
+            rightHistory[idx] = tipR.x;
+            rightHistory[idx + 1] = tipR.y;
+            rightHistory[idx + 2] = tipR.z;
+          }
+          trailPrimed = true;
+        } else {
+          leftHistory.copyWithin(3, 0, (trailSamples - 1) * 3);
+          rightHistory.copyWithin(3, 0, (trailSamples - 1) * 3);
+          leftHistory[0] = tipL.x;
+          leftHistory[1] = tipL.y;
+          leftHistory[2] = tipL.z;
+          rightHistory[0] = tipR.x;
+          rightHistory[1] = tipR.y;
+          rightHistory[2] = tipR.z;
+        }
+      }
+
+      ribbon.visible = smoothedTrailOpacity > 0.012 && trailPrimed;
+      if (ribbon.visible) {
+        ribbonUniforms.uOpacity.value = smoothedTrailOpacity * 0.28;
+        const widthScale = 0.055 + smoothedTrailOpacity * 0.045;
+        writeRibbonWing(leftHistory, 0, cameraPosition, widthScale);
+        writeRibbonWing(rightHistory, 1, cameraPosition, widthScale);
+        ribbonPosAttr.needsUpdate = true;
+      }
     },
     dispose() {
-      crow.remove(lines);
+      scene.remove(lines);
+      scene.remove(ribbon);
       geometry.dispose();
       material.dispose();
+      ribbonGeometry.dispose();
+      ribbonMaterial.dispose();
     },
   };
 }
@@ -1160,12 +1625,12 @@ function createWeatherVfx(
     const twilight = 1 - Math.abs(daylight * 2 - 1);
     const daylightStrength = smoothRange(daylight, 0.04, 0.92);
     const nightStrength = 1 - smoothRange(daylight, 0.025, 0.24);
-    const nightHex = mode === "storm" ? 0x0d1822 : mode === "rain" ? 0x10232e : 0x122b3c;
-    const dayHex = mode === "fog" ? 0xa4ad91
-      : mode === "storm" ? 0x49656b
-        : mode === "rain" ? 0x6f9695
-          : mode === "cloudy" ? 0x86aaa0
-            : 0x91c7c0;
+    const nightHex = mode === "storm" ? 0x0d1620 : mode === "rain" ? 0x11202c : 0x132738;
+    const dayHex = mode === "fog" ? 0xc7bfb2
+      : mode === "storm" ? 0x4e5964
+        : mode === "rain" ? 0x7c8a94
+          : mode === "cloudy" ? 0xb0bac0
+            : 0xc9d2d8;
     nightColor.setHex(nightHex);
     dayColor.setHex(dayHex);
     blendedBackground.copy(nightColor).lerp(twilightColor, twilight * (1 - cloudAmount * 0.55)).lerp(dayColor, daylightStrength);
@@ -1212,7 +1677,7 @@ function createWeatherVfx(
     const nightExposure = mode === "storm" ? 0.88 : mode === "rain" ? 0.92 : 0.98;
     renderer.toneMappingExposure = THREE.MathUtils.lerp(
       nightExposure,
-      mode === "clear" ? 1.02 : mode === "cloudy" ? 0.9 : 0.76,
+      mode === "clear" ? 1.02 : mode === "cloudy" ? 0.97 : 0.78,
       daylightStrength,
     );
     hemisphere.intensity = THREE.MathUtils.lerp(
@@ -1220,10 +1685,10 @@ function createWeatherVfx(
       1.8 - cloudAmount * 0.82,
       daylightStrength,
     );
-    hemisphere.color.set(isNight ? 0x7893ad : mode === "rain" || mode === "storm" ? 0xb8d0d4 : 0xe8f3ee);
-    hemisphere.groundColor.set(isNight ? 0x263c36 : 0x5d6c58);
+    hemisphere.color.set(isNight ? 0x7c93ad : mode === "rain" || mode === "storm" ? 0xc4cdd4 : 0xf1efe9);
+    hemisphere.groundColor.set(isNight ? 0x2d2a28 : 0x7a7064);
     const sunVisibility = smoothRange(solarElevation, -5, 8) * (1 - cloudAmount * 0.72);
-    const daylightKey = (mode === "clear" ? 3.35 : mode === "cloudy" ? 1.45 : 0.58) * sunVisibility;
+    const daylightKey = (mode === "clear" ? 3.35 : mode === "cloudy" ? 2.15 : 0.58) * sunVisibility;
     // A readable game night still has a cool key light. Reuse the one shadowed
     // directional light as moonlight instead of adding costly local shadow lights.
     const moonVisibility = nightStrength * (1 - cloudAmount * 0.5);
@@ -1242,7 +1707,7 @@ function createWeatherVfx(
     // The key light just moved, so the cached static shadow map is now stale.
     renderer.shadowMap.needsUpdate = true;
     skyFill.intensity = THREE.MathUtils.lerp(0.58, 0.48 + cloudAmount * 0.28, daylightStrength);
-    skyFill.color.set(isNight ? 0x45617b : twilight > 0.35 ? 0xc99b8e : 0x9bc8d2);
+    skyFill.color.set(isNight ? 0x475e78 : twilight > 0.35 ? 0xd29c84 : 0xb6c7d6);
     renderer.domElement.dataset.nightReadability = nightStrength.toFixed(3);
 
     const nightGlowMaterials = scene.userData.nightGlowMaterials as THREE.MeshStandardMaterial[] | undefined ?? [];
@@ -1262,10 +1727,11 @@ function createWeatherVfx(
       cloud.visible = index < visibleClouds;
       cloud.scale.setScalar(0.9 + cloudAmount * 0.34);
       cloud.userData.weatherSpeed = (0.45 + weather.windSpeed * 0.13) * (0.72 + (index % 4) * 0.12);
+      // The frame loop multiplies this by the cloud's edge-of-field fade.
+      cloud.userData.weatherOpacity = 0.35 + cloudAmount * 0.42;
       for (const child of cloud.children) {
         if (child instanceof THREE.Mesh && child.material instanceof THREE.MeshStandardMaterial) {
           child.material.color.set(isNight ? 0x526773 : raining ? 0x9aa9a8 : 0xe9e5d5);
-          child.material.opacity = 0.35 + cloudAmount * 0.42;
         }
       }
     });
@@ -1516,24 +1982,27 @@ async function addRoadNetworkMeshes(
     const roadJitter = ((Math.abs(road.id) % 7) - 3) * 0.004;
     const surfaceY = (bucket === 0 ? 1.07 : bucket === 1 ? 0.93 : 0.79) + roadJitter;
     const shoulderY = 0.7 + roadJitter * 0.5;
+    const shoulderWidth = width + (bucket === 0 ? 5.5 : 2.4);
+    const airportPad = shoulderWidth / 2 + 1;
     for (let index = 1; index < road.points.length; index++) {
-      const [x1, z1] = road.points[index - 1];
-      const [x2, z2] = road.points[index];
-      if (inAirportClearance((x1 + x2) / 2, (z1 + z2) / 2, 12)) continue;
+      const [rawX1, rawZ1] = road.points[index - 1];
+      const [rawX2, rawZ2] = road.points[index];
       const segStep = (index & 1) * 0.002;
-      const surface = segmentStrip(x1, z1, x2, z2, width, 0.34, surfaceY + segStep);
-      if (!surface) continue;
-      surfaces[bucket].push(surface);
-      const shoulder = segmentStrip(x1, z1, x2, z2, width + (bucket === 0 ? 5.5 : 2.4), 0.24, shoulderY + segStep);
-      if (shoulder) shoulders.push(shoulder);
-      if (bucket === 0) {
-        const center = segmentStrip(x1, z1, x2, z2, 0.58, 0.09, 1.335 + roadJitter * 0.5 + segStep);
-        if (center) centerLines.push(center);
-        const edgeOffset = width / 2 - 0.85;
-        const leftEdge = segmentStrip(x1, z1, x2, z2, 0.32, 0.075, 1.29 + roadJitter * 0.5 + segStep, -edgeOffset);
-        const rightEdge = segmentStrip(x1, z1, x2, z2, 0.32, 0.075, 1.29 + roadJitter * 0.5 + segStep, edgeOffset);
-        if (leftEdge) edgeLines.push(leftEdge);
-        if (rightEdge) edgeLines.push(rightEdge);
+      for (const [x1, z1, x2, z2] of clipSegmentOutsideAirport(rawX1, rawZ1, rawX2, rawZ2, airportPad)) {
+        const surface = segmentStrip(x1, z1, x2, z2, width, 0.34, surfaceY + segStep);
+        if (!surface) continue;
+        surfaces[bucket].push(surface);
+        const shoulder = segmentStrip(x1, z1, x2, z2, shoulderWidth, 0.24, shoulderY + segStep);
+        if (shoulder) shoulders.push(shoulder);
+        if (bucket === 0) {
+          const center = segmentStrip(x1, z1, x2, z2, 0.58, 0.09, 1.335 + roadJitter * 0.5 + segStep);
+          if (center) centerLines.push(center);
+          const edgeOffset = width / 2 - 0.85;
+          const leftEdge = segmentStrip(x1, z1, x2, z2, 0.32, 0.075, 1.29 + roadJitter * 0.5 + segStep, -edgeOffset);
+          const rightEdge = segmentStrip(x1, z1, x2, z2, 0.32, 0.075, 1.29 + roadJitter * 0.5 + segStep, edgeOffset);
+          if (leftEdge) edgeLines.push(leftEdge);
+          if (rightEdge) edgeLines.push(rightEdge);
+        }
       }
     }
   }
@@ -1544,7 +2013,7 @@ async function addRoadNetworkMeshes(
     parent,
     shoulders,
     new THREE.MeshStandardMaterial({
-      color: 0xaaa28f,
+      color: 0xb4aa9e,
       roughness: 0.96,
       polygonOffset: true,
       polygonOffsetFactor: -1,
@@ -1554,9 +2023,9 @@ async function addRoadNetworkMeshes(
     isCancelled,
   );
   const roadMaterials = [
-    { color: 0x2f3735, offset: -4 },
-    { color: 0x464f4b, offset: -3 },
-    { color: 0x626b65, offset: -2 },
+    { color: 0x373739, offset: -4 },
+    { color: 0x4d4b48, offset: -3 },
+    { color: 0x6b665e, offset: -2 },
   ].map(({ color, offset }) => new THREE.MeshStandardMaterial({
     color,
     roughness: 0.96,
@@ -1664,16 +2133,17 @@ if ( bevNightGlow > 0.001 ) {
   float bevWall = 1.0 - smoothstep( 0.30, 0.58, abs( bevWorldNormal.y ) );
   // Roofs and the first storey stay dark: lit windows start above street level.
   float bevStorey = smoothstep( 3.0, 7.0, bevWorldPos.y );
+  // Compute facade cell coordinates and screen-space derivatives outside the
+  // fragment-dependent branch so GLSL fwidth() stays defined across cutoffs.
+  float bevAcross = abs( bevWorldNormal.x ) > abs( bevWorldNormal.z ) ? bevWorldPos.z : bevWorldPos.x;
+  vec2 bevCell = vec2( bevAcross / 4.6, bevWorldPos.y / 3.75 );
+  vec2 bevFw = max( fwidth( bevCell ), vec2( 0.001 ) );
   if ( bevWall * bevStorey > 0.001 ) {
-    // Read the facade along whichever horizontal axis it faces.
-    float bevAcross = abs( bevWorldNormal.x ) > abs( bevWorldNormal.z ) ? bevWorldPos.z : bevWorldPos.x;
-    vec2 bevCell = vec2( bevAcross / 4.6, bevWorldPos.y / 3.75 );
     vec2 bevId = floor( bevCell );
     vec2 bevUv = fract( bevCell );
     // Filter window edges with screen-space derivatives and blend toward the
     // average lit density once a cell shrinks below ~2 pixels, eliminating
     // sub-pixel moire and sparkle across distant facades at night.
-    vec2 bevFw = max( fwidth( bevCell ), vec2( 0.001 ) );
     float bevPaneX = smoothstep( 0.17 - bevFw.x, 0.17 + bevFw.x, bevUv.x )
       * ( 1.0 - smoothstep( 0.70 - bevFw.x, 0.70 + bevFw.x, bevUv.x ) );
     float bevPaneY = smoothstep( 0.24 - bevFw.y, 0.24 + bevFw.y, bevUv.y )
@@ -1695,12 +2165,62 @@ if ( bevNightGlow > 0.001 ) {
   return material;
 }
 
+function createMetroCorridor(
+  metroLines?: OsmMapData["metroLines"],
+  metroStations?: OsmMapData["metroStations"],
+) {
+  const fallbackSpecs = MRT_LINE_6_STATIONS.map((station) => {
+    const world = coordinatesToWorld(station.lat, station.lon);
+    return { x: world.x, z: world.y };
+  });
+  const line = metroLines?.[0];
+  const controlPoints = line && line.length >= 2
+    ? line.map(([x, z]) => new THREE.Vector3(x, 18, z))
+    : fallbackSpecs.map((station) => new THREE.Vector3(station.x, 18, station.z));
+  const curve = new THREE.CatmullRomCurve3(controlPoints, false, "centripetal", 0.28);
+  const samples = metroGirderSampleCount(curve.getLength());
+  const sampledCenterline: MapPoint[] = [];
+  for (let index = 0; index <= samples; index++) {
+    const point = curve.getPointAt(index / samples);
+    sampledCenterline.push([point.x, point.z]);
+  }
+  const stationSpecs = metroStations && metroStations.length >= 2
+    ? metroStations.map((station) => ({ x: station.point[0], z: station.point[1] }))
+    : fallbackSpecs;
+  const PROJECTION_SAMPLES = 1600;
+  const projectedStations: MetroStationFootprint[] = [];
+  for (const spec of stationSpecs) {
+    let bestU = 0;
+    let bestDistanceSquared = Infinity;
+    for (let index = 0; index <= PROJECTION_SAMPLES; index++) {
+      const sample = curve.getPointAt(index / PROJECTION_SAMPLES);
+      const distanceSquared = (sample.x - spec.x) ** 2 + (sample.z - spec.z) ** 2;
+      if (distanceSquared < bestDistanceSquared) {
+        bestDistanceSquared = distanceSquared;
+        bestU = index / PROJECTION_SAMPLES;
+      }
+    }
+    if (bestDistanceSquared >= 200 * 200) continue;
+    const point = curve.getPointAt(bestU);
+    const tangent = curve.getTangentAt(bestU);
+    const tangentLength = Math.hypot(tangent.x, tangent.z) || 1;
+    projectedStations.push({
+      x: point.x,
+      z: point.z,
+      tx: tangent.x / tangentLength,
+      tz: tangent.z / tangentLength,
+    });
+  }
+  return buildMetroCorridor(sampledCenterline, projectedStations);
+}
+
 function addImmediateCityMass(scene: THREE.Scene, roads: OsmMapData["roads"]) {
   const group = new THREE.Group();
   group.name = "Immediate Greater Dhaka city mass";
+  const metroCorridor = createMetroCorridor();
   const geometry = new THREE.BoxGeometry(1, 1, 1);
-  const materials = [0xc4b99f, 0xa9b3aa, 0xb47e69].map(
-    (color) => applyNightWindows(new THREE.MeshStandardMaterial({ color, roughness: 0.94, metalness: 0.01 }), 0.46),
+  const materials = [0xd4ccc0, 0xc3bab0, 0xb66e56].map(
+    (color) => applyNightWindows(new THREE.MeshStandardMaterial({ color, roughness: 0.92, metalness: 0.01 }), 0.46),
   );
   const transforms: THREE.Matrix4[][] = [[], [], []];
   const districtCenters = AREA_LANDMARKS.map((landmark) => {
@@ -1715,7 +2235,7 @@ function addImmediateCityMass(scene: THREE.Scene, roads: OsmMapData["roads"]) {
   const roadGrid = new Map<string, Array<{ x1: number; z1: number; x2: number; z2: number; radius: number }>>();
   const roadKey = (cellX: number, cellZ: number) => `${cellX}:${cellZ}`;
   for (const road of roads) {
-    const radius = ["motorway", "trunk", "primary", "secondary"].includes(road.kind) ? 28 : 15;
+    const radius = ["motorway", "trunk", "primary", "secondary"].includes(road.kind) ? 24 : 13;
     for (let index = 1; index < road.points.length; index++) {
       const [x1, z1] = road.points[index - 1];
       const [x2, z2] = road.points[index];
@@ -1736,24 +2256,25 @@ function addImmediateCityMass(scene: THREE.Scene, roads: OsmMapData["roads"]) {
   const position = new THREE.Vector3();
   const quaternion = new THREE.Quaternion();
   const scale = new THREE.Vector3();
-  const spacing = 116;
-  for (let x = -FLIGHT_EXTENT.x + 70; x < FLIGHT_EXTENT.x - 70; x += spacing) {
-    for (let z = -FLIGHT_EXTENT.z + 70; z < FLIGHT_EXTENT.z - 70; z += spacing) {
-      const buildingX = x + (random() - 0.5) * 48;
-      const buildingZ = z + (random() - 0.5) * 48;
-      let intensity = 0.22;
+  const spacing = 84;
+  for (let x = -FLIGHT_EXTENT.x + 60; x < FLIGHT_EXTENT.x - 60; x += spacing) {
+    for (let z = -FLIGHT_EXTENT.z + 60; z < FLIGHT_EXTENT.z - 60; z += spacing) {
+      const buildingX = x + (random() - 0.5) * 30;
+      const buildingZ = z + (random() - 0.5) * 30;
+      let intensity = 0.28;
       for (const district of districtCenters) {
         const proximity = clamp(1 - Math.hypot(buildingX - district.x, buildingZ - district.z) / 1_700, 0, 1);
         intensity = Math.max(intensity, proximity * district.intensity);
       }
-      if (random() > 0.36 + intensity * 0.42) continue;
-      // Keep the central Hatirjheel fallback block and airport apron clear so
-      // immediate filler buildings never intersect them while OSM is loading.
+      if (random() > 0.58 + intensity * 0.34) continue;
+      // Keep the central Hatirjheel fallback block, Dhaka parks, and airport apron
+      // clear so immediate filler buildings never intersect them while OSM is loading.
       if (Math.abs(buildingX) < 1_090 && Math.abs(buildingZ) < 1_010) continue;
       if (inAirportClearance(buildingX, buildingZ, 40)) continue;
+      if (inDhakaPark(buildingX, buildingZ, 18)) continue;
       if (landmarkClearings.some((landmark) => Math.hypot(buildingX - landmark.x, buildingZ - landmark.z) < landmark.radius)) continue;
-      const width = 22 + random() * 30;
-      const depth = 20 + random() * 32;
+      const width = 20 + random() * 28;
+      const depth = 18 + random() * 28;
       const buildingRadius = Math.hypot(width, depth) / 2;
       const roadCellX = Math.floor(buildingX / roadCellSize);
       const roadCellZ = Math.floor(buildingZ / roadCellSize);
@@ -1770,12 +2291,13 @@ function addImmediateCityMass(scene: THREE.Scene, roads: OsmMapData["roads"]) {
         segment.z1,
         segment.x2,
         segment.z2,
-      ) < (segment.radius + buildingRadius + 6) ** 2)) continue;
+      ) < (segment.radius + buildingRadius + 4) ** 2)) continue;
+      if (metroCorridor.blocksCircle(buildingX, buildingZ, buildingRadius)) continue;
 
-      const height = 10 + random() * 30 + intensity * (24 + random() * 44);
-      const bucket = height > 52 ? 2 : height > 30 ? 1 : 0;
+      const height = 10 + random() * 26 + intensity * (24 + random() * 44);
+      const bucket = random() < 0.24 ? 2 : height > 30 ? 1 : 0;
       position.set(buildingX, height / 2 + 0.9, buildingZ);
-      quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), (random() - 0.5) * 0.16);
+      quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), (random() - 0.5) * 0.14);
       scale.set(width, height, depth);
       transforms[bucket].push(matrix.compose(position, quaternion, scale).clone());
     }
@@ -1790,6 +2312,84 @@ function addImmediateCityMass(scene: THREE.Scene, roads: OsmMapData["roads"]) {
     mesh.receiveShadow = true;
     group.add(mesh);
   });
+
+  // Immediate-load tree canopy layer (1 draw call, hidden on live reveal) so
+  // Dhaka's parks and leafy avenues read green on frame 1 while OSM builds.
+  const canopyGeometry = new THREE.IcosahedronGeometry(1, 0);
+  const canopyMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.88 });
+  const canopyPalette = [0x2d5a36, 0x3b6d3a, 0x4d7c3f, 0x618b44].map((color) => new THREE.Color(color));
+  const krishnachura = new THREE.Color(0xc84628);
+  const canopyTransforms: THREE.Matrix4[] = [];
+  const canopyColors: THREE.Color[] = [];
+  const canopyRng = seededRandom(31_907);
+  const immediateLandmarkColliders = (scene.userData.landmarkColliders as BuildingCollider[] | undefined) ?? [];
+  for (const park of DHAKA_PARKS) {
+    const count = clamp(Math.round((Math.PI * park.rx * park.rz) / 950), 16, 85);
+    for (let i = 0; i < count; i++) {
+      const radial = Math.sqrt(canopyRng()) * 0.95;
+      const angle = canopyRng() * Math.PI * 2;
+      const lx = Math.cos(angle) * radial * park.rx;
+      const lz = Math.sin(angle) * radial * park.rz;
+      const wx = park.x + lx * park.fwdCos - lz * park.fwdSin;
+      const wz = park.z + lx * park.fwdSin + lz * park.fwdCos;
+      const r = 4.6 + canopyRng() * 3.4;
+      if (inAirportClearance(wx, wz, 20) || metroCorridor.blocksCircle(wx, wz, r + 2)) continue;
+      if (immediateLandmarkColliders.some((c) => Math.abs(wx - c.x) < c.halfWidth + r + 2 && Math.abs(wz - c.z) < c.halfDepth + r + 2)) continue;
+      position.set(wx, 5.5 + r * 0.55, wz);
+      quaternion.setFromEuler(new THREE.Euler(canopyRng(), canopyRng(), canopyRng()));
+      scale.set(r, r * 0.72, r);
+      canopyTransforms.push(matrix.compose(position, quaternion, scale).clone());
+      canopyColors.push(
+        canopyRng() < 0.07
+          ? krishnachura.clone()
+          : canopyPalette[Math.floor(canopyRng() * canopyPalette.length)].clone(),
+      );
+    }
+  }
+  for (const road of roads) {
+    const isMajor = ["motorway", "trunk", "primary", "secondary"].includes(road.kind);
+    if (!isMajor) continue;
+    for (let index = 1; index < road.points.length; index++) {
+      const [x1, z1] = road.points[index - 1];
+      const [x2, z2] = road.points[index];
+      const len = Math.hypot(x2 - x1, z2 - z1);
+      if (len < 30) continue;
+      const nx = -(z2 - z1) / len;
+      const nz = (x2 - x1) / len;
+      for (let dist = 16; dist < len - 12; dist += 42) {
+        const t = dist / len;
+        const side = ((index + Math.floor(dist)) & 1) ? 1 : -1;
+        const wx = x1 + (x2 - x1) * t + nx * side * 13.5;
+        const wz = z1 + (z2 - z1) * t + nz * side * 13.5;
+        if (Math.abs(wx) > FLIGHT_EXTENT.x - 40 || Math.abs(wz) > FLIGHT_EXTENT.z - 40) continue;
+        if (inAirportClearance(wx, wz, 24) || metroCorridor.blocksCircle(wx, wz, 8)) continue;
+        if (canopyRng() > clamp(dhakaGreenWeight(wx, wz) * 0.62, 0.2, 0.85)) continue;
+        const r = 3.8 + canopyRng() * 2.4;
+        position.set(wx, 4.8 + r * 0.55, wz);
+        quaternion.setFromEuler(new THREE.Euler(canopyRng(), canopyRng(), canopyRng()));
+        scale.set(r, r * 0.72, r);
+        canopyTransforms.push(matrix.compose(position, quaternion, scale).clone());
+        canopyColors.push(
+          canopyRng() < 0.04
+            ? krishnachura.clone()
+            : canopyPalette[Math.floor(canopyRng() * canopyPalette.length)].clone(),
+        );
+      }
+    }
+  }
+  if (canopyTransforms.length > 0) {
+    const canopyMesh = new THREE.InstancedMesh(canopyGeometry, canopyMaterial, canopyTransforms.length);
+    canopyMesh.name = "Immediate Dhaka tree canopies";
+    canopyTransforms.forEach((transform, index) => {
+      canopyMesh.setMatrixAt(index, transform);
+      canopyMesh.setColorAt(index, canopyColors[index]);
+    });
+    canopyMesh.instanceMatrix.needsUpdate = true;
+    if (canopyMesh.instanceColor) canopyMesh.instanceColor.needsUpdate = true;
+    canopyMesh.castShadow = false;
+    canopyMesh.receiveShadow = true;
+    group.add(canopyMesh);
+  }
   scene.add(group);
   scene.userData.immediateCityMass = group;
   return group;
@@ -1803,23 +2403,32 @@ async function addProceduralDistrictTiles(
   isCancelled: () => boolean,
 ) {
   const tileSize = 460;
-  const visibilityRadius = 1_550;
+  const visibilityRadius = 2_250;
   const tiles: ProceduralDistrictTile[] = [];
   const colliders: BuildingCollider[] = [];
   const unitBox = new THREE.BoxGeometry(1, 1, 1);
   const roofBox = new THREE.BoxGeometry(1, 1, 1);
   const foliageGeometry = new THREE.IcosahedronGeometry(1, 1);
   const trunkGeometry = new THREE.CylinderGeometry(0.5, 0.72, 1, 6);
-  const materials = [0xc9bda3, 0xaeb8ae, 0xb9826d].map(
+  // Authentic Dhaka urban masonry & concrete palette: sun-bleached stucco,
+  // weathered grey-beige concrete, terracotta brick, warm ochre, and modern
+  // slate-grey commercial towers.
+  const materials = [0xd6cec0, 0xc5bdb2, 0xb97159, 0xd1b48f, 0x969fa8].map(
     (color) => applyNightWindows(new THREE.MeshStandardMaterial({ color, roughness: 0.9, metalness: 0.01 }), 0.5),
   );
-  const roofMaterial = new THREE.MeshStandardMaterial({ color: 0x59655f, roughness: 0.94 });
-  const trunkMaterial = new THREE.MeshStandardMaterial({ color: 0x6b5140, roughness: 1 });
-  const foliageMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1 });
-  const foliagePalette = [0x3f684a, 0x567b53, 0x7d8e59, 0x4b7452].map((color) => new THREE.Color(color));
-  const bushPalette = [0x5d8a55, 0x6f9a58, 0x4e7d4f].map((color) => new THREE.Color(color));
-  const treePerchGrid = (scene.userData.treePerchGrid as Map<string, Perch[]> | undefined) ?? new Map<string, Perch[]>();
-  scene.userData.treePerchGrid = treePerchGrid;
+  const roofMaterial = new THREE.MeshStandardMaterial({ color: 0x7c7770, roughness: 0.94 });
+  const trunkMaterial = new THREE.MeshStandardMaterial({ color: 0x5d4739, roughness: 1 });
+  const foliageMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.86 });
+  // Tropical Dhaka canopy palette: mango/banyan shade, mahogany, kadam, koroi,
+  // roadside olive, plus flowering Krishnachura, Radhachura, Jarul, and rooftop plants.
+  const foliagePalette = [0x2d5a36, 0x3b6d3a, 0x4d7c3f, 0x618b44, 0x466844].map((color) => new THREE.Color(color));
+  const krishnachuraColor = new THREE.Color(0xc84628);
+  const radhachuraColor = new THREE.Color(0xd49b2a);
+  const jarulColor = new THREE.Color(0x865494);
+  const rooftopGardenPalette = [0x4a7840, 0x5d8a48, 0x3d683b].map((color) => new THREE.Color(color));
+  const bougainvilleaColor = new THREE.Color(0xa83e6c);
+  const bushPalette = [0x3d633b, 0x4e7542, 0x335536].map((color) => new THREE.Color(color));
+  const treePerchGrid = new Map<string, Perch[]>();
   const registerTreePerch = (perch: Perch) => {
     const key = `${Math.floor(perch.position.x / TREE_PERCH_CELL_SIZE)}:${Math.floor(perch.position.z / TREE_PERCH_CELL_SIZE)}`;
     const bucket = treePerchGrid.get(key);
@@ -1827,12 +2436,16 @@ async function addProceduralDistrictTiles(
     else treePerchGrid.set(key, [perch]);
   };
   const majorRoads = new Set(["motorway", "trunk", "primary", "secondary"]);
-  type AvoidanceSegment = { x1: number; z1: number; x2: number; z2: number; radius: number };
+  type AvoidanceSegment = { x1: number; z1: number; x2: number; z2: number; radius: number; asphaltHalf?: number };
+  type TileRoadSegment = { x1: number; z1: number; x2: number; z2: number; length: number; asphaltHalf: number; major: boolean };
+  type TileShoreSegment = { x1: number; z1: number; x2: number; z2: number; length: number };
   const spatialCellSize = 180;
   const roadGrid = new Map<string, AvoidanceSegment[]>();
   const waterGrid = new Map<string, AvoidanceSegment[]>();
   const waterAreaGrid = new Map<string, MapPoint[][]>();
   const colliderGrid = new Map<string, BuildingCollider[]>();
+  const tileRoadSegments = new Map<string, TileRoadSegment[]>();
+  const tileShoreSegments = new Map<string, TileShoreSegment[]>();
   const yieldIfNeeded = createMainThreadYielder();
   const roads = data.roads.length > 0 ? data.roads : proceduralFallbackRoads();
   const spatialKey = (cellX: number, cellZ: number) => `${cellX}:${cellZ}`;
@@ -1846,13 +2459,35 @@ async function addProceduralDistrictTiles(
       }
     }
   };
+  const addToTileSpan = <T,>(grid: Map<string, T[]>, item: T, x1: number, z1: number, x2: number, z2: number, pad = 18) => {
+    const minTX = Math.round((Math.min(x1, x2) - pad) / tileSize);
+    const maxTX = Math.round((Math.max(x1, x2) + pad) / tileSize);
+    const minTZ = Math.round((Math.min(z1, z2) - pad) / tileSize);
+    const maxTZ = Math.round((Math.max(z1, z2) + pad) / tileSize);
+    for (let tx = minTX; tx <= maxTX; tx++) {
+      for (let tz = minTZ; tz <= maxTZ; tz++) {
+        const key = spatialKey(tx, tz);
+        const entries = grid.get(key);
+        if (entries) entries.push(item);
+        else grid.set(key, [item]);
+      }
+    }
+  };
   for (const road of roads) {
-    const radius = majorRoads.has(road.kind) ? 15 : road.kind === "service" ? 6 : 9;
+    const isMajor = majorRoads.has(road.kind);
+    const radius = isMajor ? 15 : road.kind === "service" ? 6 : 9;
+    const asphaltHalf = isMajor
+      ? (road.kind === "motorway" || road.kind === "trunk" ? 8.5 : 7.0)
+      : road.kind === "service" ? 2.1 : 3.75;
     for (let index = 1; index < road.points.length; index++) {
       const [x1, z1] = road.points[index - 1];
       const [x2, z2] = road.points[index];
-      const segment = { x1, z1, x2, z2, radius };
+      const segment = { x1, z1, x2, z2, radius, asphaltHalf };
       addToGrid(roadGrid, segment, Math.min(x1, x2) - 42, Math.max(x1, x2) + 42, Math.min(z1, z2) - 42, Math.max(z1, z2) + 42);
+      const length = Math.hypot(x2 - x1, z2 - z1);
+      if (length >= 18) {
+        addToTileSpan(tileRoadSegments, { x1, z1, x2, z2, length, asphaltHalf, major: isMajor }, x1, z1, x2, z2, asphaltHalf + 8);
+      }
     }
     await yieldIfNeeded(isCancelled);
   }
@@ -1864,16 +2499,25 @@ async function addProceduralDistrictTiles(
     scene.userData.proceduralRoadFallback = roadFallback;
   }
   for (const feature of data.water) {
+    let isMajorWaterBody = false;
     if (feature.area && feature.points.length >= 3) {
       const xs = feature.points.map(([x]) => x);
       const zs = feature.points.map(([, z]) => z);
       addToGrid(waterAreaGrid, feature.points, Math.min(...xs), Math.max(...xs), Math.min(...zs), Math.max(...zs));
+      isMajorWaterBody = polygonArea2D(feature.points) >= 3_500;
     }
-    for (let index = 1; index < feature.points.length; index++) {
-      const [x1, z1] = feature.points[index - 1];
-      const [x2, z2] = feature.points[index];
+    const edgeCount = feature.area && feature.points.length >= 3 ? feature.points.length : feature.points.length - 1;
+    for (let index = 0; index < edgeCount; index++) {
+      const [x1, z1] = feature.points[index];
+      const [x2, z2] = feature.points[(index + 1) % feature.points.length];
       const segment = { x1, z1, x2, z2, radius: 10 };
       addToGrid(waterGrid, segment, Math.min(x1, x2) - 46, Math.max(x1, x2) + 46, Math.min(z1, z2) - 46, Math.max(z1, z2) + 46);
+      if (isMajorWaterBody) {
+        const length = Math.hypot(x2 - x1, z2 - z1);
+        if (length >= 14) {
+          addToTileSpan(tileShoreSegments, { x1, z1, x2, z2, length }, x1, z1, x2, z2, 14);
+        }
+      }
     }
     await yieldIfNeeded(isCancelled);
   }
@@ -1893,8 +2537,10 @@ async function addProceduralDistrictTiles(
     return { x: world.x, z: world.y, intensity: clamp(landmark.altitude / 82, 0.45, 1.1) };
   });
 
+  const metroCorridor = createMetroCorridor(data.metroLines, data.metroStations);
   const blockedByMap = (x: number, z: number, halfWidth: number, halfDepth: number) => {
     if (inAirportClearance(x, z, Math.max(halfWidth, halfDepth) + 12)) return true;
+    if (metroCorridor.blocksCircle(x, z, Math.hypot(halfWidth, halfDepth))) return true;
     const key = spatialKey(Math.floor(x / spatialCellSize), Math.floor(z / spatialCellSize));
     if ((waterAreaGrid.get(key) ?? []).some((points) => pointInPolygon(x, z, points))) return true;
     const waterClearance = Math.max(halfWidth, halfDepth) + 10;
@@ -1906,6 +2552,34 @@ async function addProceduralDistrictTiles(
     return (colliderGrid.get(key) ?? []).some((collider) => (
       Math.abs(x - collider.x) < halfWidth + collider.halfWidth + 4 &&
       Math.abs(z - collider.z) < halfDepth + collider.halfDepth + 4
+    ));
+  };
+
+  // Dedicated tree clearance: allows trunks right on sidewalks/shoulders and
+  // lake embankments while keeping them out of asphalt, water bodies, metro
+  // viaducts, airports, and building interiors.
+  const pointInWaterArea = (x: number, z: number) => {
+    const key = spatialKey(Math.floor(x / spatialCellSize), Math.floor(z / spatialCellSize));
+    return (waterAreaGrid.get(key) ?? []).some((points) => pointInPolygon(x, z, points));
+  };
+  const treeBlockedByMap = (x: number, z: number, canopyRadius: number) => {
+    if (Math.abs(x) > FLIGHT_EXTENT.x - 16 || Math.abs(z) > FLIGHT_EXTENT.z - 16) return true;
+    if (inAirportClearance(x, z, canopyRadius + 8)) return true;
+    if (metroCorridor.blocksCircle(x, z, canopyRadius * 0.75)) return true;
+    const key = spatialKey(Math.floor(x / spatialCellSize), Math.floor(z / spatialCellSize));
+    if ((waterAreaGrid.get(key) ?? []).some((points) => pointInPolygon(x, z, points))) return true;
+    // Keep trunks slightly back from narrow canal/khal centerlines while letting
+    // embankment trees stand close to lakeshores.
+    const waterMargin = 3.2;
+    if ((waterGrid.get(key) ?? []).some((segment) => distanceToSegmentSquared(x, z, segment.x1, segment.z1, segment.x2, segment.z2) < waterMargin ** 2)) return true;
+    for (const segment of roadGrid.get(key) ?? []) {
+      const asphaltMargin = (segment.asphaltHalf ?? segment.radius * 0.5) + 1.2;
+      if (distanceToSegmentSquared(x, z, segment.x1, segment.z1, segment.x2, segment.z2) < asphaltMargin ** 2) return true;
+    }
+    const wallClearance = Math.max(1.4, canopyRadius * 0.42);
+    return (colliderGrid.get(key) ?? []).some((collider) => (
+      Math.abs(x - collider.x) < collider.halfWidth + wallClearance &&
+      Math.abs(z - collider.z) < collider.halfDepth + wallClearance
     ));
   };
 
@@ -1947,98 +2621,160 @@ async function addProceduralDistrictTiles(
     Math.hypot(a.tileX * tileSize - initialPosition.x, a.tileZ * tileSize - initialPosition.z) -
     Math.hypot(b.tileX * tileSize - initialPosition.x, b.tileZ * tileSize - initialPosition.z)
   ));
-  scene.userData.proceduralDistrictTiles = tiles;
 
   for (const { tileX, tileZ } of tileCoordinates) {
       const random = coordinateRandom(tileX, tileZ);
+      const vegRandom = coordinateRandom(tileX + 7_919, tileZ - 6_151);
       const centerX = tileX * tileSize;
       const centerZ = tileZ * tileSize;
       if (Math.abs(centerX) > FLIGHT_EXTENT.x + tileSize / 2 || Math.abs(centerZ) > FLIGHT_EXTENT.z + tileSize / 2) continue;
-      const transforms: THREE.Matrix4[][] = [[], [], []];
+      const transforms: THREE.Matrix4[][] = [[], [], [], [], []];
       const roofTransforms: THREE.Matrix4[] = [];
       const trunkTransforms: THREE.Matrix4[] = [];
       const foliageTransforms: THREE.Matrix4[] = [];
       const foliageColors: THREE.Color[] = [];
       const tileColliders: BuildingCollider[] = [];
-      let tileIntensity = 0.2;
+      const rooftopGardenCandidates: Array<{ x: number; z: number; width: number; depth: number; topY: number; heading: number; stairX: number; stairZ: number }> = [];
+      let tileIntensity = 0.24;
       for (const district of districtCenters) {
         const proximity = clamp(1 - Math.hypot(centerX - district.x, centerZ - district.z) / 1_350, 0, 1);
         tileIntensity = Math.max(tileIntensity, proximity * district.intensity);
       }
-      // These are placement attempts rather than guaranteed buildings. Dense, compact lots
-      // survive the road/water/OSM rejection pass and still render in only a few draw calls.
-      const targetBuildings = 52 + Math.floor(tileIntensity * 34 + random() * 14);
+      const greenWeight = dhakaGreenWeight(centerX, centerZ);
+      // Dense Dhaka urban fabric: tight concrete and brick lots packed shoulder
+      // to shoulder, still rendered in just five instanced meshes per tile.
+      const targetBuildings = 135 + Math.floor(tileIntensity * 105 + random() * 30);
 
       for (let index = 0; index < targetBuildings; index++) {
-        const x = centerX + (random() - 0.5) * (tileSize - 44);
-        const z = centerZ + (random() - 0.5) * (tileSize - 44);
-        const width = 9 + random() * 17;
-        const depth = 10 + random() * 18;
+        const x = centerX + (random() - 0.5) * (tileSize - 32);
+        const z = centerZ + (random() - 0.5) * (tileSize - 32);
+        const width = 10 + random() * 18;
+        const depth = 10 + random() * 19;
         const halfWidth = width / 2;
         const halfDepth = depth / 2;
         if (Math.abs(x) > FLIGHT_EXTENT.x - halfWidth || Math.abs(z) > FLIGHT_EXTENT.z - halfDepth) continue;
+        if (inDhakaPark(x, z, Math.max(halfWidth, halfDepth) + 6)) continue;
         if (blockedByMap(x, z, halfWidth, halfDepth)) continue;
         if (tileColliders.some((collider) => (
-          Math.abs(x - collider.x) < halfWidth + collider.halfWidth + 3.5 &&
-          Math.abs(z - collider.z) < halfDepth + collider.halfDepth + 3.5
+          Math.abs(x - collider.x) < halfWidth + collider.halfWidth + 1.8 &&
+          Math.abs(z - collider.z) < halfDepth + collider.halfDepth + 1.8
         ))) continue;
-        let districtInfluence = 0.18;
+        let districtInfluence = 0.2;
         for (const district of districtCenters) {
           const proximity = clamp(1 - Math.hypot(x - district.x, z - district.z) / 1_150, 0, 1);
           districtInfluence = Math.max(districtInfluence, proximity * district.intensity);
         }
         const floors = 2 + Math.floor(random() * 5 + districtInfluence * 9);
         const height = floors * (2.95 + random() * 0.38);
-        const bucket = height > 34 ? 2 : height > 20 ? 1 : 0;
+        const shadeRoll = random();
+        const bucket = height > 34
+          ? (shadeRoll < 0.36 ? 4 : shadeRoll < 0.72 ? 0 : 1)
+          : shadeRoll < 0.30
+            ? 0
+            : shadeRoll < 0.56
+              ? 1
+              : shadeRoll < 0.78
+                ? 2
+                : 3;
         const streetHeading = roadHeadingAt(x, z);
-        quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), streetHeading + (random() - 0.5) * 0.055);
+        const yaw = streetHeading + (random() - 0.5) * 0.055;
+        quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
         position.set(x, height / 2 + 0.92, z);
         scale.set(width, height, depth);
         transforms[bucket].push(matrix.compose(position, quaternion, scale).clone());
         const collider = { x, z, halfWidth, halfDepth, top: height + 0.92 };
         tileColliders.push(collider);
         colliders.push(collider);
-        if (height > 25 && random() > 0.34) {
-          const roofHeight = 2.6 + random() * 3.2;
-          position.set(x + (random() - 0.5) * width * 0.22, height + roofHeight / 2 + 0.92, z + (random() - 0.5) * depth * 0.22);
-          scale.set(width * (0.18 + random() * 0.18), roofHeight, depth * (0.2 + random() * 0.18));
+        let stairX = 0;
+        let stairZ = 0;
+        if (height > 14 && random() > 0.32) {
+          const roofHeight = 2.4 + random() * 3.0;
+          stairX = (random() - 0.5) * width * 0.24;
+          stairZ = (random() - 0.5) * depth * 0.24;
+          const cosY = Math.cos(-yaw);
+          const sinY = Math.sin(-yaw);
+          position.set(
+            x + stairX * cosY - stairZ * sinY,
+            height + roofHeight / 2 + 0.92,
+            z + stairX * sinY + stairZ * cosY,
+          );
+          scale.set(width * (0.2 + random() * 0.18), roofHeight, depth * (0.2 + random() * 0.18));
           roofTransforms.push(matrix.compose(position, quaternion, scale).clone());
+        }
+        if (height >= 10 && height <= 46 && width >= 12 && depth >= 12) {
+          rooftopGardenCandidates.push({ x, z, width, depth, topY: height + 0.92, heading: yaw, stairX, stairZ });
         }
       }
 
-      // Full trees: trunk + clustered canopy blobs, each registering a treetop
-      // perch so the bird can land anywhere in the city, not just at landmarks.
-      const targetTrees = 8 + Math.floor(random() * 6 + tileIntensity * 5);
-      for (let index = 0; index < targetTrees; index++) {
-        const x = centerX + (random() - 0.5) * (tileSize - 34);
-        const z = centerZ + (random() - 0.5) * (tileSize - 34);
-        const canopyRadius = 2.9 + random() * 2.4;
-        if (blockedByMap(x, z, canopyRadius + 1.5, canopyRadius + 1.5)) continue;
-        if (tileColliders.some((collider) => Math.abs(x - collider.x) < collider.halfWidth + canopyRadius && Math.abs(z - collider.z) < collider.halfDepth + canopyRadius)) continue;
-        const trunkHeight = 7 + random() * 4.5;
-        const trunkThickness = 0.65 + random() * 0.4;
-        quaternion.setFromEuler(new THREE.Euler((random() - 0.5) * 0.09, random() * Math.PI, (random() - 0.5) * 0.09));
+      // Structured Dhaka urban greenery: park groves, lakeside embankments,
+      // tree-lined avenues, courtyard pockets, and rooftop chhad-bagan gardens.
+      const treeSpots: Array<{ x: number; z: number; minSep: number }> = [];
+      const pickCanopyShade = (tier: "park" | "lakeside" | "avenue" | "courtyard") => {
+        const flowerRoll = vegRandom();
+        if (tier === "park" || tier === "lakeside") {
+          if (flowerRoll < 0.07) return krishnachuraColor;
+          if (flowerRoll < 0.105) return radhachuraColor;
+          if (flowerRoll < 0.125) return jarulColor;
+        } else if (tier === "avenue") {
+          if (flowerRoll < 0.045) return krishnachuraColor;
+          if (flowerRoll < 0.07) return radhachuraColor;
+        } else if (flowerRoll < 0.02) {
+          return krishnachuraColor;
+        }
+        return foliagePalette[Math.floor(vegRandom() * foliagePalette.length)];
+      };
+
+      const placeTree = (x: number, z: number, tier: "park" | "lakeside" | "avenue" | "courtyard") => {
+        const canopyRadius = tier === "park"
+          ? 4.0 + vegRandom() * 3.0
+          : tier === "lakeside" || tier === "avenue"
+            ? 3.2 + vegRandom() * 2.2
+            : 2.7 + vegRandom() * 1.9;
+        const minSep = tier === "park" ? canopyRadius * 1.35 : canopyRadius * 1.45;
+        if (treeSpots.some((spot) => {
+          const sep = Math.max(minSep, spot.minSep) * 0.85;
+          return (x - spot.x) ** 2 + (z - spot.z) ** 2 < sep * sep;
+        })) return false;
+        if (treeBlockedByMap(x, z, canopyRadius)) return false;
+        const wallClearance = Math.max(1.4, canopyRadius * 0.42);
+        if (tileColliders.some((collider) => (
+          Math.abs(x - collider.x) < collider.halfWidth + wallClearance &&
+          Math.abs(z - collider.z) < collider.halfDepth + wallClearance
+        ))) return false;
+
+        treeSpots.push({ x, z, minSep });
+        const trunkHeight = tier === "park"
+          ? 6.2 + vegRandom() * 4.0
+          : tier === "lakeside" || tier === "avenue"
+            ? 5.4 + vegRandom() * 3.2
+            : 4.8 + vegRandom() * 3.0;
+        const trunkThickness = tier === "park" ? 0.62 + vegRandom() * 0.36 : 0.5 + vegRandom() * 0.3;
+        quaternion.setFromEuler(new THREE.Euler((vegRandom() - 0.5) * 0.08, vegRandom() * Math.PI, (vegRandom() - 0.5) * 0.08));
         position.set(x, trunkHeight / 2 + 0.92, z);
         scale.set(trunkThickness, trunkHeight, trunkThickness);
         trunkTransforms.push(matrix.compose(position, quaternion, scale).clone());
         const crownBase = trunkHeight + 0.92;
-        const shade = foliagePalette[Math.floor(random() * foliagePalette.length)];
-        const blobCount = 2 + Math.floor(random() * 3);
+        const shade = pickCanopyShade(tier);
+        const blobCount = tier === "park"
+          ? 2 + Math.floor(vegRandom() * 2)
+          : tier === "courtyard"
+            ? (canopyRadius > 3.5 ? 2 : 1)
+            : 2;
         let crownTop = crownBase;
         for (let blob = 0; blob < blobCount; blob++) {
-          const spread = blob === 0 ? 0 : canopyRadius * (0.35 + random() * 0.5);
-          const angle = random() * Math.PI * 2;
-          const blobRadius = canopyRadius * (blob === 0 ? 1 : 0.55 + random() * 0.35);
-          const blobHeight = blobRadius * (0.82 + random() * 0.3);
+          const spread = blob === 0 ? 0 : canopyRadius * (0.34 + vegRandom() * 0.42);
+          const angle = vegRandom() * Math.PI * 2;
+          const blobRadius = canopyRadius * (blob === 0 ? 1 : 0.62 + vegRandom() * 0.28);
+          const blobHeight = blobRadius * (0.62 + vegRandom() * 0.24);
           position.set(
             x + Math.cos(angle) * spread,
-            crownBase + (blob === 0 ? blobRadius * 0.55 : blobRadius * (0.2 + random() * 0.75)),
+            crownBase + (blob === 0 ? blobRadius * 0.48 : blobRadius * (0.2 + vegRandom() * 0.55)),
             z + Math.sin(angle) * spread,
           );
-          quaternion.setFromEuler(new THREE.Euler(random(), random(), random()));
+          quaternion.setFromEuler(new THREE.Euler(vegRandom(), vegRandom(), vegRandom()));
           scale.set(blobRadius, blobHeight, blobRadius);
           foliageTransforms.push(matrix.compose(position, quaternion, scale).clone());
-          foliageColors.push(shade.clone().offsetHSL((random() - 0.5) * 0.02, (random() - 0.5) * 0.08, (random() - 0.5) * 0.05));
+          foliageColors.push(shade.clone().offsetHSL((vegRandom() - 0.5) * 0.02, (vegRandom() - 0.5) * 0.07, (vegRandom() - 0.5) * 0.05));
           crownTop = Math.max(crownTop, position.y + blobHeight * 0.8);
         }
         registerTreePerch({
@@ -2047,21 +2783,159 @@ async function addProceduralDistrictTiles(
           heading: 0,
           kind: "tree",
         });
+        return true;
+      };
+
+      // Pass 1: Direct park-coordinate sampling so every Dhaka park (even compact
+      // ones like Shahabuddin Park or Baldha Garden) gets lush woodland regardless
+      // of tile alignment, while keeping footpath loops clear on larger parks.
+      for (let parkIndex = 0; parkIndex < DHAKA_PARKS.length; parkIndex++) {
+        const park = DHAKA_PARKS[parkIndex];
+        if (
+          Math.abs(centerX - park.x) > tileSize * 0.65 + park.rx
+          || Math.abs(centerZ - park.z) > tileSize * 0.65 + park.rz
+        ) continue;
+        const pRng = seededRandom(41_017 + parkIndex * 977);
+        const parkTreeTotal = clamp(Math.round((Math.PI * park.rx * park.rz) / 440), 28, 175);
+        const hasLoop = park.hasLoop;
+        for (let i = 0; i < parkTreeTotal; i++) {
+          const radial = Math.sqrt(pRng()) * 0.96;
+          const angle = pRng() * Math.PI * 2;
+          if (hasLoop && radial > 0.63 && radial < 0.74) continue;
+          const lx = Math.cos(angle) * radial * (park.rx - 4);
+          const lz = Math.sin(angle) * radial * (park.rz - 4);
+          const px = park.x + lx * park.fwdCos - lz * park.fwdSin;
+          const pz = park.z + lx * park.fwdSin + lz * park.fwdCos;
+          if (Math.round(px / tileSize) !== tileX || Math.round(pz / tileSize) !== tileZ) continue;
+          placeTree(px, pz, "park");
+        }
+        const parkBushTotal = Math.round(parkTreeTotal * 0.35);
+        for (let i = 0; i < parkBushTotal; i++) {
+          const radial = Math.sqrt(pRng()) * 0.95;
+          const angle = pRng() * Math.PI * 2;
+          if (hasLoop && radial > 0.64 && radial < 0.73) continue;
+          const lx = Math.cos(angle) * radial * (park.rx - 4);
+          const lz = Math.sin(angle) * radial * (park.rz - 4);
+          const px = park.x + lx * park.fwdCos - lz * park.fwdSin;
+          const pz = park.z + lx * park.fwdSin + lz * park.fwdCos;
+          if (Math.round(px / tileSize) !== tileX || Math.round(pz / tileSize) !== tileZ) continue;
+          const radius = 1.0 + pRng() * 1.4;
+          if (treeBlockedByMap(px, pz, radius)) continue;
+          quaternion.setFromEuler(new THREE.Euler(pRng(), pRng(), pRng()));
+          position.set(px, 0.92 + radius * 0.5, pz);
+          scale.set(radius, radius * (0.65 + pRng() * 0.32), radius);
+          foliageTransforms.push(matrix.compose(position, quaternion, scale).clone());
+          foliageColors.push(bushPalette[Math.floor(pRng() * bushPalette.length)].clone().offsetHSL(0, (pRng() - 0.5) * 0.05, (pRng() - 0.5) * 0.04));
+        }
       }
 
-      // Ground foliage: low bushes and shrubs scattered between the lots.
-      const targetBushes = 8 + Math.floor(random() * 9);
-      for (let index = 0; index < targetBushes; index++) {
-        const x = centerX + (random() - 0.5) * (tileSize - 24);
-        const z = centerZ + (random() - 0.5) * (tileSize - 24);
-        const radius = 0.9 + random() * 1.6;
-        if (blockedByMap(x, z, radius + 0.8, radius + 0.8)) continue;
-        if (tileColliders.some((collider) => Math.abs(x - collider.x) < collider.halfWidth + radius && Math.abs(z - collider.z) < collider.halfDepth + radius)) continue;
-        quaternion.setFromEuler(new THREE.Euler(random(), random(), random()));
-        position.set(x, 0.92 + radius * 0.55, z);
-        scale.set(radius, radius * (0.7 + random() * 0.4), radius);
-        foliageTransforms.push(matrix.compose(position, quaternion, scale).clone());
-        foliageColors.push(bushPalette[Math.floor(random() * bushPalette.length)].clone().offsetHSL(0, (random() - 0.5) * 0.06, (random() - 0.5) * 0.05));
+      const outerTaper = (Math.abs(centerX) > 7_800 || Math.abs(centerZ) > 9_800) ? 0.5 : 1;
+      const tileKey = spatialKey(tileX, tileZ);
+
+      // Pass 2: Lakeside & riverbank embankments (Hatirjheel, Dhanmondi Lake,
+      // Gulshan-Banani Lake, Crescent Lake, and major water edges).
+      const shoreSegments = tileShoreSegments.get(tileKey);
+      if (shoreSegments && shoreSegments.length > 0) {
+        let shoreTreesPlaced = 0;
+        const shoreCap = Math.round(26 * outerTaper);
+        const shoreStep = 23 / clamp(greenWeight, 0.6, 1.4);
+        for (const seg of shoreSegments) {
+          if (shoreTreesPlaced >= shoreCap) break;
+          const nx = -(seg.z2 - seg.z1) / seg.length;
+          const nz = (seg.x2 - seg.x1) / seg.length;
+          for (let dist = 8 + vegRandom() * 8; dist < seg.length - 6 && shoreTreesPlaced < shoreCap; dist += shoreStep * (0.75 + vegRandom() * 0.55)) {
+            const t = dist / seg.length;
+            const mx = seg.x1 + (seg.x2 - seg.x1) * t;
+            const mz = seg.z1 + (seg.z2 - seg.z1) * t;
+            const bankOffset = 5.5 + vegRandom() * 5.0;
+            const posInWater = pointInWaterArea(mx + nx * bankOffset, mz + nz * bankOffset);
+            const negInWater = pointInWaterArea(mx - nx * bankOffset, mz - nz * bankOffset);
+            if (posInWater === negInWater) continue;
+            const side = posInWater ? -1 : 1;
+            const tx = mx + nx * side * bankOffset;
+            const tz = mz + nz * side * bankOffset;
+            if (Math.round(tx / tileSize) !== tileX || Math.round(tz / tileSize) !== tileZ) continue;
+            if (placeTree(tx, tz, "lakeside")) {
+              shoreTreesPlaced++;
+            }
+          }
+        }
+      }
+
+      // Pass 3: Tree-lined avenues & boulevards in natural clusters along road
+      // shoulders (dense in Ramna/DU/Dhanmondi/Gulshan, sparse in Old Dhaka).
+      const roadSegments = tileRoadSegments.get(tileKey);
+      if (roadSegments && roadSegments.length > 0) {
+        let avenueTreesPlaced = 0;
+        const avenueCap = Math.round(clamp(16 * greenWeight, 5, 24) * outerTaper);
+        for (const seg of roadSegments) {
+          if (avenueTreesPlaced >= avenueCap) break;
+          const baseStep = (seg.major ? 28 : 42) / clamp(greenWeight, 0.35, 1.55);
+          const nx = -(seg.z2 - seg.z1) / seg.length;
+          const nz = (seg.x2 - seg.x1) / seg.length;
+          let side = vegRandom() < 0.5 ? 1 : -1;
+          let clusterRemaining = 3 + Math.floor(vegRandom() * 4);
+          let dist = 8 + vegRandom() * 12;
+          while (dist < seg.length - 6 && avenueTreesPlaced < avenueCap) {
+            const t = dist / seg.length;
+            const offset = seg.asphaltHalf + 2.3 + vegRandom() * 2.2;
+            const tx = seg.x1 + (seg.x2 - seg.x1) * t + nx * side * offset;
+            const tz = seg.z1 + (seg.z2 - seg.z1) * t + nz * side * offset;
+            if (Math.round(tx / tileSize) === tileX && Math.round(tz / tileSize) === tileZ && placeTree(tx, tz, "avenue")) {
+              avenueTreesPlaced++;
+            }
+            clusterRemaining--;
+            if (clusterRemaining <= 0) {
+              dist += baseStep * (1.8 + vegRandom() * 1.1);
+              side = -side;
+              clusterRemaining = 3 + Math.floor(vegRandom() * 4);
+            } else {
+              dist += baseStep * (0.7 + vegRandom() * 0.45);
+            }
+          }
+        }
+      }
+
+      // Pass 4: Courtyard & compound pocket trees (with up to 4 retries per tree)
+      // scaled by neighborhood greenness so leafy neighborhoods feel distinct from
+      // Old Dhaka and Motijheel while keeping treetop perches available citywide.
+      const targetCourtyardTrees = Math.max(2, Math.round((9 + vegRandom() * 5) * greenWeight * outerTaper));
+      for (let index = 0; index < targetCourtyardTrees; index++) {
+        for (let attempt = 0; attempt < 4; attempt++) {
+          const x = centerX + (vegRandom() - 0.5) * (tileSize - 32);
+          const z = centerZ + (vegRandom() - 0.5) * (tileSize - 32);
+          if (placeTree(x, z, inDhakaPark(x, z) ? "park" : "courtyard")) break;
+        }
+      }
+
+      // Pass 5: Dhaka chhad-bagan (rooftop gardens) along flat residential roofs —
+      // reuses the tile's foliage InstancedMesh (0 extra draw calls, no perches).
+      const gardenChance = clamp(0.06 + 0.13 * greenWeight, 0.07, 0.24);
+      for (const roof of rooftopGardenCandidates) {
+        if (vegRandom() > gardenChance) continue;
+        const cosH = Math.cos(-roof.heading);
+        const sinH = Math.sin(-roof.heading);
+        const edgeSide = vegRandom() < 0.5 ? -1 : 1;
+        const alongX = vegRandom() < 0.5;
+        const shrubCount = 2 + Math.floor(vegRandom() * 3);
+        for (let s = 0; s < shrubCount; s++) {
+          const frac = shrubCount === 1 ? 0 : (s / (shrubCount - 1) - 0.5) * 0.62;
+          const localX = alongX ? frac * roof.width : edgeSide * (roof.width * 0.34);
+          const localZ = alongX ? edgeSide * (roof.depth * 0.34) : frac * roof.depth;
+          if (Math.hypot(localX - roof.stairX, localZ - roof.stairZ) < 3.0) continue;
+          const wx = roof.x + localX * cosH - localZ * sinH;
+          const wz = roof.z + localX * sinH + localZ * cosH;
+          const r = 0.85 + vegRandom() * 0.75;
+          const h = r * (0.58 + vegRandom() * 0.28);
+          quaternion.setFromEuler(new THREE.Euler(vegRandom(), vegRandom(), vegRandom()));
+          position.set(wx, roof.topY + h * 0.5, wz);
+          scale.set(r, h, r);
+          foliageTransforms.push(matrix.compose(position, quaternion, scale).clone());
+          const plantShade = vegRandom() < 0.06
+            ? bougainvilleaColor
+            : rooftopGardenPalette[Math.floor(vegRandom() * rooftopGardenPalette.length)];
+          foliageColors.push(plantShade.clone().offsetHSL((vegRandom() - 0.5) * 0.02, (vegRandom() - 0.5) * 0.06, (vegRandom() - 0.5) * 0.05));
+        }
       }
 
       const group = new THREE.Group();
@@ -2071,7 +2945,7 @@ async function addProceduralDistrictTiles(
         const mesh = new THREE.InstancedMesh(unitBox, materials[bucket], bucketTransforms.length);
         bucketTransforms.forEach((transform, index) => mesh.setMatrixAt(index, transform));
         mesh.instanceMatrix.needsUpdate = true;
-        mesh.castShadow = bucket === 2;
+        mesh.castShadow = bucket === 2 || bucket === 4;
         mesh.receiveShadow = true;
         group.add(mesh);
       });
@@ -2086,7 +2960,7 @@ async function addProceduralDistrictTiles(
         const trunks = new THREE.InstancedMesh(trunkGeometry, trunkMaterial, trunkTransforms.length);
         trunkTransforms.forEach((transform, index) => trunks.setMatrixAt(index, transform));
         trunks.instanceMatrix.needsUpdate = true;
-        trunks.castShadow = true;
+        trunks.castShadow = false;
         group.add(trunks);
       }
       if (foliageTransforms.length > 0) {
@@ -2106,22 +2980,41 @@ async function addProceduralDistrictTiles(
         await yieldIfNeeded(isCancelled);
         continue;
       }
-      // Hidden tiles stay out of the scene graph entirely. There are thousands
-      // of them, and three.js walks every attached object each frame whether or
-      // not it is visible.
-      group.visible = Math.hypot(centerX - initialPosition.x, centerZ - initialPosition.z) < visibilityRadius;
+      // Keep all tiles detached until the caller swaps the collision grid and
+      // reveals the finished district layer in the same frame.
+      group.visible = false;
       group.updateMatrixWorld(true);
       group.traverse((object) => { object.matrixAutoUpdate = false; });
-      if (group.visible) scene.add(group);
       tiles.push({ group, centerX, centerZ, colliders: tileColliders });
       await yieldIfNeeded(isCancelled);
   }
-  scene.userData.proceduralTileVisibilityRadius = visibilityRadius;
-  const immediateCityMass = scene.userData.immediateCityMass as THREE.Group | undefined;
-  if (immediateCityMass) immediateCityMass.visible = false;
-  const roadFallback = scene.userData.proceduralRoadFallback as THREE.Group | undefined;
-  if (roadFallback && data.roads.length > 0) roadFallback.visible = false;
-  return colliders;
+  const reveal = (anchor: THREE.Vector3) => {
+    const visibilitySquared = visibilityRadius ** 2;
+    for (const tile of tiles) {
+      const visible = (tile.centerX - anchor.x) ** 2 + (tile.centerZ - anchor.z) ** 2 < visibilitySquared;
+      tile.group.visible = visible;
+      if (visible) scene.add(tile.group);
+    }
+    scene.userData.proceduralDistrictTiles = tiles;
+    scene.userData.proceduralTileVisibilityRadius = visibilityRadius;
+    scene.userData.treePerchGrid = treePerchGrid;
+    const immediateCityMass = scene.userData.immediateCityMass as THREE.Group | undefined;
+    if (immediateCityMass) immediateCityMass.visible = false;
+    const roadFallback = scene.userData.proceduralRoadFallback as THREE.Group | undefined;
+    if (roadFallback && data.roads.length > 0) roadFallback.visible = false;
+  };
+  const dispose = () => {
+    for (const tile of tiles) scene.remove(tile.group);
+    unitBox.dispose();
+    roofBox.dispose();
+    foliageGeometry.dispose();
+    trunkGeometry.dispose();
+    materials.forEach((material) => material.dispose());
+    roofMaterial.dispose();
+    trunkMaterial.dispose();
+    foliageMaterial.dispose();
+  };
+  return { colliders, reveal, dispose };
 }
 
 // The world's own sound: wind, wings, the city below, birds, weather. It plays
@@ -2591,10 +3484,10 @@ function createFlightAudio(): FlightAudio {
       // Standing on a perch there is only a light breeze; at a full boost or in
       // a steep dive the air roars.
       const pace = clamp(speed / BOOST_SPEED, 0, 1);
-      const dive = clamp(Math.abs(verticalSpeed) / 22, 0, 1);
-      windLowGain.gain.setTargetAtTime(0.1 + pace * 0.34, now, 0.35);
-      windAirGain.gain.setTargetAtTime(0.05 + pace * pace * 0.5 + dive * 0.14, now, 0.3);
-      windAirFilter.frequency.setTargetAtTime(1_100 + pace * 1_900 + dive * 500, now, 0.4);
+      const diveRush = clamp(-verticalSpeed / 22, 0, 1);
+      windLowGain.gain.setTargetAtTime(0.1 + pace * 0.34 + diveRush * 0.08, now, 0.35);
+      windAirGain.gain.setTargetAtTime(0.05 + pace * pace * 0.5 + diveRush * 0.2, now, 0.28);
+      windAirFilter.frequency.setTargetAtTime(1_100 + pace * 1_900 + diveRush * 780, now, 0.35);
       // The city rises to meet a low-flying bird and fades out with height.
       nearness = clamp(1 - altitude / 190, 0, 1);
       waterGain.gain.setTargetAtTime(0.012 + nearness * 0.05, now, 0.7);
@@ -2937,7 +3830,70 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
   }), 0.55);
   const ribbonGlass = nightLit(new THREE.MeshStandardMaterial({ color: 0x24434c, roughness: 0.22, metalness: 0.3 }), 0.34, 0xffd9a0);
   const atriumGlass = nightLit(new THREE.MeshPhysicalMaterial({ color: 0x4f9aa6, roughness: 0.16, metalness: 0.2, clearcoat: 0.6 }), 0.3, 0xfff0c8);
+  const beaconGlass = nightLit(new THREE.MeshPhysicalMaterial({ color: 0x9ad3dc, roughness: 0.12, metalness: 0.12, clearcoat: 0.8 }), 0.95, 0xfff3c8);
+  const landmarkBark = new THREE.MeshStandardMaterial({ color: 0x5d4739, roughness: 1 });
+  const landmarkCanopy = new THREE.MeshStandardMaterial({ color: 0x356438, roughness: 0.86 });
+  const landmarkLightCanopy = new THREE.MeshStandardMaterial({ color: 0x4f7f40, roughness: 0.86 });
+  const landmarkKrishnachura = new THREE.MeshStandardMaterial({ color: 0xc84628, roughness: 0.86 });
+  const carnivalBlue = new THREE.MeshStandardMaterial({ color: 0x2f7ea0, roughness: 0.52, metalness: 0.16 });
   const unitBox = new THREE.BoxGeometry(1, 1, 1);
+  const treeCrownGeo = new THREE.IcosahedronGeometry(1, 1);
+
+  const addLandmarkTree = (
+    parent: THREE.Object3D,
+    x: number,
+    z: number,
+    radius = 4.6,
+    trunkHeight = 6.2,
+    canopyMat: THREE.Material = landmarkCanopy,
+  ) => {
+    addCylinder(parent, 0.45, 0.7, trunkHeight, [x, trunkHeight / 2 + 0.4, z], landmarkBark, 6);
+    const crown = new THREE.Mesh(treeCrownGeo, canopyMat);
+    crown.position.set(x, trunkHeight + radius * 0.48 + 0.4, z);
+    crown.scale.set(radius, radius * 0.72, radius);
+    crown.castShadow = true;
+    crown.receiveShadow = true;
+    parent.add(crown);
+  };
+
+  const addFerrisWheel = (
+    parent: THREE.Object3D,
+    cx: number,
+    cz: number,
+    radius = 12,
+    hubY = 15,
+  ) => {
+    const wheel = new THREE.Group();
+    wheel.position.set(cx, 0, cz);
+    parent.add(wheel);
+    // Twin A-frame steel legs supporting the hub
+    for (const sideZ of [-2.4, 2.4]) {
+      for (const leg of [-1, 1]) {
+        const strut = addBox(wheel, [0.7, hubY + 2, 0.7], [leg * 3.8, hubY / 2, sideZ], whiteStone);
+        strut.rotation.z = leg * 0.26;
+      }
+    }
+    const hub = addCylinder(wheel, 1.3, 1.3, 5.4, [0, hubY, 0], monumentRed, 12);
+    hub.rotation.x = Math.PI / 2;
+    const SPOKES = 12;
+    const cabinMats = [monumentRed, accent, carnivalBlue, whiteStone];
+    for (let i = 0; i < SPOKES; i++) {
+      const a = (i / SPOKES) * Math.PI * 2;
+      const sx = Math.cos(a) * radius;
+      const sy = Math.sin(a) * radius;
+      const spoke = addBox(wheel, [radius * 2, 0.35, 0.35], [0, hubY, 0], silverPanel);
+      spoke.rotation.z = a;
+      // Rim chord segment between adjacent spokes
+      const aNext = ((i + 1) / SPOKES) * Math.PI * 2;
+      const mx = (sx + Math.cos(aNext) * radius) / 2;
+      const my = hubY + (sy + Math.sin(aNext) * radius) / 2;
+      const chordLen = 2 * radius * Math.sin(Math.PI / SPOKES);
+      const rim = addBox(wheel, [chordLen + 0.3, 0.55, 1.8], [mx, my, 0], i % 2 === 0 ? monumentRed : whiteStone);
+      rim.rotation.z = (a + aNext) / 2 + Math.PI / 2;
+      // Hanging passenger gondola
+      addBox(wheel, [2.0, 2.2, 2.1], [sx, hubY + sy - 1.3, 0], cabinMats[i % cabinMats.length]);
+    }
+  };
 
   const addBox = (
     parent: THREE.Object3D,
@@ -3239,7 +4195,7 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
     });
     for (const source of sources) {
       source.removeFromParent();
-      if (source.geometry !== unitBox) source.geometry.dispose();
+      if (source.geometry !== unitBox && source.geometry !== treeCrownGeo) source.geometry.dispose();
     }
     for (const [material, geometries] of buckets) {
       const merged = mergeGeometries(geometries, false);
@@ -3344,8 +4300,22 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
     const footprint = footprintByKind.get(landmark.kind);
     if (!footprint) {
       const center = coordinatesToWorld(landmark.lat, landmark.lon);
-      const halfWidth = landmark.kind === "airport" ? 150 : 28;
-      const halfDepth = landmark.kind === "airport" ? 85 : 22;
+      const defaultExtents: Partial<Record<DhakaLandmark["kind"], [number, number]>> = {
+        airport: [150, 85],
+        "ramna-park": [42, 42],
+        "suhrawardy-udyan": [18, 18],
+        "rabindra-sarobar": [38, 36],
+        "baldha-garden": [36, 33],
+        "botanical-garden": [54, 48],
+        "national-zoo": [60, 54],
+        "national-museum": [54, 46],
+        "liberation-museum": [44, 40],
+        "military-museum": [54, 40],
+        "science-museum": [42, 36],
+        "shishu-park": [44, 40],
+        "shishu-mela": [36, 32],
+      };
+      const [halfWidth, halfDepth] = defaultExtents[landmark.kind] ?? [28, 22];
       allBounds.set(landmark.kind, {
         minX: center.x - halfWidth,
         maxX: center.x + halfWidth,
@@ -3423,7 +4393,24 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
 
   // Landmarks with no OSM masses to align with may orient details by heading;
   // footprint-anchored details must stay in world space like the masses they decorate.
-  const proceduralKinds = new Set<DhakaLandmark["kind"]>(["shaheed-minar", "amphitheatre", "bangladesh-bank", "airport"]);
+  const proceduralKinds = new Set<DhakaLandmark["kind"]>([
+    "shaheed-minar",
+    "amphitheatre",
+    "bangladesh-bank",
+    "airport",
+    "ramna-park",
+    "suhrawardy-udyan",
+    "rabindra-sarobar",
+    "baldha-garden",
+    "botanical-garden",
+    "national-zoo",
+    "national-museum",
+    "liberation-museum",
+    "military-museum",
+    "science-museum",
+    "shishu-park",
+    "shishu-mela",
+  ]);
 
   const detailGroup = (landmark: DhakaLandmark) => {
     const bounds = allBounds.get(landmark.kind)!;
@@ -3561,12 +4548,17 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
 
   for (const landmark of DHAKA_LANDMARKS) {
     const { group, anchor, walls, slab, frame, dressTower, width, depth, top } = detailGroup(landmark);
+    const cosH = Math.cos(group.rotation.y);
+    const sinH = Math.sin(group.rotation.y);
     // Tall features that rise above the footprint's own height get their own
-    // collision column instead of lifting the whole building's.
+    // collision column (rotated into world space and lifted by group.position.y).
     const solid = (x: number, z: number, half: number, solidTop: number) => {
-      colliders.push({ x: group.position.x + x, z: group.position.z + z, halfWidth: half, halfDepth: half, top: solidTop });
+      const wx = group.position.x + x * cosH + z * sinH;
+      const wz = group.position.z - x * sinH + z * cosH;
+      colliders.push({ x: wx, z: wz, halfWidth: half, halfDepth: half, top: solidTop + group.position.y });
     };
     let colliderTop = top;
+    let perchTarget: [number, number] = [0, 0];
 
     if (landmark.kind === "church") {
       const NAVE = 717625483;
@@ -4356,9 +5348,421 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
       for (const end of [-1, 1]) {
         for (let bar = -3; bar <= 3; bar++) addBox(group, [3, 0.45, 44], [bar * 8, 1.36, end * 1_500], whiteStone);
       }
+    } else if (landmark.kind === "ramna-park") {
+      // Ramna Park: Ramna Batamul (sacred Pohela Boishakh banyan stage), lakeside
+      // octagonal pavilion, red-brick arched bridge, and shaded heritage canopy.
+      colliderTop = 3.5;
+      addCylinder(group, 22, 23, 0.9, [0, 0.45, 0], terracotta, 28);
+      addCylinder(group, 15, 16, 1.4, [0, 1.4, 0], paleConcrete, 24);
+      // Giant sacred Batamul banyan tree at the heart of the stage
+      addCylinder(group, 1.8, 2.8, 9.5, [0, 6.2, 0], landmarkBark, 10);
+      for (const [bx, by, bz, r, mat] of [
+        [0, 13.5, 0, 9.2, landmarkCanopy],
+        [-6.5, 11.4, 4.2, 6.4, landmarkLightCanopy],
+        [6.8, 11.2, -3.8, 6.2, landmarkCanopy],
+        [3.2, 11.8, 6.2, 5.8, landmarkLightCanopy],
+        [-4.5, 11.5, -5.8, 5.6, landmarkCanopy],
+      ] as const) {
+        const crown = new THREE.Mesh(treeCrownGeo, mat);
+        crown.position.set(bx, by, bz);
+        crown.scale.set(r, r * 0.62, r);
+        crown.castShadow = true;
+        crown.receiveShadow = true;
+        group.add(crown);
+      }
+      solid(0, 0, 9, 19.2);
+      // Octagonal lakeside pavilion & red-brick garden promenade
+      addCylinder(group, 9.5, 10.2, 1.2, [28, 0.8, 18], brickTrim, 8);
+      for (let i = 0; i < 8; i++) {
+        const a = (i / 8) * Math.PI * 2;
+        addCylinder(group, 0.45, 0.5, 5.6, [28 + Math.cos(a) * 8.2, 4.2, 18 + Math.sin(a) * 8.2], whiteStone, 6);
+      }
+      addCone(group, 11.2, 4.4, [28, 9.2, 18], terracotta, 8);
+      solid(28, 18, 10, 11.5);
+      // Ornamental arched terracotta garden bridge over a landscaped dry channel
+      addBox(group, [30, 0.4, 4.6], [-22, 0.4, 10], plazaBrick);
+      addBox(group, [16, 2.0, 5.0], [-22, 2.0, 10], redBrick);
+      for (const side of [-2.3, 2.3]) addBox(group, [16, 1.0, 0.5], [-22, 3.5, 10 + side], cream);
+      // Ring of Ramna Park mature rain trees & Krishnachura accents
+      for (const [tx, tz, r, h, mat] of [
+        [-28, -22, 6.2, 7.8, landmarkCanopy],
+        [24, -26, 6.6, 8.2, landmarkKrishnachura],
+        [-28, 26, 5.8, 7.2, landmarkLightCanopy],
+        [14, -32, 5.6, 7.4, landmarkCanopy],
+        [-16, -30, 5.4, 7.0, landmarkKrishnachura],
+        [34, -4, 5.8, 7.4, landmarkLightCanopy],
+      ] as const) {
+        addLandmarkTree(group, tx, tz, r, h, mat);
+      }
+    } else if (landmark.kind === "suhrawardy-udyan") {
+      // Suhrawardy Udyan: Swadhinata Stambha (50 m glowing stacked-glass Light
+      // Tower) rising cleanly on its compact plinth inside the real OSM reflecting
+      // lake, leaving the surrounding water intact.
+      colliderTop = 3.0;
+      addBox(group, [20, 1.4, 20], [0, 0.7, 0], paleConcrete);
+      addBox(group, [14, 2.0, 14], [0, 2.0, 0], recess);
+      // Iconic 50 m stacked-glass Independence Tower (glows at night)
+      addBox(group, [5.6, 50, 5.6], [0, 27.6, 0], beaconGlass);
+      for (let y = 6; y <= 50; y += 4.5) {
+        addBox(group, [6.2, 0.36, 6.2], [0, y, 0], silverPanel);
+      }
+      addBox(group, [4.6, 1.2, 4.6], [0, 53.2, 0], silverPanel);
+      solid(0, 0, 5, 53.8);
+      // Shikha Chirantan (Eternal Flame) pedestal on the south plinth corner
+      addCylinder(group, 3.2, 4.2, 1.8, [0, 2.3, 12], bronze, 12);
+      addCone(group, 1.4, 3.2, [0, 4.6, 12], monumentRed, 8);
+    } else if (landmark.kind === "rabindra-sarobar") {
+      // Dhanmondi Lake & Rabindra Sarobar: stepped open-air cultural amphitheatre
+      // facing the lake, iconic red hanging pedestrian footbridge, and lakeside trees.
+      colliderTop = 3.2;
+      perchTarget = [-6, 9];
+      addBox(group, [60, 0.7, 48], [0, 0.35, 0], paleConcrete);
+      // Stepped semicircular waterfront amphitheatre tiers
+      for (let tier = 0; tier < 6; tier++) {
+        const radius = 10 + tier * 3.0;
+        const height = 0.8 + tier * 0.72;
+        const step = new THREE.Mesh(
+          new THREE.CylinderGeometry(radius, radius, height, 28, 1, false, Math.PI * 0.55, Math.PI * 0.9),
+          tier % 2 === 0 ? terracotta : paleConcrete,
+        );
+        step.position.set(-6, 0.7 + height / 2, -2);
+        step.castShadow = true;
+        step.receiveShadow = true;
+        group.add(step);
+      }
+      // Circular waterfront performance stage & lightweight cultural canopy (10.5 m)
+      addCylinder(group, 8.8, 9.2, 1.4, [-6, 1.4, 4], whiteStone, 24);
+      addBox(group, [15, 0.7, 8], [-6, 9.8, 9], terracotta);
+      for (const sx of [-12, 0]) addCylinder(group, 0.45, 0.5, 8.4, [sx, 5.6, 9], whiteStone, 8);
+      solid(-6, 9, 8.5, 10.2);
+      // Iconic Dhanmondi Lake red arched pedestrian footbridge beside the cove
+      addBox(group, [30, 1.2, 4.2], [16, 3.2, -14], paleConcrete);
+      for (const side of [-2.0, 2.0]) {
+        for (const px of [7, 25]) {
+          addCylinder(group, 0.5, 0.65, 9.5, [px, 5.2, -14 + side], monumentRed, 8);
+        }
+        addBox(group, [20, 0.7, 0.6], [16, 9.6, -14 + side], monumentRed);
+      }
+      // Lush lakeside trees framing the promenade
+      for (const [tx, tz, mat] of [
+        [-26, -18, landmarkCanopy],
+        [-28, 14, landmarkKrishnachura],
+        [22, 16, landmarkLightCanopy],
+        [8, 20, landmarkCanopy],
+        [-14, -22, landmarkLightCanopy],
+      ] as const) {
+        addLandmarkTree(group, tx, tz, 5.4, 6.8, mat);
+      }
+    } else if (landmark.kind === "baldha-garden") {
+      // Baldha Garden (Wari): walled historic botanical sanctuary (Cybele & Psyche),
+      // Shankhanidhi lily pond with stepped ghat, glasshouse conservatory, and rare trees.
+      colliderTop = 3.8;
+      perchTarget = [16, -10];
+      // Brick compound perimeter walls (68 × 62 m, clear of surrounding Wari roads)
+      for (const sideZ of [-30.5, 30.5]) addBox(group, [68, 3.4, 1.1], [0, 1.7, sideZ], redBrick);
+      for (const sideX of [-33.5, 33.5]) addBox(group, [1.1, 3.4, 62], [sideX, 1.7, 0], redBrick);
+      addBox(group, [12, 6.6, 3.0], [0, 3.3, 30.5], redBrick);
+      addBox(group, [13.2, 0.6, 3.6], [0, 6.8, 30.5], cream);
+      // Shankhanidhi lily pond & stepped pale stone ghat
+      addBox(group, [26, 0.6, 20], [-14, 0.3, -4], paleConcrete);
+      addBox(group, [22, 0.3, 16], [-14, 0.65, -4], water);
+      // Victorian glasshouse conservatory (orchid & cactus house)
+      addBox(group, [20, 5.6, 13], [16, 2.8, -10], atriumGlass);
+      for (const gx of [8, 12, 16, 20, 24]) addBox(group, [0.45, 6.0, 13.6], [gx, 3.0, -10], whiteStone);
+      const conservatoryRoof = addCylinder(group, 6.5, 6.5, 20, [16, 6.0, -10], atriumGlass, 14);
+      conservatoryRoof.rotation.z = Math.PI / 2;
+      solid(16, -10, 10.5, 12.6);
+      // Historic Joy House heritage garden pavilion
+      addBox(group, [14, 6.4, 11], [15, 3.2, 14], cream);
+      addBox(group, [15.2, 0.8, 12.2], [15, 6.6, 14], terracotta);
+      solid(15, 14, 8, 7.2);
+      // Cross garden footpaths (staggered vertically by 2 cm to prevent coplanar z-fighting)
+      addBox(group, [62, 0.25, 3.0], [0, 0.2, 8], plazaBrick);
+      addBox(group, [3.0, 0.25, 56], [2, 0.22, 0], plazaBrick);
+      for (const [tx, tz, r, mat] of [
+        [-24, -22, 5.4, landmarkCanopy],
+        [-25, 18, 5.4, landmarkKrishnachura],
+        [-8, 21, 5.0, landmarkLightCanopy],
+        [26, -22, 5.2, landmarkCanopy],
+        [26, 22, 5.0, landmarkLightCanopy],
+        [0, -22, 5.6, landmarkCanopy],
+      ] as const) {
+        addLandmarkTree(group, tx, tz, r, 7.0, mat);
+      }
+    } else if (landmark.kind === "botanical-garden") {
+      // National Botanical Garden (Mirpur): grand botanical archway, twin domed
+      // tropical glasshouse conservatories, terraced rose garden, and dense woodland.
+      colliderTop = 4.2;
+      perchTarget = [22, -14];
+      // Formal circular Rose Garden with terracotta/crimson floral rings & fountain
+      addCylinder(group, 22, 22.5, 0.4, [-20, 0.2, 6], plazaBrick, 28);
+      addCylinder(group, 17, 17.2, 0.5, [-20, 0.35, 6], monumentRed, 24);
+      addCylinder(group, 11, 11.2, 0.58, [-20, 0.48, 6], lawn, 24);
+      addCylinder(group, 5.2, 5.6, 0.9, [-20, 0.72, 6], water, 20);
+      addCylinder(group, 1.1, 1.5, 3.2, [-20, 2.0, 6], whiteStone, 10);
+      // Twin domed tropical glasshouses / orchid conservatories
+      for (const [cx, cz, r] of [[22, -14, 13.5], [26, 18, 10.5]] as const) {
+        addCylinder(group, r, r * 1.04, 4.4, [cx, 2.2, cz], whiteStone, 18);
+        addLathe(group, domeProfile(r * 0.96, r * 0.88, 0.05, 10), 18, [cx, 4.4, cz], atriumGlass, false);
+        addFinial(group, [cx, 4.4 + r * 0.88, cz], 0.7, silverPanel);
+        solid(cx, cz, r, 4.4 + r * 0.88);
+      }
+      // Connecting glass gallery & arched entry pavilion
+      addBox(group, [8, 4.8, 16], [24, 2.4, 2], atriumGlass);
+      addBox(group, [22, 7.6, 5.5], [-4, 3.8, 40], terracotta);
+      addBox(group, [24, 1.0, 6.8], [-4, 7.9, 40], cream);
+      solid(-4, 40, 12, 8.8);
+      // Broad paved promenades (staggered vertically by 2 cm) & towering specimen groves
+      addBox(group, [92, 0.25, 4.6], [0, 0.16, 6], paleConcrete);
+      addBox(group, [4.6, 0.25, 82], [-4, 0.18, 0], paleConcrete);
+      for (const [tx, tz, r, mat] of [
+        [-42, -32, 7.0, landmarkCanopy],
+        [-14, -34, 6.8, landmarkLightCanopy],
+        [42, -34, 6.6, landmarkKrishnachura],
+        [-44, 30, 6.5, landmarkCanopy],
+        [44, 32, 6.4, landmarkLightCanopy],
+        [6, -32, 6.2, landmarkCanopy],
+        [-42, -4, 6.2, landmarkKrishnachura],
+      ] as const) {
+        addLandmarkTree(group, tx, tz, r, 8.2, mat);
+      }
+    } else if (landmark.kind === "national-zoo") {
+      // Bangladesh National Zoo (Mirpur): iconic entrance archway, large geodesic
+      // aviary dome, moated circular wildlife habitats, visitor plaza, and shade groves.
+      colliderTop = 4.2;
+      perchTarget = [0, -4];
+      // Central paved visitor plaza & main entrance arch
+      addCylinder(group, 17, 17.5, 0.5, [0, 0.25, 32], paleConcrete, 24);
+      addBox(group, [28, 8.6, 6], [0, 4.3, 46], terracotta);
+      addBox(group, [30, 1.2, 7.2], [0, 8.9, 46], cream);
+      addBox(group, [10, 5.4, 6.6], [0, 2.7, 46], archDark);
+      solid(0, 46, 15, 10.0);
+      // Large geodesic Aviary Dome (iconic silhouette from above)
+      addCylinder(group, 15.5, 16, 3.4, [0, 1.7, -4], paleConcrete, 20);
+      addLathe(group, domeProfile(15.2, 13.5, 0.04, 10), 20, [0, 3.4, -4], atriumGlass, true);
+      for (let i = 0; i < 6; i++) {
+        const a = (i / 6) * Math.PI;
+        const rib = addBox(group, [30.8, 0.5, 0.5], [0, 3.5, -4], whiteStone);
+        rib.rotation.y = a;
+      }
+      solid(0, -4, 15.5, 17.0);
+      // Moated circular wildlife enclosures (Bengal Tiger & Elephant habitats)
+      for (const [ex, ez, r] of [[-36, -16, 17], [36, -14, 16], [-32, 22, 13]] as const) {
+        addCylinder(group, r, r + 0.6, 0.45, [ex, 0.22, ez], water, 24);
+        addCylinder(group, r * 0.72, r * 0.75, 0.85, [ex, 0.55, ez], lawn, 20);
+        addCone(group, r * 0.28, 4.4, [ex - r * 0.16, 3.1, ez - r * 0.1], stoneStep, 7);
+        addBox(group, [7.5, 3.8, 5.5], [ex + r * 0.22, 2.7, ez + r * 0.15], brickTrim);
+      }
+      // Circular safari walkways (staggered vertically by 2 cm) & shade groves
+      addBox(group, [102, 0.25, 4.8], [0, 0.16, 14], paleConcrete);
+      addBox(group, [4.8, 0.25, 92], [0, 0.18, 0], paleConcrete);
+      for (const [tx, tz, r, mat] of [
+        [-48, -42, 6.8, landmarkCanopy],
+        [0, -42, 6.6, landmarkKrishnachura],
+        [48, -40, 6.8, landmarkLightCanopy],
+        [44, 24, 6.2, landmarkCanopy],
+        [-48, 40, 6.0, landmarkLightCanopy],
+        [42, 40, 5.8, landmarkKrishnachura],
+      ] as const) {
+        addLandmarkTree(group, tx, tz, r, 8.0, mat);
+      }
+    } else if (landmark.kind === "national-museum") {
+      // Bangladesh National Museum (Shahbagh): monumental 4-storey modernist civic
+      // complex around a central courtyard with deep brise-soleil fins & grand portico.
+      colliderTop = 3.5;
+      perchTarget = [0, -1];
+      addBox(group, [94, 0.9, 72], [0, 0.45, 0], paleConcrete);
+      // Four perimeter gallery wings forming an open central museum courtyard
+      addBox(group, [80, 18, 18], [0, 9.9, -22], whiteStone);
+      addBox(group, [80, 18, 18], [0, 9.9, 20], whiteStone);
+      addBox(group, [18, 18, 60], [-31, 9.9, -1], whiteStone);
+      addBox(group, [18, 18, 60], [31, 9.9, -1], whiteStone);
+      // Horizontal floor slabs & terracotta roof parapets
+      for (const y of [5.8, 10.8, 15.8, 19.2]) {
+        addBox(group, [82, 0.7, 62], [0, y, -1], y > 18.5 ? terracotta : paleConcrete);
+      }
+      // Central glass-roofed atrium skylight over the main lobby
+      addBox(group, [34, 14.5, 22], [0, 8.4, -1], whiteStone);
+      addBox(group, [30, 3.2, 18], [0, 17.0, -1], atriumGlass);
+      // Vertical modernist concrete sun-breakers along the grand front facade
+      for (let fx = -36; fx <= 36; fx += 4.5) {
+        addBox(group, [0.7, 16.5, 1.6], [fx, 9.8, 29.8], paleConcrete);
+      }
+      // Sweeping grand ceremonial entrance portico & reflecting pool
+      addBox(group, [28, 5.2, 10], [0, 3.6, 32], marble);
+      addBox(group, [26, 0.5, 10], [0, 1.2, 38], stoneStep);
+      addBox(group, [34, 0.4, 8], [0, 0.9, 39], water);
+      solid(0, -1, 41, 20.0);
+      for (const [tx, tz, mat] of [
+        [-45, 34, landmarkCanopy],
+        [45, 34, landmarkKrishnachura],
+        [-45, -34, landmarkLightCanopy],
+        [45, -34, landmarkCanopy],
+      ] as const) {
+        addLandmarkTree(group, tx, tz, 5.4, 7.0, mat);
+      }
+    } else if (landmark.kind === "liberation-museum") {
+      // Liberation War Museum (Agargaon, DWG Architects): bold cantilevered
+      // concrete monolithic gallery volumes framing a circular sunlit water court.
+      colliderTop = 3.5;
+      perchTarget = [10, 6];
+      addBox(group, [82, 0.8, 72], [0, 0.4, 0], paleConcrete);
+      // Ground podium & broad civic amphitheatre steps
+      addBox(group, [70, 6.5, 56], [0, 3.9, -2], concrete);
+      for (let step = 0; step < 4; step++) {
+        addBox(group, [40, 0.6, 2.0], [0, 1.1 + step * 0.6, 28 + (3 - step) * 2.0], stoneStep);
+      }
+      // Sculptural cantilevered upper gallery blocks (iconic floating concrete mass)
+      addBox(group, [62, 11.5, 24], [-6, 14.0, -14], concrete);
+      addBox(group, [50, 10.5, 22], [10, 21.0, 6], paleConcrete);
+      // Recessed vertical glazed light slots & dark memorial facade cuts
+      addBox(group, [62.6, 3.6, 24.6], [-6, 13.3, -14], ribbonGlass);
+      addBox(group, [50.6, 3.2, 22.6], [10, 20.5, 6], darkGlass);
+      addBox(group, [60, 0.4, 22], [-6, 20.0, -14], roofGrey);
+      addBox(group, [48, 0.4, 20], [10, 26.5, 6], roofGrey);
+      // Central circular memorial plaza with reflecting pool & eternal flame
+      addCylinder(group, 11.0, 11.5, 1.0, [-14, 7.4, 14], recess, 24);
+      addCylinder(group, 9.2, 9.2, 0.5, [-14, 7.9, 14], water, 24);
+      addCone(group, 1.4, 3.8, [-14, 10.0, 14], monumentRed, 8);
+      solid(-6, -14, 31, 20.4);
+      solid(10, 6, 25, 26.8);
+      for (const [tx, tz, mat] of [
+        [-36, 28, landmarkCanopy],
+        [36, 28, landmarkKrishnachura],
+        [-36, -30, landmarkLightCanopy],
+      ] as const) {
+        addLandmarkTree(group, tx, tz, 5.2, 6.8, mat);
+      }
+    } else if (landmark.kind === "military-museum") {
+      // Bangladesh Military Museum (Bijoy Sarani): futuristic sweeping metallic-and-
+      // glass pavilion (Army/Navy/Air Force wings), Victory Arena plaza, plus the
+      // iconic white Novo Theatre planetarium dome right beside it.
+      colliderTop = 3.5;
+      perchTarget = [-12, -6];
+      addBox(group, [96, 0.8, 74], [0, 0.4, 0], paleConcrete);
+      // Sweeping contemporary glass & metallic main museum hall
+      addBox(group, [62, 15, 34], [-12, 8.2, -6], ribbonGlass);
+      addBox(group, [70, 2.4, 40], [-12, 16.6, -6], silverPanel);
+      addBox(group, [52, 5.6, 26], [-12, 20.2, -6], silverPanel);
+      addBox(group, [53, 2.2, 27], [-12, 20.0, -6], darkGlass);
+      // Sculptural angled metal facade ribs
+      for (let rx = -38; rx <= 14; rx += 8) {
+        addBox(group, [0.9, 16, 38], [rx, 8.6, -6], silverPanel);
+      }
+      // Outdoor Victory Arena ceremonial display plaza & monument spire
+      addBox(group, [52, 0.5, 20], [-12, 1.1, 24], concrete);
+      addBox(group, [26, 0.4, 9], [-12, 1.4, 24], water);
+      addCone(group, 2.2, 24, [-34, 12.5, 24], silverPanel, 6);
+      solid(-12, -6, 32, 23.2);
+      // Iconic white planetarium dome of neighboring Novo Theatre (Bijoy Sarani)
+      addCylinder(group, 15.5, 16.5, 6.2, [34, 3.8, 10], paleConcrete, 24);
+      addLathe(group, domeProfile(14.8, 14.0, 0.02, 12), 24, [34, 6.9, 10], whiteStone, false);
+      solid(34, 10, 16, 21.0);
+      for (const [tx, tz, mat] of [
+        [-45, -30, landmarkCanopy],
+        [46, -30, landmarkLightCanopy],
+        [-45, 32, landmarkKrishnachura],
+        [46, 32, landmarkCanopy],
+      ] as const) {
+        addLandmarkTree(group, tx, tz, 5.2, 6.8, mat);
+      }
+    } else if (landmark.kind === "science-museum") {
+      // National Museum of Science and Technology (Agargaon): modernist exhibition
+      // blocks crowned by its distinctive white astronomical observatory dome.
+      colliderTop = 3.5;
+      perchTarget = [8, -4];
+      addBox(group, [72, 0.8, 58], [0, 0.4, 0], paleConcrete);
+      // Main tiered exhibition building & glazed science gallery wing
+      addBox(group, [54, 15, 28], [0, 8.2, -4], whiteStone);
+      addBox(group, [55, 3.6, 29], [0, 9.6, -4], ribbonGlass);
+      addBox(group, [32, 11, 20], [-14, 6.2, 16], paleConcrete);
+      addBox(group, [33, 2.8, 21], [-14, 7.6, 16], atriumGlass);
+      // Rooftop astronomical observatory dome
+      addCylinder(group, 9.2, 9.6, 4.2, [8, 17.8, -4], silverPanel, 20);
+      addLathe(group, domeProfile(8.8, 7.8, 0.02, 10), 20, [8, 19.9, -4], whiteStone, false);
+      addBox(group, [1.8, 6.5, 9.2], [8, 23.0, -4], recess);
+      // Outdoor science-park rocket sculpture in the courtyard
+      addCylinder(group, 1.0, 1.8, 11, [20, 6.2, 18], whiteStone, 10);
+      addCone(group, 1.0, 3.4, [20, 13.4, 18], monumentRed, 10);
+      solid(0, -4, 27, 16.0);
+      solid(8, -4, 9.5, 27.8);
+      for (const [tx, tz, mat] of [
+        [-34, -24, landmarkCanopy],
+        [34, -24, landmarkLightCanopy],
+        [34, 24, landmarkKrishnachura],
+      ] as const) {
+        addLandmarkTree(group, tx, tz, 5.0, 6.6, mat);
+      }
+    } else if (landmark.kind === "shishu-park") {
+      // Shishu Park (Shahbagh): Dhaka's beloved children's park with a bright
+      // Ferris wheel, striped carousel tent, miniature train loop, and festive gates.
+      colliderTop = 3.5;
+      perchTarget = [18, -10];
+      addBox(group, [74, 0.45, 66], [0, 0.22, 0], paleConcrete);
+      // Bright Ferris wheel (landmark silhouette from above)
+      addFerrisWheel(group, -14, -8, 13.5, 16.5);
+      solid(-14, -8, 12.5, 30.0);
+      // Colorful striped Carousel pavilion
+      addCylinder(group, 11.5, 12.2, 1.2, [18, 0.9, -10], whiteStone, 18);
+      for (let i = 0; i < 8; i++) {
+        const a = (i / 8) * Math.PI * 2;
+        addCylinder(group, 0.35, 0.35, 5.2, [18 + Math.cos(a) * 9.8, 3.9, -10 + Math.sin(a) * 9.8], accent, 6);
+      }
+      addCone(group, 12.6, 6.2, [18, 9.5, -10], monumentRed, 12);
+      addCone(group, 7.6, 4.4, [18, 11.3, -10], accent, 12);
+      solid(18, -10, 12, 13.6);
+      // Miniature toy-train circular ring & play pavilions
+      const trainRing = new THREE.Mesh(new THREE.RingGeometry(13, 16, 28), terracotta);
+      trainRing.rotation.x = -Math.PI / 2;
+      trainRing.position.set(14, 0.56, 17);
+      group.add(trainRing);
+      addBox(group, [6.5, 3.2, 3.0], [14, 2.0, 31.5], carnivalBlue);
+      addBox(group, [16, 4.8, 10], [-18, 2.8, 19], carnivalBlue);
+      addCone(group, 9.5, 4.2, [-18, 7.2, 19], accent, 4).rotation.y = Math.PI / 4;
+      // Festive red-and-gold park entrance arch
+      addBox(group, [18, 7.4, 3.6], [0, 3.7, 34], monumentRed);
+      addBox(group, [19.5, 1.0, 4.4], [0, 7.7, 34], accent);
+      addBox(group, [8, 4.8, 4.2], [0, 2.5, 34], archDark);
+      for (const [tx, tz, mat] of [
+        [-36, -30, landmarkCanopy],
+        [36, -30, landmarkKrishnachura],
+        [-36, 30, landmarkLightCanopy],
+        [36, 30, landmarkCanopy],
+      ] as const) {
+        addLandmarkTree(group, tx, tz, 5.2, 6.6, mat);
+      }
+    } else if (landmark.kind === "shishu-mela") {
+      // Shishu Mela / DNCC Wonderland (Shyamoli): children's amusement park with
+      // Ferris wheel, bright ride pavilions, mini-coaster frame, and festive plaza.
+      colliderTop = 3.5;
+      perchTarget = [-14, -8];
+      addBox(group, [66, 0.45, 58], [0, 0.22, 0], paleConcrete);
+      // Ferris wheel centerpiece
+      addFerrisWheel(group, 13, -6, 12.0, 15.0);
+      solid(13, -6, 11.5, 27.0);
+      // Bright ride pavilions & coaster arch loop
+      addCylinder(group, 10.0, 10.5, 1.2, [-14, 0.9, -8], whiteStone, 16);
+      addCone(group, 11.0, 5.6, [-14, 8.5, -8], carnivalBlue, 12);
+      addCone(group, 6.4, 3.8, [-14, 10.3, -8], accent, 12);
+      solid(-14, -8, 10.5, 12.6);
+      // Mini-coaster elevated blue steel oval deck & festive entrance
+      addBox(group, [26, 5.2, 11], [-10, 3.0, 16], terracotta);
+      addBox(group, [28, 0.9, 13], [-10, 6.0, 16], carnivalBlue);
+      addBox(group, [15, 6.6, 3.2], [10, 3.5, 28], monumentRed);
+      addBox(group, [16.5, 0.9, 4.0], [10, 7.1, 28], accent);
+      for (const [tx, tz, mat] of [
+        [-30, -25, landmarkCanopy],
+        [30, -25, landmarkLightCanopy],
+        [-30, 25, landmarkKrishnachura],
+        [30, 25, landmarkCanopy],
+      ] as const) {
+        addLandmarkTree(group, tx, tz, 4.8, 6.2, mat);
+      }
     }
 
     bakeGroup(group);
+    group.updateMatrixWorld(true);
+    group.traverse((object) => { object.matrixAutoUpdate = false; });
     const bounds = allBounds.get(landmark.kind)!;
     colliders.push({
       x: (bounds.minX + bounds.maxX) / 2,
@@ -4368,27 +5772,33 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
       top: colliderTop,
     });
     const world = coordinatesToWorld(landmark.lat, landmark.lon);
-    // Seat the perch on whatever is actually built at that spot, so the crow
-    // lands on the roof or the dome rather than inside it.
-    group.updateMatrixWorld(true);
-    perchRay.set(perchOrigin.set(world.x, 900, world.y), perchDown);
+    const perchWorldX = perchTarget[0] !== 0 || perchTarget[1] !== 0
+      ? group.position.x + perchTarget[0] * cosH + perchTarget[1] * sinH
+      : world.x;
+    const perchWorldZ = perchTarget[0] !== 0 || perchTarget[1] !== 0
+      ? group.position.z - perchTarget[0] * sinH + perchTarget[1] * cosH
+      : world.y;
+    // Seat the perch on whatever is actually built at the hero target spot, so the
+    // crow lands on the roof, dome, or canopy rather than floating or inside geometry.
+    perchRay.set(perchOrigin.set(perchWorldX, 900, perchWorldZ), perchDown);
     const surfaces = perchRay.intersectObjects([group, ...(landmarkMeshes.get(landmark.kind) ?? [])], true);
     let perchTop = surfaces.length > 0 ? surfaces[0].point.y : top;
     // A perch below the top of a collision column could never be reached, so
     // it never sits lower than the columns that contain it.
     for (const collider of colliders) {
-      if (Math.abs(world.x - collider.x) <= collider.halfWidth && Math.abs(world.y - collider.z) <= collider.halfDepth) {
+      if (Math.abs(perchWorldX - collider.x) <= collider.halfWidth && Math.abs(perchWorldZ - collider.z) <= collider.halfDepth) {
         perchTop = Math.max(perchTop, collider.top);
       }
     }
     const perch = {
-      position: new THREE.Vector3(world.x, perchTop, world.y),
+      position: new THREE.Vector3(perchWorldX, perchTop, perchWorldZ),
       label: landmark.label,
       heading: landmark.heading,
     };
     perches.push(perch);
     addLabel(perch.position.clone().add(new THREE.Vector3(0, 24, 0)), landmark.label);
   }
+  treeCrownGeo.dispose();
 
   const METRO_DECK_Y = 18;
   type MetroStationSpec = { label: string; x: number; z: number };
@@ -4419,7 +5829,7 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
 
     // Box-girder guideway: one continuous swept rectangular tube along the curve
     // so adjacent spans never overlap on coplanar top/bottom faces and z-fight.
-    const GIRDER_SAMPLES = Math.min(560, Math.max(160, Math.round(curveLength / 90)));
+    const GIRDER_SAMPLES = metroGirderSampleCount(curveLength);
     const girderPositions: number[] = [];
     const girderUvs: number[] = [];
     const pushQuad = (a: [number, number, number], b: [number, number, number], c: [number, number, number], d: [number, number, number]) => {
@@ -4432,8 +5842,8 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
       const point = metroCurve.getPointAt(u);
       const tangent = metroCurve.getTangentAt(u);
       const perpLen = Math.hypot(tangent.x, tangent.z) || 1;
-      const nx = (-tangent.z / perpLen) * 4.8;
-      const nz = (tangent.x / perpLen) * 4.8;
+      const nx = (-tangent.z / perpLen) * METRO_GIRDER_HALF_WIDTH;
+      const nz = (tangent.x / perpLen) * METRO_GIRDER_HALF_WIDTH;
       const topY = point.y;
       const botY = point.y - 2.4;
       girderRings.push([
@@ -4485,10 +5895,13 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
     }
     const PIER_COUNT = Math.max(24, Math.round(curveLength / 260));
     for (let index = 1; index < PIER_COUNT; index++) {
-      const point = metroCurve.getPointAt(index / PIER_COUNT);
+      const u = index / PIER_COUNT;
+      const point = metroCurve.getPointAt(u);
+      const tangent = metroCurve.getTangentAt(u);
       const pierHeight = Math.max(5, point.y - 0.5);
       addCylinder(metroRoot, 2.4, 3.8, pierHeight, [point.x, pierHeight / 2, point.z], concrete, 8);
-      addBox(metroRoot, [18, 2.2, 4.2], [point.x, point.y - 3, point.z], concrete);
+      const cap = addBox(metroRoot, [4.2, 2.2, METRO_PIER_CAP_WIDTH], [point.x, point.y - 3, point.z], concrete);
+      cap.rotation.y = Math.atan2(-tangent.z, tangent.x);
     }
 
     // Project each station onto the curve: nearest arc-length parameter wins. Stations
@@ -4698,36 +6111,76 @@ function addCity(scene: THREE.Scene) {
 
   const makeGroundTexture = () => {
     const canvas = document.createElement("canvas");
-    canvas.width = canvas.height = 192;
+    canvas.width = canvas.height = 512;
     const context = canvas.getContext("2d");
     if (!context) return null;
-    context.fillStyle = "#8c9d72";
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    for (let i = 0; i < 3600; i++) {
-      const lightness = 34 + Math.floor(random() * 18);
-      context.fillStyle = `hsla(${82 + random() * 20}, 15%, ${lightness}%, ${0.06 + random() * 0.1})`;
-      const size = 1 + random() * 3.5;
-      context.fillRect(random() * canvas.width, random() * canvas.height, size, size);
-    }
-    context.lineWidth = 1;
-    for (let contour = 0; contour < 14; contour++) {
-      const baseY = 8 + contour * 14;
-      context.beginPath();
-      for (let x = 0; x <= canvas.width; x += 4) {
-        const y = baseY + Math.sin(x * 0.055 + contour * 0.9) * 3.2 + Math.sin(x * 0.13) * 1.2;
-        if (x === 0) context.moveTo(x, y);
-        else context.lineTo(x, y);
+    const size = canvas.width;
+    // Warm sun-baked Dhaka concrete & dusty paved ground — no green lawn wash.
+    context.fillStyle = "#9d968b";
+    context.fillRect(0, 0, size, size);
+
+    // Dense urban city blocks, courtyards, and low-rise concrete/brick lots.
+    const lotPalette = [
+      "#aba498",
+      "#9f988d",
+      "#938c81",
+      "#b3aba0",
+      "#8b857c",
+      "#a89382",
+      "#9d7f6f",
+    ];
+    const grid = 8;
+    const cell = size / grid;
+    for (let row = 0; row < grid; row++) {
+      for (let col = 0; col < grid; col++) {
+        const bx = col * cell;
+        const by = row * cell;
+        // Narrow asphalt/concrete lane framing each urban block.
+        context.fillStyle = (row + col) % 3 === 0 ? "#686560" : "#76716a";
+        context.fillRect(bx, by, cell, cell);
+        const pad = 2.5 + random() * 2;
+        context.fillStyle = lotPalette[Math.floor(random() * lotPalette.length)];
+        context.fillRect(bx + pad, by + pad, cell - pad * 2, cell - pad * 2);
+
+        // Subdivide each block into tightly packed Dhaka plots, alleys, and roofs.
+        const subCols = 2 + Math.floor(random() * 2);
+        const subRows = 2 + Math.floor(random() * 2);
+        const innerW = (cell - pad * 2) / subCols;
+        const innerH = (cell - pad * 2) / subRows;
+        for (let sr = 0; sr < subRows; sr++) {
+          for (let sc = 0; sc < subCols; sc++) {
+            const px = bx + pad + sc * innerW + 1.2;
+            const py = by + pad + sr * innerH + 1.2;
+            const pw = Math.max(2, innerW - 2.4);
+            const ph = Math.max(2, innerH - 2.4);
+            context.fillStyle = lotPalette[Math.floor(random() * lotPalette.length)];
+            context.fillRect(px, py, pw, ph);
+            // Subtle shadow edge along tightly packed plots.
+            context.fillStyle = "rgba(42, 38, 34, 0.14)";
+            context.fillRect(px + pw - 1.5, py, 1.5, ph);
+            context.fillRect(px, py + ph - 1.5, pw, 1.5);
+            // Occasional tiny shaded courtyard garden speck inside urban blocks.
+            if (random() < 0.075 && pw > 6 && ph > 6) {
+              context.fillStyle = "rgba(62, 82, 52, 0.24)";
+              context.fillRect(px + 2, py + 2, Math.min(4, pw - 4), Math.min(4, ph - 4));
+            }
+          }
+        }
       }
-      context.strokeStyle = contour % 3 === 0 ? "rgba(123, 62, 48, .16)" : "rgba(29, 66, 55, .12)";
-      context.stroke();
     }
-    for (let field = 0; field < 18; field++) {
-      context.fillStyle = field % 2 === 0 ? "rgba(232, 167, 71, .07)" : "rgba(196, 71, 85, .055)";
-      context.fillRect(random() * canvas.width, random() * canvas.height, 7 + random() * 17, 4 + random() * 10);
+
+    // Subtle dusty concrete & brick-grit speckle across the urban surface.
+    for (let i = 0; i < 4200; i++) {
+      const shade = 44 + Math.floor(random() * 26);
+      const hue = 24 + random() * 16;
+      context.fillStyle = `hsla(${hue}, 10%, ${shade}%, ${0.06 + random() * 0.08})`;
+      const s = 1 + random() * 3;
+      context.fillRect(random() * size, random() * size, s, s);
     }
+
     const texture = new THREE.CanvasTexture(canvas);
     texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
-    texture.repeat.set(76, 76);
+    texture.repeat.set(136, 136);
     texture.colorSpace = THREE.SRGBColorSpace;
     texture.anisotropy = 4;
     return texture;
@@ -4736,7 +6189,7 @@ function addCity(scene: THREE.Scene) {
   const ground = new THREE.Mesh(
     new THREE.PlaneGeometry(34_000, 34_000),
     new THREE.MeshStandardMaterial({
-      color: 0x87937a,
+      color: 0xeae4da,
       map: makeGroundTexture(),
       roughness: 1,
       polygonOffset: true,
@@ -4747,6 +6200,62 @@ function addCity(scene: THREE.Scene) {
   ground.rotation.x = -Math.PI / 2;
   ground.receiveShadow = true;
   scene.add(ground);
+
+  // Explicit Dhaka park lawns merged into two static draw calls (turf + paths)
+  // so green space appears cleanly where real Dhaka parks sit.
+  const parksGroup = new THREE.Group();
+  parksGroup.name = "Dhaka urban parks";
+  const parkTurfMaterial = new THREE.MeshStandardMaterial({
+    color: 0x576d44,
+    roughness: 1,
+    polygonOffset: true,
+    polygonOffsetFactor: 3,
+    polygonOffsetUnits: 3,
+  });
+  const parkPathMaterial = new THREE.MeshStandardMaterial({
+    color: 0xb7aa96,
+    roughness: 0.96,
+    polygonOffset: true,
+    polygonOffsetFactor: 2,
+    polygonOffsetUnits: 2,
+  });
+  const turfGeometries: THREE.BufferGeometry[] = [];
+  const pathGeometries: THREE.BufferGeometry[] = [];
+  DHAKA_PARKS.forEach((park, index) => {
+    const lawnGeo = new THREE.CircleGeometry(1, 28);
+    lawnGeo.scale(park.rx, park.rz, 1);
+    lawnGeo.rotateZ(-park.angle);
+    lawnGeo.rotateX(-Math.PI / 2);
+    lawnGeo.translate(park.x, 0.22 + (index % 5) * 0.006, park.z);
+    turfGeometries.push(lawnGeo);
+    if (park.hasLoop) {
+      const loopGeo = new THREE.RingGeometry(0.66, 0.71, 28);
+      loopGeo.scale(park.rx, park.rz, 1);
+      loopGeo.rotateZ(-park.angle);
+      loopGeo.rotateX(-Math.PI / 2);
+      loopGeo.translate(park.x, 0.28 + (index % 3) * 0.004, park.z);
+      pathGeometries.push(loopGeo);
+    }
+  });
+  const mergedTurf = mergeGeometries(turfGeometries, false);
+  turfGeometries.forEach((geometry) => geometry.dispose());
+  if (mergedTurf) {
+    const turfMesh = new THREE.Mesh(mergedTurf, parkTurfMaterial);
+    turfMesh.name = "Dhaka park turf";
+    turfMesh.receiveShadow = true;
+    turfMesh.matrixAutoUpdate = false;
+    parksGroup.add(turfMesh);
+  }
+  const mergedPaths = pathGeometries.length > 0 ? mergeGeometries(pathGeometries, false) : null;
+  pathGeometries.forEach((geometry) => geometry.dispose());
+  if (mergedPaths) {
+    const pathMesh = new THREE.Mesh(mergedPaths, parkPathMaterial);
+    pathMesh.name = "Dhaka park paths";
+    pathMesh.receiveShadow = true;
+    pathMesh.matrixAutoUpdate = false;
+    parksGroup.add(pathMesh);
+  }
+  scene.add(parksGroup);
 
   const waterShape = new THREE.Shape();
   const top: THREE.Vector2[] = [];
@@ -4807,7 +6316,7 @@ function addCity(scene: THREE.Scene) {
   }
   scene.userData.waterRibbons = waterRibbons;
 
-  const roadMaterial = new THREE.MeshStandardMaterial({ color: 0x303a38, roughness: 0.97 });
+  const roadMaterial = new THREE.MeshStandardMaterial({ color: 0x373739, roughness: 0.97 });
   const lineMaterial = new THREE.MeshStandardMaterial({
     color: 0xd9c277,
     roughness: 0.9,
@@ -4880,10 +6389,10 @@ function addCity(scene: THREE.Scene) {
     fallbackWorld.add(bridge);
   }
 
-  const buildingColors = [0xd2c5aa, 0xb7bdb4, 0xc3977f, 0x9eaa9d, 0xd8d3c2, 0xaa826d];
+  const buildingColors = [0xd6cec0, 0xc5bdb2, 0xb97159, 0xd1b48f, 0xdfd8cc, 0xa5624e];
   const buildingMaterials = buildingColors.map((color) => new THREE.MeshStandardMaterial({ color, roughness: 0.88, metalness: 0.01 }));
-  const facadeMaterials = buildingColors.map((color) => new THREE.MeshStandardMaterial({ color: new THREE.Color(color).multiplyScalar(0.82), roughness: 0.93 }));
-  const rooftopMaterial = new THREE.MeshStandardMaterial({ color: 0x5d6863, roughness: 0.94 });
+  const facadeMaterials = buildingColors.map((color) => new THREE.MeshStandardMaterial({ color: new THREE.Color(color).multiplyScalar(0.84), roughness: 0.93 }));
+  const rooftopMaterial = new THREE.MeshStandardMaterial({ color: 0x7c7770, roughness: 0.94 });
   const tankMaterials = [0x526a64, 0xa27c66, 0x557d83].map((color) => new THREE.MeshStandardMaterial({ color, roughness: 0.82 }));
   const windows: Array<{ position: THREE.Vector3; quaternion: THREE.Quaternion; scale: THREE.Vector3; color: THREE.Color }> = [];
   const local = new THREE.Vector3();
@@ -5007,31 +6516,47 @@ function addCity(scene: THREE.Scene) {
 
   const treeTrunk = new THREE.CylinderGeometry(1.1, 1.65, 7.5, 6);
   const treeTop = new THREE.IcosahedronGeometry(1, 1);
-  const trunkMaterial = new THREE.MeshStandardMaterial({ color: 0x6f5547, roughness: 1 });
-  const leafMaterials = [0x3f684a, 0x567b53, 0x7d8e59].map((color) => new THREE.MeshStandardMaterial({ color, roughness: 1 }));
+  const trunkMaterial = new THREE.MeshStandardMaterial({ color: 0x5d4739, roughness: 1 });
+  const leafMaterials = [0x2d5a36, 0x3b6d3a, 0x4d7c3f, 0xc84628].map(
+    (color) => new THREE.MeshStandardMaterial({ color, roughness: 0.86 }),
+  );
   const trunkMatrices: THREE.Matrix4[] = [];
-  const foliageMatrices: THREE.Matrix4[][] = [[], [], []];
+  const foliageMatrices: THREE.Matrix4[][] = [[], [], [], []];
   const treeQuaternion = new THREE.Quaternion();
   const treeScale = new THREE.Vector3();
-  for (let i = 0; i < 170; i++) {
-    const x = (random() - 0.5) * 2200;
-    const z = (random() - 0.5) * 2100;
-    const lakeCenter = Math.sin(x * 0.0042) * 90;
-    if (Math.abs(z - lakeCenter) < 125) continue;
-    const treeHeight = 0.75 + random() * 0.55;
-    treeScale.set(1, treeHeight, 1);
+  const addFallbackTree = (x: number, z: number, mature: boolean, flowering: boolean) => {
+    const treeHeight = mature ? 0.85 + random() * 0.45 : 0.7 + random() * 0.35;
+    treeScale.set(mature ? 0.9 : 0.78, treeHeight, mature ? 0.9 : 0.78);
     trunkMatrices.push(new THREE.Matrix4().compose(new THREE.Vector3(x, 3.75 * treeHeight, z), treeQuaternion, treeScale.clone()));
-    for (let cluster = 0; cluster < 3; cluster++) {
-      const foliageIndex = (i + cluster) % leafMaterials.length;
+    for (let cluster = 0; cluster < 2; cluster++) {
+      const foliageIndex = flowering ? 3 : Math.floor(random() * 3);
       const foliagePosition = new THREE.Vector3(
-        x + (cluster - 1) * (2.3 + random() * 1.8),
-        9.2 * treeHeight + (cluster === 1 ? 3 : 0),
-        z + (random() - 0.5) * 3.6,
+        x + (cluster - 0.5) * (2.4 + random() * 1.8),
+        8.6 * treeHeight + (cluster === 1 ? 1.8 : 0),
+        z + (random() - 0.5) * 2.6,
       );
       const foliageQuaternion = new THREE.Quaternion().setFromEuler(new THREE.Euler(random(), random(), random()));
-      const foliageScale = new THREE.Vector3(4.4 + random() * 2.5, 4 + random() * 3, 4.4 + random() * 2.8);
+      const radius = mature ? 4.2 + random() * 2.2 : 3.2 + random() * 1.7;
+      const foliageScale = new THREE.Vector3(radius, radius * (0.68 + random() * 0.22), radius);
       foliageMatrices[foliageIndex].push(new THREE.Matrix4().compose(foliagePosition, foliageQuaternion, foliageScale));
     }
+  };
+  // Line both Hatirjheel embankments so the fallback view opens with lush lakeside greenery.
+  for (let i = 0; i < 72; i++) {
+    const x = -980 + (i / 71) * 1960 + (random() - 0.5) * 20;
+    const lakeCenter = Math.sin(x * 0.0042) * 90 + Math.sin(x * 0.009) * 24;
+    const side = i % 2 === 0 ? 1 : -1;
+    const z = lakeCenter + side * (122 + random() * 44);
+    if (Math.abs(Math.abs(z) - 285) < 28) continue;
+    addFallbackTree(x, z, true, i % 11 === 0);
+  }
+  // Scatter additional courtyard trees between fallback blocks.
+  for (let i = 0; i < 44; i++) {
+    const x = (random() - 0.5) * 2100;
+    const z = (random() - 0.5) * 1950;
+    const lakeCenter = Math.sin(x * 0.0042) * 90;
+    if (Math.abs(z - lakeCenter) < 125 || Math.abs(Math.abs(z) - 285) < 28) continue;
+    addFallbackTree(x, z, false, false);
   }
   const trunks = new THREE.InstancedMesh(treeTrunk, trunkMaterial, trunkMatrices.length);
   trunkMatrices.forEach((transform, index) => trunks.setMatrixAt(index, transform));
@@ -5154,17 +6679,27 @@ function addCity(scene: THREE.Scene) {
   scene.userData.perches = perches;
   scene.userData.perchMarkers = perchMarkers;
 
+  // Clouds float above the flight ceiling so the bird always sees them from
+  // below. Seen from above, the flattened puffs read as white patches painted
+  // on the ground that hide the buildings under them.
   const clouds: THREE.Group[] = [];
-  const cloudMaterial = new THREE.MeshStandardMaterial({ color: 0xe9e5d5, roughness: 1, transparent: true, opacity: 0.55, depthWrite: false });
+  const puffGeometry = new THREE.SphereGeometry(1, 18, 12);
   for (let i = 0; i < 14; i++) {
     const cloud = new THREE.Group();
+    // One material per cloud so each can fade out on its own near the field edge.
+    const cloudMaterial = new THREE.MeshStandardMaterial({ color: 0xe9e5d5, roughness: 1, transparent: true, opacity: 0.55, depthWrite: false });
+    cloud.userData.weatherOpacity = cloudMaterial.opacity;
     for (let puff = 0; puff < 5; puff++) {
-      const sphere = new THREE.Mesh(new THREE.SphereGeometry(1, 18, 12), cloudMaterial);
-      sphere.position.set((puff - 2) * 18 + random() * 8, random() * 7, random() * 10);
-      sphere.scale.set(19 + random() * 12, 7 + random() * 5, 11 + random() * 8);
+      const sphere = new THREE.Mesh(puffGeometry, cloudMaterial);
+      sphere.position.set((puff - 2) * 36 + random() * 16, random() * 14, random() * 20);
+      sphere.scale.set(38 + random() * 24, 14 + random() * 10, 22 + random() * 16);
       cloud.add(sphere);
     }
-    cloud.position.set(-1000 + random() * 2000, 245 + random() * 115, -1100 + random() * 2200);
+    cloud.position.set(
+      (random() * 2 - 1) * CLOUD_FIELD_RADIUS,
+      CLOUD_BASE_ALTITUDE + random() * CLOUD_LAYER_DEPTH,
+      (random() * 2 - 1) * CLOUD_FIELD_RADIUS,
+    );
     cloud.userData.speed = 1.2 + random() * 1.8;
     scene.add(cloud);
     clouds.push(cloud);
@@ -5228,10 +6763,10 @@ async function mergeIntoMeshBatches(
 async function selectSpatiallyEvenBuildings(
   buildings: OsmMapData["buildings"],
   isCancelled: () => boolean,
-  budget = 2_600,
+  budget = 5_200,
 ) {
   const tileSize = 380;
-  const perTile = 9;
+  const perTile = 24;
   const tiles = new Map<string, Array<{ building: OsmMapData["buildings"][number]; score: number }>>();
   const yieldIfNeeded = createMainThreadYielder();
   for (const building of buildings) {
@@ -5314,8 +6849,8 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
     clearcoat: 0.7,
     clearcoatRoughness: 0.28,
     polygonOffset: true,
-    polygonOffsetFactor: 2,
-    polygonOffsetUnits: 2,
+    polygonOffsetFactor: 0,
+    polygonOffsetUnits: 0,
   });
   const waterLineMaterial = new THREE.MeshPhysicalMaterial({
     color: 0x397f88,
@@ -5357,7 +6892,7 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
     const major = majorRoadKinds.has(road.kind);
     const surfaceWidth = major ? (road.kind === "motorway" || road.kind === "trunk" ? 17 : 14) : localRoadKinds.has(road.kind) ? 7.5 : 4.2;
     const shoulder = major ? 5.5 : 2.4;
-    const radius = (surfaceWidth + shoulder) / 2 + 2;
+    const radius = (surfaceWidth + shoulder) / 2 + 0.5;
     for (let index = 1; index < road.points.length; index++) {
       const [x1, z1] = road.points[index - 1];
       const [x2, z2] = road.points[index];
@@ -5371,9 +6906,10 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
       const zs = feature.points.map(([, z]) => z);
       addToClearanceGrid(waterAreaClearanceGrid, feature.points, Math.min(...xs), Math.max(...xs), Math.min(...zs), Math.max(...zs));
     }
-    for (let index = 1; index < feature.points.length; index++) {
-      const [x1, z1] = feature.points[index - 1];
-      const [x2, z2] = feature.points[index];
+    const waterEdgeCount = feature.area && feature.points.length >= 3 ? feature.points.length : feature.points.length - 1;
+    for (let index = 0; index < waterEdgeCount; index++) {
+      const [x1, z1] = feature.points[index];
+      const [x2, z2] = feature.points[(index + 1) % feature.points.length];
       addToClearanceGrid(waterClearanceGrid, { x1, z1, x2, z2, radius: 6 }, Math.min(x1, x2) - 6, Math.max(x1, x2) + 6, Math.min(z1, z2) - 6, Math.max(z1, z2) + 6);
     }
     await yieldIfNeeded(isCancelled);
@@ -5381,7 +6917,7 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
   const footprintBlockedByGround = (x: number, z: number, halfWidth: number, halfDepth: number) => {
     const key = clearanceKey(Math.floor(x / clearanceCellSize), Math.floor(z / clearanceCellSize));
     if ((waterAreaClearanceGrid.get(key) ?? []).some((points) => pointInPolygon(x, z, points))) return true;
-    const reach = Math.max(halfWidth, halfDepth);
+    const reach = Math.min(Math.max(halfWidth, halfDepth), (halfWidth + halfDepth) * 0.62);
     for (const segment of waterClearanceGrid.get(key) ?? []) {
       const clearance = reach + segment.radius;
       if (distanceToSegmentSquared(x, z, segment.x1, segment.z1, segment.x2, segment.z2) < clearance ** 2) return true;
@@ -5393,7 +6929,8 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
     return false;
   };
 
-  const buildingBuckets: THREE.BufferGeometry[][] = [[], [], [], []];
+  const metroCorridor = createMetroCorridor(data.metroLines, data.metroStations);
+  const buildingBuckets: THREE.BufferGeometry[][] = [[], [], [], [], []];
   const landmarkOsmIds = scene.userData.landmarkOsmIds as Set<number> | undefined;
   const landmarkColliders = (scene.userData.landmarkColliders as BuildingCollider[] | undefined) ?? [];
   // The full Dhaka payload can contain tens of thousands of footprints. Keep the
@@ -5412,11 +6949,13 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
     const halfDepth = Math.max(2, (maxZ - minZ) / 2);
     if (
       inAirportClearance(centerX, centerZ, Math.max(halfWidth, halfDepth) + 10)
+      || inDhakaPark(centerX, centerZ, -6)
       || landmarkColliders.some((collider) => (
         Math.abs(centerX - collider.x) < halfWidth + collider.halfWidth + 2
         && Math.abs(centerZ - collider.z) < halfDepth + collider.halfDepth + 2
       ))
       || footprintBlockedByGround(centerX, centerZ, halfWidth, halfDepth)
+      || metroCorridor.blocksPolygon(building.points)
     ) {
       await yieldIfNeeded(isCancelled);
       continue;
@@ -5440,9 +6979,9 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
     });
     await yieldIfNeeded(isCancelled);
   }
-  // These four merged batches are the real Dhaka the player flies over, so they
+  // These five merged batches are the real Dhaka the player flies over, so they
   // carry the window lighting that makes the city legible after dark.
-  const buildingMaterials = [0xcdbfa5, 0xb5bdb3, 0xc28f76, 0x9daa9d].map(
+  const buildingMaterials = [0xd6cec0, 0xc5bdb2, 0xb97159, 0xd1b48f, 0x969fa8].map(
     (color) => applyNightWindows(new THREE.MeshStandardMaterial({ color, roughness: 0.88, metalness: 0.01 }), 0.54),
   );
   // Nearby procedural towers and landmarks provide local shadows. Keeping the
@@ -5450,6 +6989,101 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
   // entire map into the large directional-light shadow camera every frame.
   for (let index = 0; index < buildingBuckets.length; index++) {
     await mergeIntoMeshBatches(root, buildingBuckets[index], buildingMaterials[index], `OSM buildings ${index}`, isCancelled);
+  }
+
+  // Static 1-draw-call horizon canopy across Dhaka's 20 parks and major lake
+  // shorelines so green landmarks stay visibly wooded beyond the 2,250 m
+  // procedural tile streaming radius.
+  const horizonRng = seededRandom(51_409);
+  const horizonMatrix = new THREE.Matrix4();
+  const horizonPos = new THREE.Vector3();
+  const horizonQuat = new THREE.Quaternion();
+  const horizonScale = new THREE.Vector3();
+  const horizonPalette = [0x2d5a36, 0x3b6d3a, 0x4d7c3f, 0x618b44].map((color) => new THREE.Color(color));
+  const horizonKrishnachura = new THREE.Color(0xc84628);
+  const horizonTransforms: THREE.Matrix4[] = [];
+  const horizonColors: THREE.Color[] = [];
+  for (const park of DHAKA_PARKS) {
+    const count = clamp(Math.round((Math.PI * park.rx * park.rz) / 1_150), 14, 72);
+    for (let i = 0; i < count; i++) {
+      const radial = Math.sqrt(horizonRng()) * 0.94;
+      const angle = horizonRng() * Math.PI * 2;
+      const lx = Math.cos(angle) * radial * (park.rx - 5);
+      const lz = Math.sin(angle) * radial * (park.rz - 5);
+      const wx = park.x + lx * park.fwdCos - lz * park.fwdSin;
+      const wz = park.z + lx * park.fwdSin + lz * park.fwdCos;
+      const r = 4.8 + horizonRng() * 3.0;
+      if (inAirportClearance(wx, wz, 20) || metroCorridor.blocksCircle(wx, wz, r + 2)) continue;
+      if (landmarkColliders.some((c) => Math.abs(wx - c.x) < c.halfWidth + r + 2 && Math.abs(wz - c.z) < c.halfDepth + r + 2)) continue;
+      if (footprintBlockedByGround(wx, wz, 2.5, 2.5)) continue;
+      horizonPos.set(wx, 6.2 + horizonRng() * 2.5, wz);
+      horizonQuat.setFromEuler(new THREE.Euler(horizonRng(), horizonRng(), horizonRng()));
+      horizonScale.set(r, r * 0.65, r);
+      horizonTransforms.push(horizonMatrix.compose(horizonPos, horizonQuat, horizonScale).clone());
+      horizonColors.push(
+        horizonRng() < 0.06
+          ? horizonKrishnachura.clone()
+          : horizonPalette[Math.floor(horizonRng() * horizonPalette.length)].clone(),
+      );
+    }
+  }
+  const inWaterAreaOsm = (x: number, z: number) => {
+    const key = clearanceKey(Math.floor(x / clearanceCellSize), Math.floor(z / clearanceCellSize));
+    return (waterAreaClearanceGrid.get(key) ?? []).some((points) => pointInPolygon(x, z, points));
+  };
+  let shoreHorizonCount = 0;
+  for (const feature of data.water) {
+    if (shoreHorizonCount >= 620) break;
+    if (!feature.area || feature.points.length < 3 || polygonArea2D(feature.points) < 12_000) continue;
+    for (let index = 0; index < feature.points.length && shoreHorizonCount < 620; index++) {
+      const [x1, z1] = feature.points[index];
+      const [x2, z2] = feature.points[(index + 1) % feature.points.length];
+      const len = Math.hypot(x2 - x1, z2 - z1);
+      if (len < 24) continue;
+      const nx = -(z2 - z1) / len;
+      const nz = (x2 - x1) / len;
+      for (let dist = 16; dist < len - 12 && shoreHorizonCount < 620; dist += 92) {
+        const t = dist / len;
+        const mx = x1 + (x2 - x1) * t;
+        const mz = z1 + (z2 - z1) * t;
+        const posW = inWaterAreaOsm(mx + nx * 8, mz + nz * 8);
+        const negW = inWaterAreaOsm(mx - nx * 8, mz - nz * 8);
+        if (posW === negW) continue;
+        const side = posW ? -1 : 1;
+        const wx = mx + nx * side * 8;
+        const wz = mz + nz * side * 8;
+        if (inAirportClearance(wx, wz, 20) || metroCorridor.blocksCircle(wx, wz, 8)) continue;
+        const r = 4.4 + horizonRng() * 2.6;
+        horizonPos.set(wx, 5.8 + horizonRng() * 2.0, wz);
+        horizonQuat.setFromEuler(new THREE.Euler(horizonRng(), horizonRng(), horizonRng()));
+        horizonScale.set(r, r * 0.65, r);
+        horizonTransforms.push(horizonMatrix.compose(horizonPos, horizonQuat, horizonScale).clone());
+        horizonColors.push(
+          horizonRng() < 0.05
+            ? horizonKrishnachura.clone()
+            : horizonPalette[Math.floor(horizonRng() * horizonPalette.length)].clone(),
+        );
+        shoreHorizonCount++;
+      }
+    }
+  }
+  if (horizonTransforms.length > 0) {
+    const horizonMesh = new THREE.InstancedMesh(
+      new THREE.IcosahedronGeometry(1, 0),
+      new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.88 }),
+      horizonTransforms.length,
+    );
+    horizonMesh.name = "OSM horizon Dhaka canopy";
+    horizonTransforms.forEach((transform, index) => {
+      horizonMesh.setMatrixAt(index, transform);
+      horizonMesh.setColorAt(index, horizonColors[index]);
+    });
+    horizonMesh.instanceMatrix.needsUpdate = true;
+    if (horizonMesh.instanceColor) horizonMesh.instanceColor.needsUpdate = true;
+    horizonMesh.castShadow = false;
+    horizonMesh.receiveShadow = true;
+    horizonMesh.matrixAutoUpdate = false;
+    root.add(horizonMesh);
   }
 
   if (colliders.length === 0) {
@@ -5463,23 +7097,37 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
     return null;
   }
   const trafficSimulation = createTrafficSimulation(root, data.roads);
-  if (trafficSimulation) {
-    const fallbackTraffic = scene.userData.trafficSimulation as TrafficSimulation | null | undefined;
-    fallbackTraffic?.dispose();
-    scene.userData.trafficSimulation = trafficSimulation;
-  }
-  // Atomically swap out the fallback layers and reveal the live OSM world so
-  // roads, water, and buildings never overlap across two layers on screen.
-  if (data.roads.length > 0) {
-    const roadFallback = scene.userData.proceduralRoadFallback as THREE.Group | undefined;
-    if (roadFallback) roadFallback.visible = false;
-  }
-  const fallback = scene.userData.fallbackWorld as THREE.Group | undefined;
-  if (fallback) fallback.visible = false;
-  const immediateCityMass = scene.userData.immediateCityMass as THREE.Group | undefined;
-  if (immediateCityMass) immediateCityMass.visible = false;
-  root.visible = true;
-  return colliders;
+  const dispose = () => {
+    trafficSimulation?.dispose();
+    root.traverse((object) => {
+      if (object instanceof THREE.Mesh) {
+        object.geometry.dispose();
+        const material = object.material;
+        if (Array.isArray(material)) material.forEach((entry) => entry.dispose());
+        else material.dispose();
+      }
+    });
+    scene.remove(root);
+  };
+  const reveal = () => {
+    if (trafficSimulation) {
+      const fallbackTraffic = scene.userData.trafficSimulation as TrafficSimulation | null | undefined;
+      fallbackTraffic?.dispose();
+      scene.userData.trafficSimulation = trafficSimulation;
+    }
+    // Atomically swap out the fallback layers and reveal the live OSM world so
+    // roads, water, buildings, and collisions stay in sync on the same frame.
+    if (data.roads.length > 0) {
+      const roadFallback = scene.userData.proceduralRoadFallback as THREE.Group | undefined;
+      if (roadFallback) roadFallback.visible = false;
+    }
+    const fallback = scene.userData.fallbackWorld as THREE.Group | undefined;
+    if (fallback) fallback.visible = false;
+    const immediateCityMass = scene.userData.immediateCityMass as THREE.Group | undefined;
+    if (immediateCityMass) immediateCityMass.visible = false;
+    root.visible = true;
+  };
+  return { colliders, reveal, dispose };
 }
 
 // Both of these read browser-only state that must not differ between the server
@@ -5877,8 +7525,8 @@ export function BirdFlight() {
       && Math.min(window.innerWidth, window.innerHeight) < 820;
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x91c7c0);
-    scene.fog = new THREE.FogExp2(0x91b8a8, 0.00028);
+    scene.background = new THREE.Color(0xc3ced6);
+    scene.fog = new THREE.FogExp2(0xc5ccd2, 0.00028);
     // A 2 m near plane quadruples 24-bit depth-buffer precision across the city
     // compared to 0.5 m while staying well clear of every camera mode.
     const camera = new THREE.PerspectiveCamera(58, mount.clientWidth / mount.clientHeight, 2, 8000);
@@ -5920,7 +7568,7 @@ export function BirdFlight() {
     skyUniforms.sunPosition.value.set(0, 1, 0);
     scene.add(sky);
 
-    const hemisphere = new THREE.HemisphereLight(0xe8f3ee, 0x5d6c58, 1.8);
+    const hemisphere = new THREE.HemisphereLight(0xf1efe9, 0x7a7064, 1.8);
     scene.add(hemisphere);
     const sun = new THREE.DirectionalLight(0xffd6a0, 3.35);
     sun.position.set(-1_200, 1_950, 840);
@@ -5937,7 +7585,7 @@ export function BirdFlight() {
     sun.shadow.bias = -0.0004;
     sun.shadow.normalBias = 0.75;
     scene.add(sun);
-    const skyFill = new THREE.DirectionalLight(0x9bc8d2, 0.48);
+    const skyFill = new THREE.DirectionalLight(0xb6c7d6, 0.48);
     skyFill.position.set(500, 260, -600);
     scene.add(skyFill);
 
@@ -5968,32 +7616,50 @@ export function BirdFlight() {
         return await snapshot.json() as OsmMapData;
       }
     };
+    let pendingOsmWorld: Awaited<ReturnType<typeof addOpenStreetMapWorld>> = null;
+    let pendingProceduralTiles: Awaited<ReturnType<typeof addProceduralDistrictTiles>> | null = null;
     void fetchMapData()
       .then(async (data) => {
         if (disposed) return;
         const mapBuildStartedAt = performance.now();
-        const osmColliders = await addOpenStreetMapWorld(scene, data, () => disposed);
-        if (!osmColliders) throw new Error("OpenStreetMap response contained no usable buildings");
+        const osmWorld = await addOpenStreetMapWorld(scene, data, () => disposed);
+        if (!osmWorld) throw new Error("OpenStreetMap response contained no usable buildings");
+        pendingOsmWorld = osmWorld;
+        const landmarkColliders = scene.userData.landmarkColliders as BuildingCollider[] | undefined ?? [];
+        const proceduralTiles = await addProceduralDistrictTiles(
+          scene,
+          data,
+          [...osmWorld.colliders, ...landmarkColliders],
+          crow.position,
+          () => disposed,
+        );
+        pendingProceduralTiles = proceduralTiles;
+        const nextColliders: BuildingCollider[] = [];
+        for (const group of [osmWorld.colliders, proceduralTiles.colliders, landmarkColliders]) {
+          for (const collider of group) nextColliders.push(collider);
+        }
+        const nextColliderGrid = await buildColliderGridAsync(nextColliders, () => disposed);
+        if (disposed) {
+          proceduralTiles.dispose();
+          osmWorld.dispose();
+          pendingProceduralTiles = null;
+          pendingOsmWorld = null;
+          return;
+        }
+        // Install the collision grid and switch the visible world in the same
+        // synchronous turn so a flying bird never hits hidden buildings or flies
+        // through newly revealed ones.
+        buildingColliders.length = 0;
+        for (const collider of nextColliders) buildingColliders.push(collider);
+        buildingColliderGrid = nextColliderGrid;
+        osmWorld.reveal();
+        proceduralTiles.reveal(crow.position);
+        pendingOsmWorld = null;
+        pendingProceduralTiles = null;
         const rebuildMetro = scene.userData.rebuildMetro as
           | ((lines: MapPoint[][], stations: NonNullable<OsmMapData["metroStations"]>) => void)
           | undefined;
         if (rebuildMetro && data.metroLines?.length) rebuildMetro(data.metroLines, data.metroStations ?? []);
-        const landmarkColliders = scene.userData.landmarkColliders as BuildingCollider[] | undefined ?? [];
-        const proceduralColliders = await addProceduralDistrictTiles(
-          scene,
-          data,
-          [...osmColliders, ...landmarkColliders],
-          crow.position,
-          () => disposed,
-        );
-        // Rebuild in place (the array identity is captured elsewhere) without
-        // spreading: spread-as-arguments overflows the call stack past ~120k items.
-        buildingColliders.length = 0;
-        for (const group of [osmColliders, proceduralColliders, landmarkColliders]) {
-          for (const collider of group) buildingColliders.push(collider);
-        }
-        buildingColliderGrid = await buildColliderGridAsync(buildingColliders, () => disposed);
-        if (disposed) return;
         renderer.domElement.dataset.mapRequestMs = (performance.now() - mapRequestStartedAt).toFixed(1);
         renderer.domElement.dataset.mapBuildMs = (performance.now() - mapBuildStartedAt).toFixed(1);
         // New geometry needs one shadow pass now that the map is no longer redrawn
@@ -6002,6 +7668,10 @@ export function BirdFlight() {
         setMapStatus("live");
       })
       .catch(async (error: unknown) => {
+        pendingProceduralTiles?.dispose();
+        pendingProceduralTiles = null;
+        pendingOsmWorld?.dispose();
+        pendingOsmWorld = null;
         if (disposed) return;
         console.error("Live map build failed; using procedural fallback", error);
         if (!(scene.userData.proceduralDistrictTiles as ProceduralDistrictTile[] | undefined)?.length) {
@@ -6012,21 +7682,36 @@ export function BirdFlight() {
             roads: [],
             water: [],
           };
-          const proceduralColliders = await addProceduralDistrictTiles(
+          const proceduralTiles = await addProceduralDistrictTiles(
             scene,
             emptyMap,
             buildingColliders,
             crow.position,
             () => disposed,
           );
-          if (disposed) return;
-          for (const collider of proceduralColliders) buildingColliders.push(collider);
-          buildingColliderGrid = await buildColliderGridAsync(buildingColliders, () => disposed);
+          pendingProceduralTiles = proceduralTiles;
+          const nextColliders = [...buildingColliders];
+          for (const collider of proceduralTiles.colliders) nextColliders.push(collider);
+          const nextColliderGrid = await buildColliderGridAsync(nextColliders, () => disposed);
+          if (disposed) {
+            proceduralTiles.dispose();
+            pendingProceduralTiles = null;
+            return;
+          }
+          buildingColliders.length = 0;
+          for (const collider of nextColliders) buildingColliders.push(collider);
+          buildingColliderGrid = nextColliderGrid;
+          proceduralTiles.reveal(crow.position);
+          pendingProceduralTiles = null;
         }
         requestShadowUpdate();
         setMapStatus("fallback");
       })
       .catch(() => {
+        pendingProceduralTiles?.dispose();
+        pendingProceduralTiles = null;
+        pendingOsmWorld?.dispose();
+        pendingOsmWorld = null;
         if (!disposed) setMapStatus("fallback");
       });
 
@@ -6035,11 +7720,12 @@ export function BirdFlight() {
     const spawnParams = new URLSearchParams(window.location.search);
     const spawnLat = Number(spawnParams.get("lat")) || 23.7595;
     const spawnLon = Number(spawnParams.get("lon")) || 90.4105;
-    const spawnAlt = Number(spawnParams.get("alt")) || DEFAULT_FLIGHT_ALTITUDE;
+    // Clamped so a shared link can't start the bird above the ceiling, inside the clouds.
+    const spawnAlt = clamp(Number(spawnParams.get("alt")) || DEFAULT_FLIGHT_ALTITUDE, MIN_FLIGHT_ALTITUDE, MAX_FLIGHT_ALTITUDE);
     const spawnWorld = coordinatesToWorld(spawnLat, spawnLon);
     crow.position.set(spawnWorld.x, spawnAlt, spawnWorld.y);
     scene.add(crow);
-    const airflowVfx = createAirflowVfx(crow);
+    const airflowVfx = createAirflowVfx(scene, crow);
     const weatherVfx = createWeatherVfx(
       scene,
       renderer,
@@ -6091,7 +7777,57 @@ export function BirdFlight() {
     // The player's bird. Every species shares one skeleton and the same three
     // clips, so swapping is just replacing the model under the `crow` group. The
     // crow, at /models/dhaka-house-crow.glb, is the default.
+    type WingChain = {
+      shoulder: THREE.Object3D;
+      forearm: THREE.Object3D;
+      hand: THREE.Object3D;
+      tipAnchor: THREE.Object3D;
+    };
+    type BirdRigJoints = {
+      body: THREE.Object3D | null;
+      neck: THREE.Object3D | null;
+      head: THREE.Object3D | null;
+      tail: THREE.Object3D | null;
+      wingL: WingChain | null;
+      wingR: WingChain | null;
+    };
+    const emptyRigJoints = (): BirdRigJoints => ({
+      body: null,
+      neck: null,
+      head: null,
+      tail: null,
+      wingL: null,
+      wingR: null,
+    });
+    const buildWingChain = (model: THREE.Object3D, suffix: "L" | "R", side: -1 | 1): WingChain | null => {
+      const shoulder = model.getObjectByName(`WingJoint.${suffix}`);
+      const forearm = model.getObjectByName(`ForearmJoint.${suffix}`);
+      const hand = model.getObjectByName(`HandJoint.${suffix}`);
+      if (!shoulder || !forearm || !hand) return null;
+      // Find the outermost primary feather tip in HandJoint space so wingtip
+      // trails sit right on each species' actual wingtip regardless of span.
+      let bestExtent = -Infinity;
+      const tipPos = new THREE.Vector3(side * 2.6, -0.06, 0.7);
+      for (const child of hand.children) {
+        if (!(child instanceof THREE.Mesh)) continue;
+        const pos = child.geometry.getAttribute("position");
+        if (!pos) continue;
+        for (let i = 0; i < pos.count; i++) {
+          const vx = pos.getX(i);
+          const extent = vx * side;
+          if (extent > bestExtent) {
+            bestExtent = extent;
+            tipPos.set(vx, pos.getY(i), pos.getZ(i));
+          }
+        }
+      }
+      const tipAnchor = new THREE.Object3D();
+      tipAnchor.position.copy(tipPos);
+      hand.add(tipAnchor);
+      return { shoulder, forearm, hand, tipAnchor };
+    };
     let birdModel: THREE.Object3D | null = null;
+    let rigJoints: BirdRigJoints = emptyRigJoints();
     let birdTraits: Bird = birdById(birdRef.current);
     let birdLoadToken = 0;
     let birdPreviewUntil = 0;
@@ -6118,6 +7854,8 @@ export function BirdFlight() {
           mixer?.uncacheRoot(birdModel);
           crow.remove(birdModel);
           disposeBirdModel(birdModel);
+          rigJoints = emptyRigJoints();
+          airflowVfx.setWingtips(null, null);
         }
         model.scale.setScalar(bird.scale);
         model.traverse((object) => {
@@ -6143,6 +7881,15 @@ export function BirdFlight() {
         });
         crow.add(model);
         birdModel = model;
+        rigJoints = {
+          body: model.getObjectByName("BodyJoint") ?? null,
+          neck: model.getObjectByName("NeckJoint") ?? null,
+          head: model.getObjectByName("HeadJoint") ?? null,
+          tail: model.getObjectByName("TailJoint") ?? null,
+          wingL: buildWingChain(model, "L", -1),
+          wingR: buildWingChain(model, "R", 1),
+        };
+        airflowVfx.setWingtips(rigJoints.wingL?.tipAnchor ?? null, rigJoints.wingR?.tipAnchor ?? null);
         birdTraits = bird;
         flightAudio.setBird(bird.id);
         mixer = new THREE.AnimationMixer(model);
@@ -6216,6 +7963,14 @@ export function BirdFlight() {
     let roll = 0;
     let speed = CRUISE_SPEED;
     let verticalSpeed = 0;
+    let previousVerticalSpeed = 0;
+    let swoopMomentum = 0;
+    let divePose = 0;
+    let climbPose = 0;
+    let flarePose = 0;
+    let bankPose = 0;
+    let smoothedFlapRate = 0.85;
+    let strokeLiftSignal = 0;
     let flapKick = 0;
     let cameraKick = 0;
     let lastFrame = performance.now();
@@ -6238,12 +7993,16 @@ export function BirdFlight() {
     const desiredCamera = new THREE.Vector3();
     const desiredTarget = new THREE.Vector3();
     const forward = new THREE.Vector3();
+    const cameraForward = new THREE.Vector3();
+    const velocityVec = new THREE.Vector3();
     const horizontalForward = new THREE.Vector3();
     const previousPosition = new THREE.Vector3();
     const cameraOffset = new THREE.Vector3();
     const windDrift = new THREE.Vector3();
     const targetQuat = new THREE.Quaternion();
     const euler = new THREE.Euler(0, 0, 0, "YXZ");
+    const postureQuat = new THREE.Quaternion();
+    const postureEuler = new THREE.Euler(0, 0, 0, "YXZ");
     const cameraTarget = new THREE.Vector3();
     let inspectionTarget: THREE.Vector3 | null = null;
     let inspectionCameraOffset = 120;
@@ -6301,6 +8060,11 @@ export function BirdFlight() {
       roll = 0;
       speed = 0;
       verticalSpeed = 0;
+      previousVerticalSpeed = 0;
+      swoopMomentum = 0;
+      divePose = 0;
+      climbPose = 0;
+      flarePose = 0;
     };
     const togglePerch = () => {
       if (!flyingRef.current || pausedRef.current) return;
@@ -6378,6 +8142,11 @@ export function BirdFlight() {
         yawRate = 0;
         speed = CRUISE_SPEED;
         verticalSpeed = 0;
+        previousVerticalSpeed = 0;
+        swoopMomentum = 0;
+        divePose = 0;
+        climbPose = 0;
+        flarePose = 0;
         landingCommit = null;
         camera.position.copy(crow.position).add(new THREE.Vector3(10, 26, 26));
         cameraTarget.copy(crow.position);
@@ -6525,10 +8294,29 @@ export function BirdFlight() {
         CEILING_EASE_DEPTH,
       );
       const altitudeHeadroom = MAX_FLIGHT_ALTITUDE - crow.position.y;
+      const floorSinkScale = THREE.MathUtils.smoothstep(
+        crow.position.y - MIN_FLIGHT_ALTITUDE,
+        0,
+        FLOOR_EASE_DEPTH,
+      );
       const effectiveClimb = climb > 0 ? climb * ceilingClimbScale : climb;
       // Keyboard climb is always ±1, so scaling by magnitude leaves key flight
       // untouched while giving the touch stick a genuinely proportional climb.
       const climbAmount = Math.abs(climb);
+      // Diving stores kinetic energy that lingers after pull-out so swooping low
+      // over a river or converting a dive into a zoom-climb feels buoyant and real.
+      if (!active || braking) {
+        swoopMomentum = Math.max(0, swoopMomentum - 14 * dt);
+      } else if (verticalSpeed < -2) {
+        const diveFeed = clamp((-verticalSpeed - 2) / 20, 0, 1);
+        swoopMomentum = Math.min(18, swoopMomentum + diveFeed * 16 * dt);
+      } else if (verticalSpeed > 1) {
+        swoopMomentum = Math.max(0, swoopMomentum - (4.2 + verticalSpeed * 0.28) * dt);
+      } else {
+        swoopMomentum = Math.max(0, swoopMomentum - 3.6 * dt);
+      }
+      const zoomClimbBonus = swoopMomentum * 0.22;
+      const climbBeatPulse = climb > 0 ? strokeLiftSignal * 1.35 * climbAmount * ceilingClimbScale : 0;
       const targetVerticalSpeed = !active
         ? (restingRef.current ? 0 : verticalSpeed)
         : guidedSink !== null
@@ -6538,27 +8326,46 @@ export function BirdFlight() {
               ? 0
               : Math.max(
                   MIN_CEILING_CLIMB_SPEED,
-                  (16 + speedAmountBeforeThrottle * 7) * ceilingClimbScale * climbAmount,
+                  (15.5 + speedAmountBeforeThrottle * 8 + zoomClimbBonus) * ceilingClimbScale * climbAmount + climbBeatPulse,
                 )
             : climb < 0
-              ? -19 * climbAmount
-              : -0.65;
+              ? -22.5 * climbAmount * floorSinkScale
+              : -0.45 * floorSinkScale;
+      const pullingOutOfDive = climb > 0 && verticalSpeed < -1;
       const verticalResponse = guidedSink !== null
         ? 3.1
-        : climb === 0
-          ? 0.72
-          : climb > 0 && ceilingClimbScale < 1
-            ? THREE.MathUtils.lerp(4.6, 2.25, ceilingClimbScale)
-            : 2.25;
+        : pullingOutOfDive
+          ? 3.6
+          : climb < 0 && floorSinkScale < 1
+            ? THREE.MathUtils.lerp(4.6, 2.05, floorSinkScale)
+            : climb === 0
+              ? 2.1
+              : climb > 0 && ceilingClimbScale < 1
+                ? THREE.MathUtils.lerp(4.6, 2.35, ceilingClimbScale)
+                : climb < 0
+                  ? 1.95
+                  : 2.4;
       verticalSpeed = THREE.MathUtils.lerp(verticalSpeed, targetVerticalSpeed, 1 - Math.exp(-verticalResponse * dt));
+      const verticalAccel = dt > 1e-4 ? (verticalSpeed - previousVerticalSpeed) / dt : 0;
+      previousVerticalSpeed = verticalSpeed;
 
       const trajectoryPitch = Math.atan2(verticalSpeed, Math.max(speed, 1));
-      const targetPitch = clamp(trajectoryPitch * 0.78 + effectiveClimb * 0.11 + flapKick * 0.1, -0.42, 0.44);
-      pitch = THREE.MathUtils.lerp(pitch, targetPitch, 1 - Math.pow(0.88, dt * 60));
+      // Angle-of-attack leads trajectory: the bird tips its beak into a climb or
+      // stoop first, then lift and gravity bend the flight path behind it.
+      const pitchLead = effectiveClimb >= 0 ? effectiveClimb * 0.21 : effectiveClimb * 0.27;
+      const brakeFlarePitch = braking ? 0.16 : 0;
+      const targetPitch = restingRef.current
+        ? 0
+        : clamp(
+            trajectoryPitch * 0.92 + pitchLead + flapKick * 0.14 + brakeFlarePitch + strokeLiftSignal * 0.024,
+            -0.66,
+            0.56,
+          );
+      pitch = THREE.MathUtils.lerp(pitch, targetPitch, 1 - Math.pow(0.84, dt * 60));
       const targetRoll = turn * 0.48;
       roll = THREE.MathUtils.lerp(roll, targetRoll, 1 - Math.pow(0.8, dt * 60));
-      const diveEnergy = clamp(-verticalSpeed * 0.68, 0, 13);
-      const climbCost = clamp(verticalSpeed * 0.22, 0, 5.5);
+      const diveEnergy = Math.max(clamp(-verticalSpeed * 0.72, 0, 16), swoopMomentum);
+      const climbCost = clamp(verticalSpeed * 0.34, 0, 8.5);
       const cruiseTarget = (boost ? BOOST_SPEED : CRUISE_SPEED) + diveEnergy - climbCost;
       // How deep into the approach envelope the bird is: 0 at the outer radius,
       // 1 once inside the flare. Holding BOOST opts out completely, so anyone who
@@ -6588,7 +8395,7 @@ export function BirdFlight() {
       speed = THREE.MathUtils.lerp(speed, targetSpeed, 1 - Math.exp(-throttleResponse * dt));
 
       horizontalForward.set(-Math.sin(yaw), 0, -Math.cos(yaw));
-      forward.set(horizontalForward.x, clamp(verticalSpeed / Math.max(speed, 1), -0.45, 0.45), horizontalForward.z).normalize();
+      forward.set(horizontalForward.x, clamp(verticalSpeed / Math.max(speed, 1), -0.62, 0.58), horizontalForward.z).normalize();
       previousPosition.copy(crow.position);
       if (active) {
         crow.position.addScaledVector(horizontalForward, speed * dt);
@@ -6646,14 +8453,19 @@ export function BirdFlight() {
         // every landing flown at brake speed. Near a perch, keep the slow.
         speed = Math.max(approachPerch ? LANDING_FLARE_SPEED : 28, speed * 0.82);
       }
-      crow.position.y = Math.max(crow.position.y, MIN_FLIGHT_ALTITUDE);
+      const floorAltitude = landingCommit
+        ? Math.min(MIN_FLIGHT_ALTITUDE, Math.max(2.5, landingCommit.position.y - 0.5))
+        : MIN_FLIGHT_ALTITUDE;
+      crow.position.y = Math.max(crow.position.y, floorAltitude);
       if (crow.position.y >= MAX_FLIGHT_ALTITUDE || (climb > 0 && crow.position.y >= MAX_FLIGHT_ALTITUDE - 1)) {
         crow.position.y = MAX_FLIGHT_ALTITUDE;
         verticalSpeed = Math.min(verticalSpeed, 0);
       }
-      if (crow.position.y <= MIN_FLIGHT_ALTITUDE + 0.2) {
-        pitch = Math.max(pitch, 0.16);
-        verticalSpeed = Math.max(verticalSpeed, 7);
+      if (crow.position.y <= floorAltitude) {
+        // Hold the floor without a bounce. The old +7 m/s kick here fought a
+        // held dive every few frames, and the chase camera shook with it.
+        crow.position.y = floorAltitude;
+        verticalSpeed = Math.max(verticalSpeed, 0);
       }
       if (Math.abs(crow.position.x) > FLIGHT_EXTENT.x || Math.abs(crow.position.z) > FLIGHT_EXTENT.z) {
         const homeYaw = Math.atan2(crow.position.x, crow.position.z);
@@ -6667,18 +8479,36 @@ export function BirdFlight() {
         flightAudio.flap();
       }
 
-      euler.set(-pitch, yaw, roll);
+      // Bird models face -Z with +Y up, so a positive X rotation pitches the beak
+      // skyward (+Y) on climbs and a negative X rotation points it into dives.
+      euler.set(pitch, yaw, roll);
       targetQuat.setFromEuler(euler);
-      crow.quaternion.slerp(targetQuat, 1 - Math.pow(0.83, dt * 60));
+      crow.quaternion.slerp(targetQuat, 1 - Math.pow(0.8, dt * 60));
       if (!pausedRef.current && mixer && flapAction && glideAction && restAction) {
         const desiredRestWeight = restingRef.current ? 0.96 : 0;
         const restWeight = THREE.MathUtils.lerp(restAction.getEffectiveWeight(), desiredRestWeight, 1 - Math.pow(0.78, dt * 60));
         restAction.setEffectiveWeight(restWeight);
         restAction.timeScale = 0.55;
-        const desiredFlapWeight = active ? (flapKick > 0 ? 0.96 : birdTraits.cruiseFlap) : 0;
-        const flapWeight = THREE.MathUtils.lerp(flapAction.getEffectiveWeight(), desiredFlapWeight, 1 - Math.pow(0.8, dt * 60));
+
+        // Climbing takes sustained, energetic wingbeats; diving shuts flapping off
+        // and tucks the wings into a streamlined stoop unless the player flaps out.
+        const climbIntent = active ? Math.max(0, effectiveClimb) : 0;
+        const climbVelFactor = active ? clamp((verticalSpeed - 1.2) / 16, 0, 1) : 0;
+        const diveIntent = active ? Math.max(0, -climb) : 0;
+        const diveVelFactor = active ? clamp((-verticalSpeed - 1.5) / 18, 0, 1) : 0;
+        const climbFlap = clamp(climbIntent * 0.88 + climbVelFactor * 0.34, 0, 0.96);
+        const diveSuppression = clamp(diveIntent * 0.92 + diveVelFactor * 0.88, 0, 1);
+        const brakeFlap = active && braking && speed > BRAKE_SPEED + 3 ? 0.42 : 0;
+        const cruiseFlap = birdTraits.cruiseFlap * (1 - diveSuppression) + (boost && diveSuppression < 0.4 ? 0.3 * (1 - diveSuppression) : 0);
+        const desiredFlapWeight = active
+          ? (flapKick > 0 ? 0.98 : clamp(Math.max(climbFlap, cruiseFlap, brakeFlap), 0, 0.98))
+          : 0;
+        const flapWeight = THREE.MathUtils.lerp(flapAction.getEffectiveWeight(), desiredFlapWeight, 1 - Math.pow(0.78, dt * 60));
         flapAction.setEffectiveWeight(flapWeight);
-        flapAction.timeScale = (flapKick > 0 ? 2.15 : 0.7) * birdTraits.flapRate;
+        const targetFlapRate = (0.78 + climbFlap * 1.05 + flapKick * 0.85 + (boost ? 0.32 : 0)) * birdTraits.flapRate;
+        smoothedFlapRate = THREE.MathUtils.lerp(smoothedFlapRate, targetFlapRate, 1 - Math.exp(-8.5 * dt));
+        flapAction.timeScale = smoothedFlapRate;
+
         // Birds differ in leg length, so seat each one's own feet on the perch.
         if (birdModel) birdModel.position.y = birdTraits.restLift * restWeight;
         glideAction.setEffectiveWeight(Math.max(0, 1 - flapWeight - restWeight));
@@ -6691,7 +8521,90 @@ export function BirdFlight() {
         const crossedDownstroke = flapPhaseBefore <= flapPhase
           ? flapPhaseBefore < 0.42 && flapPhase >= 0.42
           : flapPhaseBefore < 0.42 || flapPhase >= 0.42;
-        if (crossedDownstroke && flapWeight > 0.03 && restWeight < 0.5) flightAudio.wingbeat(0.35 + flapWeight * 0.65);
+        if (crossedDownstroke && flapWeight > 0.05 && restWeight < 0.5) flightAudio.wingbeat(0.35 + flapWeight * 0.65);
+
+        // Layer flight biomechanics over the freshly evaluated clip pose: swept
+        // M-wing stoop and furled tail in dives, cupped wings and fanned tail on
+        // flares/pull-outs, and visible downstroke body heave while climbing.
+        const pullOut = active && verticalSpeed < -1 && verticalAccel > 3
+          ? clamp((-verticalSpeed / 14) * ((verticalAccel - 3) / 18), 0, 1)
+          : 0;
+        const targetDivePose = active && !braking
+          ? clamp((diveIntent * 0.55 + diveVelFactor * 0.78) * (1 - flapKick * 0.85), 0, 1)
+          : 0;
+        const targetClimbPose = active ? clamp(climbIntent * 0.65 + climbVelFactor * 0.65 + flapKick * 0.45, 0, 1) : 0;
+        const targetFlarePose = active ? clamp((braking ? 0.9 : 0) + approachBlend * 0.62 + pullOut * 0.88, 0, 1) : 0;
+        const targetBankPose = active ? clamp(turn, -1, 1) : 0;
+
+        divePose = THREE.MathUtils.lerp(divePose, targetDivePose, 1 - Math.exp(-6.5 * dt));
+        climbPose = THREE.MathUtils.lerp(climbPose, targetClimbPose, 1 - Math.exp(-6 * dt));
+        flarePose = THREE.MathUtils.lerp(flarePose, targetFlarePose, 1 - Math.exp(-7.5 * dt));
+        bankPose = THREE.MathUtils.lerp(bankPose, targetBankPose, 1 - Math.exp(-6.5 * dt));
+
+        const inFlight = clamp(1 - restWeight * 1.2, 0, 1);
+        const strokeWave = Math.sin((flapPhase - 0.3) * Math.PI * 2);
+        strokeLiftSignal = strokeWave * flapWeight * inFlight;
+
+        if (rigJoints.body) {
+          const heave = (0.09 + climbPose * 0.16 + flapKick * 0.1) * flapWeight * inFlight;
+          rigJoints.body.position.y += strokeWave * heave;
+          postureEuler.set(strokeWave * 0.038 * flapWeight * (0.4 + climbPose * 0.6) * inFlight, 0, 0, "YXZ");
+          rigJoints.body.quaternion.multiply(postureQuat.setFromEuler(postureEuler));
+        }
+
+        const d = divePose * inFlight;
+        const f = flarePose * (1 - divePose * 0.5) * inFlight;
+        const c = climbPose * inFlight;
+        for (const [wing, side] of [[rigJoints.wingL, -1], [rigJoints.wingR, 1]] as const) {
+          if (!wing) continue;
+          const bankTrim = bankPose * side * inFlight;
+          postureEuler.set(
+            -0.1 * d + 0.16 * f + 0.06 * c,
+            -side * (0.28 * d - 0.08 * f - 0.04 * c),
+            side * (-0.18 * d + 0.14 * f + 0.05 * c),
+            "YXZ",
+          );
+          wing.shoulder.quaternion.multiply(postureQuat.setFromEuler(postureEuler));
+          wing.shoulder.scale.x *= 1 - 0.16 * d + 0.04 * f;
+          wing.shoulder.scale.z *= 1 + 0.06 * d;
+
+          postureEuler.set(0.06 * f, -side * (-0.14 * d), side * (-0.06 * d + 0.06 * f), "YXZ");
+          wing.forearm.quaternion.multiply(postureQuat.setFromEuler(postureEuler));
+
+          postureEuler.set(
+            -0.08 * d + 0.12 * f,
+            -side * (0.52 * d - 0.1 * f - bankTrim * 0.06),
+            side * (-0.12 * d + 0.08 * f),
+            "YXZ",
+          );
+          wing.hand.quaternion.multiply(postureQuat.setFromEuler(postureEuler));
+        }
+
+        if (rigJoints.tail) {
+          rigJoints.tail.scale.set(clamp(1 - 0.28 * d + 0.3 * f + 0.16 * c, 0.68, 1.36), 1, 1);
+          postureEuler.set(
+            0.24 * f + 0.1 * c - 0.06 * d - strokeWave * 0.05 * flapWeight * inFlight,
+            -bankPose * 0.08 * inFlight,
+            -bankPose * 0.2 * inFlight,
+            "YXZ",
+          );
+          rigJoints.tail.quaternion.multiply(postureQuat.setFromEuler(postureEuler));
+        }
+        if (rigJoints.neck) {
+          postureEuler.set(0.05 * c - 0.06 * d + 0.04 * f, 0, 0, "YXZ");
+          rigJoints.neck.quaternion.multiply(postureQuat.setFromEuler(postureEuler));
+        }
+        if (rigJoints.head) {
+          postureEuler.set(
+            0.1 * c - 0.1 * d + 0.1 * f,
+            bankPose * 0.18 * inFlight,
+            -bankPose * 0.12 * inFlight,
+            "YXZ",
+          );
+          rigJoints.head.quaternion.multiply(postureQuat.setFromEuler(postureEuler));
+        }
+      } else {
+        strokeLiftSignal = 0;
       }
 
       nearestPerch = null;
@@ -6789,7 +8702,6 @@ export function BirdFlight() {
         trafficSimulation?.update(dt, frameMs);
         for (const cloud of scene.userData.clouds as THREE.Group[]) {
           cloud.position.x += (cloud.userData.weatherSpeed ?? cloud.userData.speed) * dt;
-          if (cloud.position.x > 1250) cloud.position.x = -1250;
         }
         const markerTime = elapsedTime;
         for (const ribbon of scene.userData.waterRibbons as WaterRibbon[]) {
@@ -6843,11 +8755,26 @@ export function BirdFlight() {
         desiredTarget.copy(inspectionTarget);
       } else if (cameraModeRef.current === "CHASE") {
         const speedAmount = clamp((speed - BRAKE_SPEED) / (BOOST_SPEED - BRAKE_SPEED), 0, 1);
-        const chaseDistance = 14.5 + speedAmount * 9;
-        desiredCamera.copy(crow.position).addScaledVector(forward, -chaseDistance);
-        desiredCamera.y += 6.4 - cameraKick * 1.5;
-        desiredTarget.copy(crow.position).addScaledVector(forward, 13 + speedAmount * 10);
-        desiredTarget.y += 1.4 + verticalSpeed * 0.08;
+        // High up, a level chase camera sees mostly sky with the bird as a dark
+        // silhouette against it. With altitude, rise above the bird and tilt down
+        // so the city fills the frame below its back. During climbs and dives,
+        // follow only part of the flight-path slope so the bird visibly pitches
+        // up or down relative to the view while keeping the receding or rushing
+        // rooftops in frame for vertical depth perception.
+        const highAmount = THREE.MathUtils.smoothstep(crow.position.y, 60, 300);
+        const climbSlope = clamp(verticalSpeed / Math.max(speed, 1), -0.62, 0.58);
+        const cameraSlope = climbSlope >= 0 ? climbSlope * 0.36 : climbSlope * 0.58;
+        cameraForward.set(horizontalForward.x, cameraSlope, horizontalForward.z).normalize();
+        const divePullback = Math.max(0, -verticalSpeed) * 0.18;
+        const chaseDistance = 14.5 + speedAmount * 9 + highAmount * 8 + divePullback;
+        desiredCamera.copy(crow.position).addScaledVector(cameraForward, -chaseDistance);
+        const climbFrameDrop = Math.max(0, verticalSpeed) * 0.14;
+        const diveFrameLift = Math.max(0, -verticalSpeed) * (0.12 - highAmount * 0.05);
+        desiredCamera.y += 6.4 + highAmount * 10 - climbFrameDrop + diveFrameLift - cameraKick * 1.5;
+        const lookAhead = 13 + speedAmount * 10 - highAmount * 3;
+        desiredTarget.copy(crow.position).addScaledVector(cameraForward, lookAhead);
+        const verticalTargetOffset = verticalSpeed >= 0 ? -verticalSpeed * 0.08 : verticalSpeed * 0.05;
+        desiredTarget.y += 1.4 - highAmount * 2.5 + verticalTargetOffset;
       } else {
         // The camera eases toward this point, so at speed it trails by a couple
         // of metres and ends up looking at the back of the bird's own head. Lead
@@ -6859,20 +8786,47 @@ export function BirdFlight() {
       }
       const speedAmount = clamp((speed - BRAKE_SPEED) / (BOOST_SPEED - BRAKE_SPEED), 0, 1);
       if (!reducedMotion) {
-        const shakeAmount = boost ? 0.16 * speedAmount : Math.max(0, speedAmount - 0.78) * 0.12;
+        const diveShake = clamp((-verticalSpeed - 12) / 14, 0, 1) * 0.08;
+        const shakeAmount = (boost ? 0.16 * speedAmount : Math.max(0, speedAmount - 0.78) * 0.12) + diveShake;
         desiredCamera.x += Math.sin(elapsedTime * 43) * shakeAmount;
         desiredCamera.y += Math.sin(elapsedTime * 57 + 1.2) * shakeAmount * 0.65;
       }
-      camera.position.lerp(desiredCamera, 1 - Math.pow(0.78, dt * 60));
-      cameraTarget.lerp(desiredTarget, 1 - Math.pow(0.76, dt * 60));
+      const camPosAlpha = 1 - Math.pow(0.78, dt * 60);
+      const camVerticalAlpha = flyingRef.current && cameraModeRef.current === "CHASE" && !inspectionTarget
+        ? 1 - Math.pow(0.84, dt * 60)
+        : camPosAlpha;
+      camera.position.x = THREE.MathUtils.lerp(camera.position.x, desiredCamera.x, camPosAlpha);
+      camera.position.y = THREE.MathUtils.lerp(camera.position.y, desiredCamera.y, camVerticalAlpha);
+      camera.position.z = THREE.MathUtils.lerp(camera.position.z, desiredCamera.z, camPosAlpha);
+      cameraTarget.lerp(desiredTarget, 1 - Math.pow(0.75, dt * 60));
       camera.lookAt(cameraTarget);
-      const targetFov = reducedMotion ? 58 : 52 + speedAmount * 13 + (boost ? 5 : 0) + clamp(Math.abs(verticalSpeed) / 20, 0, 1) * 2;
-      const nextFov = THREE.MathUtils.lerp(camera.fov, targetFov, 1 - Math.exp(-3.2 * dt));
+      // Keep every cloud within the field around this frame's camera, even while
+      // paused or after a jump to a far landmark, and fade it out over the outer
+      // edge so wrapping to the far side never pops.
+      const cloudFieldSpan = CLOUD_FIELD_RADIUS * 2;
+      for (const cloud of scene.userData.clouds as THREE.Group[]) {
+        cloud.position.x = camera.position.x - CLOUD_FIELD_RADIUS
+          + THREE.MathUtils.euclideanModulo(cloud.position.x - camera.position.x + CLOUD_FIELD_RADIUS, cloudFieldSpan);
+        cloud.position.z = camera.position.z - CLOUD_FIELD_RADIUS
+          + THREE.MathUtils.euclideanModulo(cloud.position.z - camera.position.z + CLOUD_FIELD_RADIUS, cloudFieldSpan);
+        const edgeDistance = Math.max(Math.abs(cloud.position.x - camera.position.x), Math.abs(cloud.position.z - camera.position.z));
+        const edgeFade = 1 - THREE.MathUtils.smoothstep(edgeDistance, CLOUD_FIELD_RADIUS - CLOUD_EDGE_FADE, CLOUD_FIELD_RADIUS);
+        const material = (cloud.children[0] as THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>).material;
+        material.opacity = (cloud.userData.weatherOpacity ?? 0.55) * edgeFade;
+      }
+      const diveFovRush = clamp(-verticalSpeed / 22, 0, 1) * 5;
+      const climbFovTighten = clamp(verticalSpeed / 20, 0, 1) * 1.5;
+      const targetFov = reducedMotion ? 58 : 52 + speedAmount * 13 + (boost ? 5 : 0) + diveFovRush - climbFovTighten;
+      const nextFov = THREE.MathUtils.lerp(camera.fov, targetFov, 1 - Math.exp(-3.4 * dt));
       if (Math.abs(nextFov - camera.fov) > 0.01) {
         camera.fov = nextFov;
         camera.updateProjectionMatrix();
       }
-      airflowVfx.update(dt, speedAmount, verticalSpeed, boost, reducedMotion);
+      velocityVec.set(horizontalForward.x * speed, verticalSpeed, horizontalForward.z * speed);
+      // Refresh world matrices on the posed bird so wingtip ribbons start flush
+      // on the feather tips rather than one frame behind.
+      crow.updateMatrixWorld(true);
+      airflowVfx.update(dt, velocityVec, camera.position, speedAmount, verticalSpeed, boost, active, reducedMotion);
       weatherVfx.update(dt, crow.position, pausedRef.current);
 
       if (speedRef.current) speedRef.current.textContent = localDigits(locale, Math.round(speed));
@@ -7614,7 +9568,9 @@ export function BirdFlight() {
                       title={placeName(locale, landmark.label)}
                       aria-label={fill(t.inspectLandmark, { name: placeName(locale, landmark.label) })}
                       tabIndex={hudOpen === "map" ? 0 : -1}
-                      onClick={() => focusLandmarkRef.current(landmark.kind)}
+                      onClick={() => {
+                        if (focusLandmarkRef.current(landmark.kind)) setInspecting(true);
+                      }}
                       style={mapPosition(landmark.lat, landmark.lon)}
                     >{landmark.shortLabel}</button>
                   ))}
