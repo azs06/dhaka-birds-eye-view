@@ -120,7 +120,7 @@ test("keeps the finished flight experience free of starter preview code", async 
   }
   assert.match(component, /\/api\/radio\?station=foorti/);
   assert.match(component, /\/api\/radio\?station=jago/);
-  assert.match(component, /R \/ \[ \]/);
+  assert.match(component, /\[\["R", "\[", "\]"\], t\.keyRadio\]/);
   assert.match(component, /fetch\("\/api\/weather"/);
   assert.match(component, /weatherVfx\.update/);
   for (const weatherMode of ["cloudy", "fog", "drizzle", "rain", "storm"]) {
@@ -162,8 +162,8 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(component, /resolveBuildingCollision\(crow\.position, previousPosition, struckBuilding\)/);
   // A slide at a concave corner must not deposit the crow inside the neighbour.
   assert.match(component, /if \(buildingAt\(crow\.position\.x, crow\.position\.y, crow\.position\.z\)\) \{\s*\n\s*resolveBuildingCollision\(crow\.position, previousPosition\);/);
-  assert.match(component, /Ctrl \/ Q/);
-  assert.match(strings, /VERT M\/S/);
+  assert.match(component, /\[\["Ctrl", "Q"\], t\.hintBrakeKey\]/);
+  assert.match(strings, /unitVertical: "m\/s"/);
   assert.match(mapRoute, /south: 23\.655/);
   assert.match(mapRoute, /north: 23\.905/);
   assert.match(mapRoute, /CORE_BUILDING_BOUNDS/);
@@ -241,14 +241,21 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(component, /if \(!flyingRef\.current\) \{/);
   assert.match(component, /const LAUNCH_SITES = \[/);
   assert.match(component, /event\.code !== "Enter" && event\.code !== "Space"/);
-  assert.match(component, /className={`launch-code/);
-  // The lower third is a scrim over the live city, not an opaque panel over it.
-  assert.match(component, /className="title-scrim"/);
-  // The start button names its action, and the name is set in Bengali whatever
-  // the interface language.
-  assert.match(component, /className="title-start"/);
-  assert.match(component, /<h1 className="title-wordmark" lang="bn">/);
+  // Two beats, like a flight-sim opening: the sky alone with "press any key",
+  // then a slim bar of tiles that leaves the upper sky clear.
+  assert.match(component, /useState<"title" \| "menu">\("title"\)/);
+  assert.match(component, /className="title-sky" data-art=\{titleArt\}/);
+  assert.match(component, /className="menu-bar"/);
+  assert.match(component, /className="menu-tile go" onClick=\{beginFlight\}/);
   assert.equal(STRINGS.en.startFlight, "Take off");
+  for (const art of ["sky-dawn.jpg", "sky-dusk.jpg", "sky-dawn-phone.jpg"]) {
+    await access(new URL(`../public/title/${art}`, import.meta.url));
+  }
+  // In flight only five controls are on screen; each opens its own panel in place.
+  for (const panel of ["hud-place", "hud-more", "hud-readout", "hud-map"]) {
+    assert.match(component, new RegExp(`hud-w ${panel}`));
+  }
+  assert.match(component, /setHudOpen\(""\)/);
 
   // Keyboard fixes: focused controls keep their own keys, and Escape dismisses
   // the topmost layer before it doubles as the pause key.
@@ -274,9 +281,11 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(component, /renderer\.forceContextLoss\(\)/);
   assert.match(component, /value instanceof THREE\.Texture/);
   assert.match(css, /\.flight-shell/);
-  assert.match(css, /\.topbar\.in-flight/);
-  assert.match(css, /\.folk-river-seal/);
-  assert.match(css, /--vermillion:/);
+  // Warm kohl glass for every piece of chrome, brick only for commit actions,
+  // and no yellow anywhere.
+  assert.match(css, /--kohl: #2a2320/);
+  assert.match(css, /--brick: #b8472d/);
+  assert.doesNotMatch(css, /--acid|#f5d65a|rgba\(216,255,98/i);
   assert.match(css, /\.touch-stick/);
   assert.match(css, /\.touch-controls/);
   assert.match(css, /:focus-visible/);
@@ -335,7 +344,8 @@ test("Bengali translations cover the whole interface", async () => {
   // ref, and styling hooks must stay in English whatever is displayed.
   assert.match(component, /const locale = localeRef\.current;/);
   assert.match(component, /flightModeRef\.current\.dataset\.mode = mode;/);
-  assert.match(component, /<main className="flight-shell" lang=\{locale\}>/);
+  assert.match(component, /<main className=\{shellClass\} lang=\{locale\}/);
+  assert.match(component, /"flight-shell",/);
 });
 
 test("every playable bird ships a model the game can animate", async () => {

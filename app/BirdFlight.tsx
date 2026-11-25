@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
-import type { PointerEvent as ReactPointerEvent } from "react";
+import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
@@ -9,7 +9,6 @@ import { Sky } from "three/examples/jsm/objects/Sky.js";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { resolveBuildingCollision } from "./flight-collision.mjs";
 import {
-  LOCALES,
   STRINGS,
   chooseLocale,
   fill,
@@ -25,6 +24,7 @@ import {
   type Strings,
 } from "./i18n";
 import { BIRDS, birdById, chooseBird, readBird, subscribeToBird, type Bird, type BirdId } from "./birds";
+import { HudIcon, weatherIconName } from "./HudIcon";
 import soundClips from "./sound-clips.json";
 import { DHAKA_LANDMARK_FOOTPRINTS, type LandmarkFootprintPart } from "./dhaka-landmark-footprints";
 
@@ -456,6 +456,14 @@ const SKY_PRESET_KEYS: Record<string, keyof Strings> = {
   dusk: "skyDusk",
   night: "skyNight",
 };
+const SKY_NOTE_KEYS: Record<string, keyof Strings> = {
+  live: "skyLiveNote",
+  dawn: "skyDawnNote",
+  noon: "skyNoonNote",
+  golden: "skyGoldenNote",
+  dusk: "skyDuskNote",
+  night: "skyNightNote",
+};
 
 type FocusClaim = "none" | "text" | "slider" | "activatable";
 const SLIDER_CLAIMED_KEYS = new Set([
@@ -518,15 +526,6 @@ function inAirportClearance(x: number, z: number, pad = 0) {
   if (Math.abs(localX) < 120 + pad && Math.abs(localZ) < 1_640 + pad) return true;
   if (localX > -440 - pad && localX < 120 + pad && localZ > -410 - pad && localZ < 140 + pad) return true;
   return false;
-}
-
-function weatherIcon(mode: WeatherMode, isDay: boolean) {
-  if (mode === "storm") return "ϟ";
-  if (mode === "rain") return "☂";
-  if (mode === "drizzle") return "⌁";
-  if (mode === "fog") return "≋";
-  if (mode === "cloudy") return "☁";
-  return isDay ? "☀" : "☾";
 }
 
 const DHAKA_SKY_LOCATION = { lat: 23.7715, lon: 90.4165 };
@@ -5646,6 +5645,18 @@ function TouchHoldButton({
   );
 }
 
+/** One choice in a take-off menu list: name, a line about it, and a tick when chosen. */
+function MenuOption({ selected, name, note, swatch, onChoose }: { selected: boolean; name: string; note: string; swatch?: string; onChoose: () => void }) {
+  return (
+    <button type="button" className={`menu-opt${selected ? " selected" : ""}${swatch ? "" : " no-swatch"}`} aria-pressed={selected} onClick={onChoose}>
+      <i aria-hidden="true" style={swatch ? { background: swatch } : undefined} />
+      <b>{name}</b>
+      <small>{note}</small>
+      {selected && <HudIcon name="check" className="opt-check" />}
+    </button>
+  );
+}
+
 export function BirdFlight() {
   const mountRef = useRef<HTMLDivElement>(null);
   const speedRef = useRef<HTMLSpanElement>(null);
@@ -5658,6 +5669,10 @@ export function BirdFlight() {
   const perchPromptRef = useRef<HTMLDivElement>(null);
   const perchLabelRef = useRef<HTMLSpanElement>(null);
   const perchRangeRef = useRef<HTMLElement>(null);
+  const landmarkRangeRef = useRef<HTMLSpanElement>(null);
+  // On a phone the map and the settings open as sheets that hold the flight
+  // still without raising the pause dialog. This records that hold.
+  const sheetHoldRef = useRef(false);
   const flyingRef = useRef(false);
   const pausedRef = useRef(false);
   const restingRef = useRef(false);
@@ -5685,9 +5700,18 @@ export function BirdFlight() {
   const [resting, setResting] = useState(false);
   const [cameraMode, setCameraMode] = useState<CameraMode>("CHASE");
   const [inspecting, setInspecting] = useState(false);
-  const [controlsOpen, setControlsOpen] = useState(false);
+  // The title opens on the sky alone; any key brings up the take-off menu.
+  const [titleBeat, setTitleBeat] = useState<"title" | "menu">("title");
+  const [menuOpen, setMenuOpen] = useState<"" | "bird" | "site" | "sky">("");
+  const [titleLeaving, setTitleLeaving] = useState(false);
+  // In flight only five small controls are on screen. Each opens its panel in
+  // place, one at a time.
+  const [hudOpen, setHudOpen] = useState<"" | "place" | "more" | "readout" | "map">("");
+  const [hudHidden, setHudHidden] = useState(false);
+  const [hudIdle, setHudIdle] = useState(false);
+  const [areaLabel, setAreaLabel] = useState("");
+  const [nearestLandmark, setNearestLandmark] = useState("");
   const [soundOn, setSoundOn] = useState(false);
-  const [radioOpen, setRadioOpen] = useState(false);
   const [radioStatus, setRadioStatus] = useState<RadioStatus>("off");
   const [radioStationIndex, setRadioStationIndex] = useState(0);
   const [radioVolume, setRadioVolume] = useState(0.58);
@@ -5702,8 +5726,6 @@ export function BirdFlight() {
   const urlSkyPresetId = useSyncExternalStore(noopSubscribe, readSkyPresetFromUrl, () => "live");
   const [chosenSkyPresetId, setChosenSkyPresetId] = useState<string | null>(null);
   const skyPresetId = chosenSkyPresetId ?? urlSkyPresetId;
-  const [skyOpen, setSkyOpen] = useState(false);
-  const [soundOpen, setSoundOpen] = useState(false);
   // The server renders the designed level; a saved setting swaps in on the client.
   const savedSoundVolume = useSyncExternalStore(noopSubscribe, readSavedSoundVolume, () => 1);
   const [chosenSoundVolume, setChosenSoundVolume] = useState<number | null>(null);
@@ -5785,25 +5807,17 @@ export function BirdFlight() {
   // Topmost-first dismissal order, so Escape always removes exactly one layer.
   useEffect(() => {
     dismissOverlayRef.current = () => {
-      if (radioOpen) {
-        setRadioOpen(false);
+      if (hudOpen) {
+        setHudOpen("");
         return true;
       }
-      if (soundOpen) {
-        setSoundOpen(false);
-        return true;
-      }
-      if (skyOpen) {
-        setSkyOpen(false);
-        return true;
-      }
-      if (controlsOpen) {
-        setControlsOpen(false);
+      if (menuOpen) {
+        setMenuOpen("");
         return true;
       }
       return false;
     };
-  }, [controlsOpen, radioOpen, skyOpen, soundOpen]);
+  }, [hudOpen, menuOpen]);
 
   // Keep the engine at the chosen volume, including one restored from a past visit.
   useEffect(() => {
@@ -6209,6 +6223,14 @@ export function BirdFlight() {
     let elapsedTime = 0;
     let diagnosticFrame = 0;
     let shadowFrame = 0;
+    // The place chip names the district under the bird and the map names the
+    // closest landmark. Both change slowly, so they are looked up a few times a
+    // second and only handed to React when the answer changes.
+    const areaPoints = AREA_LANDMARKS.map((area) => ({ label: area.label, world: coordinatesToWorld(area.lat, area.lon) }));
+    const landmarkPoints = DHAKA_LANDMARKS.map((landmark) => ({ label: landmark.label, world: coordinatesToWorld(landmark.lat, landmark.lon) }));
+    let hudFrame = 0;
+    let shownArea = "";
+    let shownLandmark = "";
     // Touch steering is continuous, unlike the keyboard's on/off axes, so it is
     // kept separate and only used when the keys are idle.
     let pointerTurn = 0;
@@ -6729,10 +6751,7 @@ export function BirdFlight() {
       // current language through a ref instead of a render.
       const locale = localeRef.current;
       const strings = STRINGS[locale];
-      const perchName = (label: string) => {
-        const name = placeName(locale, label);
-        return locale === "en" ? name.toUpperCase() : name;
-      };
+      const perchName = (label: string) => placeName(locale, label);
       if (perchPromptRef.current && perchLabelRef.current) {
         const prompt = perchPromptRef.current;
         const range = perchRangeRef.current;
@@ -6883,6 +6902,41 @@ export function BirdFlight() {
         mapBirdRef.current.style.left = `${50 + clamp(crow.position.x / FLIGHT_EXTENT.x, -1, 1) * 43}%`;
         mapBirdRef.current.style.top = `${50 + clamp(crow.position.z / FLIGHT_EXTENT.z, -1, 1) * 43}%`;
         mapBirdRef.current.style.transform = `translate(-50%, -50%) rotate(${-yaw}rad)`;
+      }
+      hudFrame++;
+      if (hudFrame % 15 === 0) {
+        let area = shownArea;
+        let areaDistance = Infinity;
+        for (const point of areaPoints) {
+          const distance = Math.hypot(point.world.x - crow.position.x, point.world.y - crow.position.z);
+          if (distance < areaDistance) {
+            areaDistance = distance;
+            area = point.label;
+          }
+        }
+        if (area !== shownArea) {
+          shownArea = area;
+          setAreaLabel(area);
+        }
+        let landmark = shownLandmark;
+        let landmarkDistance = Infinity;
+        for (const point of landmarkPoints) {
+          const distance = Math.hypot(point.world.x - crow.position.x, point.world.y - crow.position.z);
+          if (distance < landmarkDistance) {
+            landmarkDistance = distance;
+            landmark = point.label;
+          }
+        }
+        if (landmark !== shownLandmark) {
+          shownLandmark = landmark;
+          setNearestLandmark(landmark);
+        }
+        if (landmarkRangeRef.current) {
+          const range = landmarkDistance < 1_000
+            ? fill(strings.perchRange, { distance: localDigits(locale, Math.round(landmarkDistance / 10) * 10) })
+            : `${localDigits(locale, (landmarkDistance / 1_000).toFixed(1))} ${strings.unitKm}`;
+          landmarkRangeRef.current.textContent = range;
+        }
       }
 
       sky.position.copy(camera.position);
@@ -7038,6 +7092,11 @@ export function BirdFlight() {
     setFlying(true);
     setPaused(false);
     setResting(false);
+    setMenuOpen("");
+    setHudOpen("");
+    // The painted sky fades out over the swoop down into the chase camera.
+    setTitleLeaving(true);
+    window.setTimeout(() => setTitleLeaving(false), 900);
     setSoundOn(await audioRef.current?.start() ?? false);
   }, []);
 
@@ -7046,20 +7105,87 @@ export function BirdFlight() {
     flightActionsRef.current?.spawnAt(site.lat, site.lon, site.alt);
   }, []);
 
-  // Press-start, the way a title screen should answer. Enter or Space begins the
-  // flight without reaching for the mouse; the focus guard keeps it from firing
-  // twice when the BEGIN FLIGHT button itself already has focus.
+  // Press-start, the way a flight-sim title screen answers. On the title any key
+  // brings up the menu; on the menu Enter or Space takes off without reaching
+  // for the mouse. The focus guard leaves keys to a focused control, so Enter
+  // on a tile opens that tile instead of taking off.
   useEffect(() => {
     if (flying) return;
     const onTitleKey = (event: KeyboardEvent) => {
-      if (event.code !== "Enter" && event.code !== "Space") return;
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      if (["Shift", "Control", "Alt", "Meta"].includes(event.key)) return;
       if (focusedControlClaim(event.target) !== "none") return;
+      if (titleBeat === "title") {
+        if (event.code === "Space" || event.code === "Enter") event.preventDefault();
+        setTitleBeat("menu");
+        return;
+      }
+      if (event.code !== "Enter" && event.code !== "Space") return;
+      if (menuOpen) return;
       event.preventDefault();
       void beginFlight();
     };
     window.addEventListener("keydown", onTitleKey);
     return () => window.removeEventListener("keydown", onTitleKey);
-  }, [flying, beginFlight]);
+  }, [flying, beginFlight, menuOpen, titleBeat]);
+
+  // I, M and ? open the place, map and readout panels; H hides everything.
+  useEffect(() => {
+    if (!flying || paused) return;
+    const onHudKey = (event: KeyboardEvent) => {
+      if (event.repeat || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (focusedControlClaimsKey(focusedControlClaim(event.target), event.code)) return;
+      const panel = event.code === "KeyI" ? "place" : event.code === "KeyM" ? "map" : event.key === "?" ? "readout" : null;
+      if (panel) {
+        event.preventDefault();
+        setHudHidden(false);
+        setHudOpen((open) => (open === panel ? "" : panel));
+        return;
+      }
+      if (event.code === "KeyH") {
+        event.preventDefault();
+        setHudOpen("");
+        setHudHidden((hidden) => !hidden);
+      }
+    };
+    window.addEventListener("keydown", onHudKey);
+    return () => window.removeEventListener("keydown", onHudKey);
+  }, [flying, paused]);
+
+  // The chrome steps back while you fly: after four seconds without input the
+  // closed controls fade, and any movement brings them back.
+  useEffect(() => {
+    if (!flying) return;
+    let timer = window.setTimeout(() => setHudIdle(true), 4_000);
+    const wake = () => {
+      setHudIdle(false);
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => setHudIdle(true), 4_000);
+    };
+    const events = ["pointermove", "pointerdown", "keydown"] as const;
+    for (const name of events) window.addEventListener(name, wake, { passive: true });
+    return () => {
+      window.clearTimeout(timer);
+      for (const name of events) window.removeEventListener(name, wake);
+    };
+  }, [flying]);
+
+  // A phone's map and settings sheets cover most of the screen, so they hold
+  // the flight still while they are open and let it go when they close.
+  const sheetOpen = touchDevice && flying && !paused && (hudOpen === "map" || hudOpen === "more");
+  useEffect(() => {
+    if (!sheetOpen || pausedRef.current) return;
+    pausedRef.current = true;
+    sheetHoldRef.current = true;
+    audioRef.current?.pause();
+    return () => {
+      // A real pause taken while the sheet was up keeps the flight stopped.
+      if (!sheetHoldRef.current) return;
+      sheetHoldRef.current = false;
+      pausedRef.current = false;
+      audioRef.current?.resume();
+    };
+  }, [sheetOpen]);
 
   const toggleSound = async () => {
     const enabled = await audioRef.current?.toggle() ?? false;
@@ -7069,300 +7195,437 @@ export function BirdFlight() {
 
   const togglePause = () => {
     if (!flyingRef.current) return;
+    if (sheetHoldRef.current) {
+      // Turn the sheet's hold into a real pause rather than releasing it.
+      sheetHoldRef.current = false;
+      setHudOpen("");
+      setPaused(true);
+      return;
+    }
     const nextPaused = !pausedRef.current;
     pausedRef.current = nextPaused;
     setPaused(nextPaused);
-    if (nextPaused) audioRef.current?.pause();
-    else audioRef.current?.resume();
+    if (nextPaused) {
+      setHudOpen("");
+      audioRef.current?.pause();
+    } else audioRef.current?.resume();
   };
 
-  const weatherDetail = fill(t.weatherDetail, {
-    temperature: localDigits(locale, Math.round(weather.apparentTemperature)),
-    wind: localDigits(locale, Math.round(weather.windSpeed)),
-  });
-  const weatherState = weatherStatus === "live" ? t.weatherLive : weatherStatus === "loading" ? t.weatherSync : t.weatherOffline;
-  const weatherChip = (
-    <>
-      <strong>{weatherIcon(weather.mode, skyIsDay)}</strong>
-      <span>{weatherLabel(locale, weather.label)}</span>
-      <b>{localDigits(locale, Math.round(weather.temperature))}°</b>
-      <i>{weatherState}</i>
-    </>
-  );
-  const radioStateText = radioStatus === "playing" ? t.radioOnAir : radioStatus === "buffering" ? t.radioTuning : radioStatus === "paused" ? t.radioPaused : radioStatus === "error" ? t.radioSignalLost : t.radioOff;
+  const openSettings = () => {
+    togglePause();
+    setHudOpen("more");
+  };
+
+  // Back to the title, with the bird left where it is so the menu can change
+  // the bird, the place or the sky before the next take-off.
+  const backToStart = () => {
+    if (restingRef.current) flightActionsRef.current?.togglePerch();
+    flightActionsRef.current?.releaseInspection();
+    sheetHoldRef.current = false;
+    flyingRef.current = false;
+    pausedRef.current = false;
+    restingRef.current = false;
+    audioRef.current?.pause();
+    setFlying(false);
+    setPaused(false);
+    setResting(false);
+    setHudOpen("");
+    setHudHidden(false);
+    setTitleBeat("menu");
+  };
+
+  const toggleHud = (panel: Exclude<typeof hudOpen, "">) => setHudOpen((open) => (open === panel ? "" : panel));
+
+  // A click on the open sky closes whatever panel is up, as Escape does.
+  const closeOnScene = (event: ReactPointerEvent<HTMLElement>) => {
+    const target = event.target as Element;
+    if (!flying) {
+      if (menuOpen && !target.closest(".menu-w")) setMenuOpen("");
+      return;
+    }
+    if (hudOpen && !target.closest(".hud-w, .touch-controls, .perch-prompt, .inspect-exit")) setHudOpen("");
+  };
 
   const selectedBird = birdById(birdId);
-  const birdPicker = (
-    <div className="bird-picker" role="group" aria-label={t.birdGroup}>
-      <span className="launch-ticker-label">{t.birdLabel}</span>
-      <div className="launch-sites">
-        {BIRDS.map((bird) => (
-          <button
-            key={bird.id}
-            type="button"
-            className={`bird-choice${bird.id === birdId ? " active" : ""}`}
-            aria-pressed={bird.id === birdId}
-            aria-label={fill(t.birdFlyAs, { name: t[bird.name] })}
-            onClick={() => chooseBird(bird.id)}
-          >
-            <i aria-hidden="true" style={{ background: `linear-gradient(90deg, ${bird.swatch[0]} 0 50%, ${bird.swatch[1]} 50% 82%, ${bird.swatch[2]} 82%)` }} />
-            {t[bird.name]}
-          </button>
-        ))}
-      </div>
-      <p className="bird-note">{t[selectedBird.note]}</p>
+  const otherLocale: Locale = locale === "bn" ? "en" : "bn";
+  const selectedSite = LAUNCH_SITES.find((site) => site.id === launchSiteId) ?? null;
+  const selectedSky = SKY_PRESETS.find((preset) => preset.id === skyPresetId) ?? SKY_PRESETS[0];
+  const skyName = (id: string) => t[SKY_PRESET_KEYS[id]] ?? id;
+  const skyNote = (id: string) => t[SKY_NOTE_KEYS[id]] ?? "";
+  const areaName = areaLabel ? placeName(locale, areaLabel) : t.launchAnywhere;
+  const weatherIconKey = weatherIconName(weather.mode, skyIsDay);
+  // Night and dusk skies get the dusk painting; every other hour opens at dawn.
+  const titleArt = skyPresetId === "dusk" || skyPresetId === "night" || (skyPresetId === "live" && !skyIsDay) ? "dusk" : "dawn";
+  const temperature = `${localDigits(locale, Math.round(weather.temperature))}°`;
+  const radioActive = radioStatus === "playing" || radioStatus === "buffering";
+  const radioStateText = radioStatus === "playing" ? t.radioStatePlaying : radioStatus === "buffering" ? t.radioStateTuning : radioStatus === "paused" ? t.radioStatePaused : radioStatus === "error" ? t.radioStateLost : t.radioStateOff;
+  const flightKeys: Array<[string[], string]> = [[["W", "S"], t.hintClimbDive], [["A", "D"], t.hintBank], [["Space"], t.hintFlap], [["Ctrl", "Q"], t.hintBrakeKey], [["Shift"], t.hintBoostKey], [["E"], t.hintLand]];
+  const hudKeys: Array<[string[], string]> = [[["I"], t.keyPlace], [["M"], t.keyMap], [["C"], t.keyCamera], [["L"], t.keyLandmarks], [["R", "[", "]"], t.keyRadio], [["H"], t.keyHide], [["Esc"], t.keyEsc]];
+  const keyRow = (list: Array<[string[], string]>) => (
+    <div className="hud-keys">
+      {list.map(([caps, label]) => (
+        <span key={caps.join("")}>{caps.map((cap) => <kbd key={cap} lang="en">{cap}</kbd>)}{label}</span>
+      ))}
+    </div>
+  );
+  const panelHead = (title: string) => (
+    <div className="hud-head">
+      <h2>{title}</h2>
+      <button type="button" className="hud-x" onClick={() => setHudOpen("")} aria-label={t.panelClose}><HudIcon name="close" /></button>
+    </div>
+  );
+  const sheetNote = touchDevice ? <p className="sheet-paused"><HudIcon name="pause" />{t.sheetPaused}</p> : null;
+  const mapPosition = (lat: number, lon: number) => {
+    const world = coordinatesToWorld(lat, lon);
+    return {
+      left: `${50 + clamp(world.x / FLIGHT_EXTENT.x, -1, 1) * 43}%`,
+      top: `${50 + clamp(world.y / FLIGHT_EXTENT.z, -1, 1) * 43}%`,
+    };
+  };
+  const menuTile = (id: "bird" | "site" | "sky", label: string, value: ReactNode, sub: string, list: ReactNode) => (
+    <div className={`menu-w menu-${id}${menuOpen === id ? " open" : ""}`}>
+      <button
+        type="button"
+        className="menu-tile"
+        aria-expanded={menuOpen === id}
+        aria-controls={`menu-list-${id}`}
+        onClick={() => setMenuOpen((open) => (open === id ? "" : id))}
+      >
+        <span className="tile-k">{label}</span>
+        <span className="tile-v">{value}</span>
+        <span className="tile-s">{sub}</span>
+        <HudIcon name="chev" className="hud-chev" />
+      </button>
+      <div className="menu-list" id={`menu-list-${id}`} role="group" aria-label={label}>{list}</div>
     </div>
   );
 
+  const shellClass = [
+    "flight-shell",
+    flying ? "in-flight" : "on-title",
+    paused ? "is-paused" : "",
+    hudOpen ? "has-open" : "",
+    hudHidden ? "hud-hidden" : "",
+    hudIdle && !hudOpen ? "hud-idle" : "",
+    sheetOpen ? "sheet-open" : "",
+  ].filter(Boolean).join(" ");
+
   return (
-    <main className="flight-shell" lang={locale}>
+    <main className={shellClass} lang={locale} onPointerDown={closeOnScene}>
       <div ref={mountRef} className="world" aria-label={t.worldLabel} />
       <div className="atmosphere" data-weather={weather.mode} data-daylight={skyIsDay ? "day" : "night"} />
       <div ref={flightEffectRef} className="flight-dynamics" aria-hidden="true" />
 
-      <header className={`topbar${flying ? " in-flight" : ""}`}>
-        {!flying && <div className="brand">
-          <span className="folk-river-seal" aria-hidden="true">
-            <span className="folk-sun" />
-            <i className="folk-wave one" /><i className="folk-wave two" />
-          </span>
-          <strong lang="en">{STRINGS.en.brandName}</strong>
-        </div>}
-        {!flying && <div className={`weather-chip ${weatherStatus}`} title={weatherDetail}>{weatherChip}</div>}
-        <div className="top-actions">
-          <div className="language-switch" role="group" aria-label={t.language}>
-            {LOCALES.map((code) => (
-              <button
-                key={code}
-                type="button"
-                lang={code}
-                className={code === locale ? "selected" : ""}
-                aria-pressed={code === locale}
-                onClick={() => chooseLocale(code)}
-              >{code === "bn" ? "বাংলা" : "English"}</button>
-            ))}
-          </div>
-          <button
-            className={`icon-button sound-button${soundOn ? " active" : ""}`}
-            onClick={() => {
-              setSoundOpen((value) => !value);
-              setSkyOpen(false);
-            }}
-            aria-label={t.soundOpen}
-            aria-expanded={soundOpen}
-            title={soundOn ? t.soundOnTitle : t.soundOffTitle}
-          >♫</button>
-          <button
-            className={`icon-button radio-toggle${radioStatus === "playing" || radioStatus === "buffering" ? " active" : ""}`}
-            onClick={() => setRadioOpen((value) => !value)}
-            aria-label={t.radioOpen}
-            aria-expanded={radioOpen}
-          >◉</button>
-          <button
-            className={`icon-button sky-toggle${skyPresetId !== "live" ? " active" : ""}`}
-            onClick={() => {
-              setSkyOpen((value) => !value);
-              setSoundOpen(false);
-            }}
-            aria-label={t.skyOpen}
-            aria-expanded={skyOpen}
-          >◐</button>
-          {flying && <button className={`icon-button pause-button${paused ? " active" : ""}`} onClick={togglePause} aria-label={paused ? t.flightResume : t.flightPause}>{paused ? "▶" : "Ⅱ"}</button>}
-          <button className="icon-button" onClick={() => setControlsOpen((value) => !value)} aria-label={t.controlsOpen}>?</button>
-        </div>
-      </header>
-
-      {soundOpen && (
-        <section className={`sky-panel sound-panel${flying ? " in-flight" : ""}`} aria-label={t.soundPanel}>
-          <button className="radio-close" onClick={() => setSoundOpen(false)} aria-label={t.soundClose}>×</button>
-          <span className="eyebrow">{t.soundHeading}</span>
-          <p>{t.soundBody}</p>
-          <label className="radio-volume sound-volume">
-            <span>{t.soundVolumeShort}</span>
-            <input
-              type="range"
-              min="0"
-              max="1.5"
-              step="0.05"
-              value={soundVolume}
-              onChange={(event) => changeSoundVolume(Number(event.target.value))}
-              aria-label={t.soundVolume}
-              aria-valuetext={`${Math.round(soundVolume * 100)}%`}
-            />
-            <b>{localDigits(locale, Math.round(soundVolume * 100))}%</b>
-          </label>
-          <button type="button" className="sound-switch" aria-pressed={soundOn} onClick={toggleSound}>
-            {soundOn ? t.soundMute : t.soundEnable}
-          </button>
-          <small>{t.soundNote}</small>
-        </section>
-      )}
-
-      {skyOpen && (
-        <section className={`sky-panel${flying ? " in-flight" : ""}`} aria-label={t.skyPanel}>
-          <button className="radio-close" onClick={() => setSkyOpen(false)} aria-label={t.skyClose}>×</button>
-          <span className="eyebrow">{t.skyHeading}</span>
-          <p>{t.skyBody}</p>
-          <div className="sky-presets" role="group" aria-label={t.skyPresets}>
-            {SKY_PRESETS.map((preset) => (
-              <button
-                key={preset.id}
-                type="button"
-                className={preset.id === skyPresetId ? "selected" : ""}
-                aria-pressed={preset.id === skyPresetId}
-                onClick={() => chooseSkyPreset(preset)}
-              >{t[SKY_PRESET_KEYS[preset.id]] ?? preset.label}</button>
-            ))}
-          </div>
-          <small>{skyPresetId === "live" ? t.skyFollowing : t.skyHeld}</small>
-        </section>
-      )}
-
-      {radioOpen && (
-        <section className={`radio-panel${flying ? " in-flight" : ""}`} aria-label={t.radioPanel}>
-          <button className="radio-close" onClick={() => setRadioOpen(false)} aria-label={t.radioClose}>×</button>
-          <div className="radio-heading">
-            <span className="eyebrow">{t.radioHeading}</span>
-            <span className={`radio-status ${radioStatus}`}>{radioStateText}</span>
-          </div>
-          <div className="radio-display" aria-live="polite">
-            <span>{frequencyText(locale, selectedRadioStation.frequency)}</span>
-            <h2>{selectedStationText.name}</h2>
-            <p>{radioStatus === "error" ? t.radioUnavailable : selectedStationText.tagline}</p>
-          </div>
-          <div className="radio-transport">
-            <button onClick={() => cycleRadio(-1)} aria-label={t.radioPrevious}>‹</button>
-            <button className="radio-power" onClick={toggleRadio} aria-label={radioStatus === "off" || radioStatus === "error" ? t.radioPlayStation : t.radioTurnOff}>
-              {radioStatus === "off" || radioStatus === "error" ? t.radioPlay : t.radioOff}
+      {(!flying || titleLeaving) && (
+        <section
+          className={`title-screen beat-${titleBeat}${flying ? " leaving" : ""}`}
+          aria-label={t.titleScreen}
+          onClick={(event) => {
+            if (titleBeat === "title" && !(event.target as Element).closest("button, a")) setTitleBeat("menu");
+          }}
+        >
+          <div className="title-sky" data-art={titleArt} aria-hidden="true" />
+          <div className="title-shade" aria-hidden="true" />
+          <div className="title-top">
+            <span className="title-mark"><HudIcon name="brand" className="brand-icon" />{t.titleNameA} {t.titleNameB}</span>
+            <span className={`title-live ${mapStatus}`} role="status">
+              <i data-weather={weatherStatus} />
+              {mapStatus === "loading"
+                ? t.loadLoading
+                : `${skyPresetId === "live" ? t.liveSky : skyName(skyPresetId)} · ${weatherLabel(locale, weather.label)} · ${temperature}`}
+            </span>
+            <button type="button" className="hud-chip" lang={otherLocale} onClick={() => chooseLocale(otherLocale)}>
+              <HudIcon name="lang" />{otherLocale === "bn" ? "বাংলা" : "English"}
             </button>
-            <button onClick={() => cycleRadio(1)} aria-label={t.radioNext}>›</button>
+            <button type="button" className="hud-chip icon" onClick={toggleSound} aria-label={soundOn ? t.soundMute : t.soundEnable} aria-pressed={soundOn}>
+              <HudIcon name={soundOn ? "sound" : "mute"} />
+            </button>
           </div>
-          <label className="radio-volume">
-            <span>{t.radioVolumeShort}</span>
-            <input
-              type="range"
-              min="0"
-              max="1"
-              step="0.05"
-              value={radioVolume}
-              onChange={(event) => {
-                const volume = Number(event.target.value);
-                setRadioVolume(volume);
-                radioRef.current?.setVolume(volume);
-              }}
-              aria-label={t.radioVolume}
-            />
-          </label>
-          <div className="radio-stations" role="group" aria-label={t.radioStations}>
-            {RADIO_STATIONS.map((station, index) => {
-              const text = stationText(locale, station);
-              return (
-                <button
-                  key={station.id}
-                  className={index === radioStationIndex ? "selected" : ""}
-                  onClick={() => tuneRadio(index)}
-                  aria-label={fill(t.radioTune, { name: text.name })}
-                >
-                  <span>{frequencyText(locale, station.frequency)}</span>
-                  <b>{text.name}</b>
-                  <i>{station.stream ? t.radioLiveTag : "BEV"}</i>
-                </button>
-              );
-            })}
+
+          <div className="title-hero" aria-hidden={titleBeat === "menu"}>
+            <h1 className="title-name"><span>{t.titleNameA}</span> <span>{t.titleNameB}</span></h1>
+            <p>{t.titleTagline}</p>
+            <button type="button" className="title-any" onClick={() => setTitleBeat("menu")} aria-label={t.titleWake}>
+              {touchDevice ? t.titleTap : t.titlePressKey}
+            </button>
           </div>
-          <div className="radio-meta">
-            <span><kbd>R</kbd> {t.radioPower}</span><span><kbd>[ ]</kbd> {t.radioTuneKey}</span>
-            {selectedRadioStation.homepage && <a href={selectedRadioStation.homepage} target="_blank" rel="noreferrer">{t.radioOfficial}</a>}
+
+          <div className="title-menu" aria-hidden={titleBeat === "title"} inert={titleBeat === "title"}>
+            <div className="menu-title">
+              <h1 className="title-name"><span>{t.titleNameA}</span> <span>{t.titleNameB}</span></h1>
+              <p>{selectedSite ? fill(t.menuSummary, { bird: t[selectedBird.name], place: placeName(locale, selectedSite.label) }) : fill(t.menuSummaryAnywhere, { bird: t[selectedBird.name] })}</p>
+            </div>
+            <div className="menu-bar">
+              <button type="button" className="menu-tile go" onClick={beginFlight}>
+                <span className="tile-k">{t.menuFreeFlight}</span>
+                <span className="tile-v">{t.startFlight}</span>
+                {!touchDevice && <kbd lang="en">{t.startKeyHint}</kbd>}
+              </button>
+              {menuTile(
+                "bird",
+                t.menuBird,
+                <><i className="tile-swatch" style={{ background: selectedBird.swatch[0] }} />{t[selectedBird.name]}</>,
+                STRINGS[otherLocale][selectedBird.name],
+                BIRDS.map((bird) => (
+                  <MenuOption key={bird.id} selected={bird.id === birdId} name={t[bird.name]} note={t[bird.note]} swatch={bird.swatch[0]} onChoose={() => {
+                    chooseBird(bird.id);
+                    setMenuOpen("");
+                  }} />
+                )),
+              )}
+              {menuTile(
+                "site",
+                t.menuStart,
+                <><HudIcon name="pin" />{selectedSite ? placeName(locale, selectedSite.label) : t.launchAnywhere}</>,
+                selectedSite ? placeName(otherLocale, selectedSite.label) : t.launchAnywhereNote,
+                LAUNCH_SITES.map((site) => (
+                  <MenuOption key={site.id} selected={site.id === launchSiteId} name={placeName(locale, site.label)} note={placeName(otherLocale, site.label)} onChoose={() => {
+                    chooseLaunchSite(site);
+                    setMenuOpen("");
+                  }} />
+                )),
+              )}
+              {menuTile(
+                "sky",
+                t.menuSky,
+                <><HudIcon name={selectedSky.id === "live" ? weatherIconKey : selectedSky.id === "dusk" || selectedSky.id === "night" ? "moon" : "sun"} />{skyName(selectedSky.id)}</>,
+                skyNote(selectedSky.id),
+                SKY_PRESETS.map((preset) => (
+                  <MenuOption key={preset.id} selected={preset.id === skyPresetId} name={skyName(preset.id)} note={skyNote(preset.id)} onChoose={() => {
+                    chooseSkyPreset(preset);
+                    setMenuOpen("");
+                  }} />
+                )),
+              )}
+            </div>
           </div>
-          <small>{t.radioNote}</small>
         </section>
       )}
-
-      {!radioOpen && radioStatus !== "off" && (
-        <button className={`radio-now-playing ${radioStatus}${flying ? " in-flight" : ""}`} onClick={() => setRadioOpen(true)} aria-label={t.radioNowPlaying}>
-          <i />
-          <span>{radioStatus === "error" ? t.radioSignalLost : frequencyText(locale, selectedRadioStation.frequency)}</span>
-          <b>{selectedStationText.name}</b>
-        </button>
-      )}
-
-      {flying && <div className={`weather-chip weather-flight ${weatherStatus}`} title={weatherDetail}>{weatherChip}</div>}
 
       {flying && (
-        <>
-          <section className="telemetry" aria-label={t.telemetry}>
-            <div><span ref={speedRef}>{localDigits(locale, 48)}</span><small>{t.unitSpeed}</small></div>
-            <i />
-            <div><span ref={altitudeRef}>{localDigits(locale, DEFAULT_FLIGHT_ALTITUDE)}</span><small>{t.unitAltitude}</small></div>
-            <i />
-            <div><span ref={verticalSpeedRef}>{localDigits(locale, "+0.0")}</span><small>{t.unitVertical}</small></div>
-            <i />
-            <div><span ref={compassRef}>{t.minimapNorth}</span><small>{t.unitHeading}</small></div>
-          </section>
-          <div className="flight-mode"><i /><span ref={flightModeRef} data-mode="cruise">{t.modeCruise}</span></div>
-
-          <div className="minimap" aria-label={t.minimap}>
-            <span className="north">{t.minimapNorth}</span>
-            <div className="map-water one" /><div className="map-water two" />
-            <div className="map-road" />
-            {AREA_LANDMARKS.filter((landmark) => landmark.minimap).map((landmark) => {
-              const world = coordinatesToWorld(landmark.lat, landmark.lon);
-              return (
-                <span
-                  key={landmark.label}
-                  className="map-area"
-                  lang="en"
-                  title={placeName(locale, landmark.label)}
-                  style={{
-                    left: `${50 + clamp(world.x / FLIGHT_EXTENT.x, -1, 1) * 43}%`,
-                    top: `${50 + clamp(world.y / FLIGHT_EXTENT.z, -1, 1) * 43}%`,
+        <div className="hud" aria-hidden={paused}>
+          {/* Top left: where you are, the weather, the sky and the radio. */}
+          <div className={`hud-w hud-place${hudOpen === "place" ? " open" : ""}`}>
+            <button type="button" className="hud-chip" onClick={() => toggleHud("place")} aria-expanded={hudOpen === "place"} aria-controls="hud-place" aria-label={t.placeOpen}>
+              <HudIcon name="pin" />
+              <span>{areaName}</span>
+              <i className="chip-sep" />
+              <HudIcon name={weatherIconKey} />
+              <span className="num">{temperature}</span>
+              {radioActive && <span className="eq" aria-hidden="true"><i /><i /><i /></span>}
+              <HudIcon name="chev" className="hud-chev" />
+            </button>
+            <div className="hud-panel" id="hud-place" role="dialog" aria-label={fill(t.placeOver, { place: areaName })}>
+              {panelHead(fill(t.placeOver, { place: areaName }))}
+              <div className="wx-line">
+                <span><HudIcon name={weatherIconKey} /><b>{weatherLabel(locale, weather.label)}</b> <b className="num">{temperature}</b></span>
+                <span>{fill(t.placeFeels, { temperature: localDigits(locale, Math.round(weather.apparentTemperature)) })}</span>
+                <span>{fill(t.placeWind, { wind: localDigits(locale, Math.round(weather.windSpeed)) })}</span>
+              </div>
+              <div className="hud-label">{t.menuSky}</div>
+              <div className="hud-seg three" role="group" aria-label={t.skyPresets}>
+                {SKY_PRESETS.map((preset) => (
+                  <button key={preset.id} type="button" className={preset.id === skyPresetId ? "selected" : ""} aria-pressed={preset.id === skyPresetId} onClick={() => chooseSkyPreset(preset)}>
+                    {skyName(preset.id)}
+                  </button>
+                ))}
+              </div>
+              <p className="hud-note">{skyPresetId === "live" ? t.skyLiveHint : t.skyHeldHint}</p>
+              <div className="hud-label">{t.radioTitle}</div>
+              <div className={`radio-row ${radioStatus}`}>
+                {radioActive ? <span className="eq" aria-hidden="true"><i /><i /><i /></span> : <i className="radio-dot" aria-hidden="true" />}
+                <span className="radio-station" aria-live="polite">
+                  <b>{selectedStationText.name}</b>
+                  <small><span className="num">{frequencyText(locale, selectedRadioStation.frequency)}</span> · {radioStateText}</small>
+                </span>
+                <button type="button" className="radio-btn" onClick={() => cycleRadio(-1)} aria-label={t.radioPrevious}><HudIcon name="prev" /></button>
+                <button type="button" className="radio-btn main" onClick={toggleRadio} aria-label={radioStatus === "off" || radioStatus === "error" ? t.radioPlayStation : t.radioTurnOff}>
+                  <HudIcon name={radioStatus === "off" || radioStatus === "error" ? "play" : "pause"} />
+                </button>
+                <button type="button" className="radio-btn" onClick={() => cycleRadio(1)} aria-label={t.radioNext}><HudIcon name="next" /></button>
+              </div>
+              <label className="hud-range">
+                <HudIcon name="sound" />
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  value={radioVolume}
+                  onChange={(event) => {
+                    const volume = Number(event.target.value);
+                    setRadioVolume(volume);
+                    radioRef.current?.setVolume(volume);
                   }}
-                >{landmark.shortLabel}</span>
-              );
-            })}
-            {DHAKA_LANDMARKS.filter((landmark) => landmark.minimap).map((landmark) => {
-              const world = coordinatesToWorld(landmark.lat, landmark.lon);
-              return (
-                <button
-                  type="button"
-                  key={landmark.label}
-                  className="map-landmark"
-                  lang="en"
-                  title={placeName(locale, landmark.label)}
-                  aria-label={fill(t.inspectLandmark, { name: placeName(locale, landmark.label) })}
-                  onClick={() => focusLandmarkRef.current(landmark.kind)}
-                  style={{
-                    left: `${50 + clamp(world.x / FLIGHT_EXTENT.x, -1, 1) * 43}%`,
-                    top: `${50 + clamp(world.y / FLIGHT_EXTENT.z, -1, 1) * 43}%`,
-                  }}
-                >{landmark.shortLabel}</button>
-              );
-            })}
-            {WATER_LANDMARKS.filter((landmark) => landmark.minimap).map((landmark) => {
-              const world = coordinatesToWorld(landmark.lat, landmark.lon);
-              return (
-                <span
-                  key={landmark.label}
-                  className="map-river"
-                  lang="en"
-                  title={placeName(locale, landmark.label)}
-                  style={{
-                    left: `${50 + clamp(world.x / FLIGHT_EXTENT.x, -1, 1) * 43}%`,
-                    top: `${50 + clamp(world.y / FLIGHT_EXTENT.z, -1, 1) * 43}%`,
-                  }}
-                >{landmark.shortLabel}</span>
-              );
-            })}
-            <div ref={mapBirdRef} className="map-bird">▲</div>
-            <small>{t.minimapCaption}</small>
+                  aria-label={t.radioVolume}
+                />
+                {selectedRadioStation.homepage && <a href={selectedRadioStation.homepage} target="_blank" rel="noreferrer">{t.radioWebsite}</a>}
+              </label>
+              <div className="hud-rule" />
+              <button type="button" className={`hud-btn share-view ${shareState}`} onClick={shareView}>
+                <HudIcon name="share" />
+                {shareState === "copied" ? t.shareCopied : shareState === "failed" ? t.shareFailed : t.share}
+              </button>
+              {shareState === "failed" && (
+                <label className="share-fallback">
+                  <span>{t.shareFallback}</span>
+                  <input readOnly value={sharedLink} onFocus={(event) => event.target.select()} aria-label={t.shareLink} />
+                </label>
+              )}
+            </div>
           </div>
 
-          <div className="camera-chip"><span>{t.camera}</span>{cameraMode === "CHASE" ? t.cameraChase : t.cameraBirdsEye}<kbd>C</kbd></div>
-          <div className="perch-legend"><i /> {t.perchLegend}</div>
-          {!touchDevice && <div className="flight-hint"><kbd>W / S</kbd><span>{t.hintClimbDive}</span><kbd>CTRL / Q</kbd><span>{t.hintBrakeKey}</span><kbd>SHIFT</kbd><span>{t.hintBoostKey}</span></div>}
-          <div ref={perchPromptRef} className="perch-prompt" data-visible="false" data-state="approach"><kbd>E</kbd><span ref={perchLabelRef}>{t.perchLand}</span><i ref={perchRangeRef} className="perch-range" /></div>
+          {/* Top right: pause, and everything else. */}
+          <div className={`hud-w hud-more${hudOpen === "more" ? " open" : ""}`}>
+            <button type="button" className="hud-chip icon" onClick={togglePause} aria-label={t.flightPause}><HudIcon name="pause" /></button>
+            <button type="button" className="hud-chip icon" onClick={() => toggleHud("more")} aria-expanded={hudOpen === "more"} aria-controls="hud-more" aria-label={t.moreOpen}><HudIcon name="more" /></button>
+            <div className="hud-panel" id="hud-more" role="dialog" aria-label={t.moreTitle}>
+              {touchDevice && <div className="sheet-grab" aria-hidden="true" />}
+              {panelHead(t.moreTitle)}
+              {sheetNote}
+              <div className="hud-label first">{t.language}</div>
+              <div className="hud-seg" role="group" aria-label={t.language}>
+                {(["en", "bn"] as const).map((code) => (
+                  <button key={code} type="button" lang={code} className={code === locale ? "selected" : ""} aria-pressed={code === locale} onClick={() => chooseLocale(code)}>
+                    {code === "bn" ? "বাংলা" : "English"}
+                  </button>
+                ))}
+              </div>
+              <div className="hud-label">{t.camera}</div>
+              <div className="hud-seg" role="group" aria-label={t.camera}>
+                {(["CHASE", "BIRD'S EYE"] as const).map((mode) => (
+                  <button key={mode} type="button" className={mode === cameraMode ? "selected" : ""} aria-pressed={mode === cameraMode} onClick={() => {
+                    if (mode !== cameraMode) flightActionsRef.current?.toggleCamera();
+                  }}>
+                    {mode === "CHASE" ? t.cameraChase : t.cameraBirdsEye}
+                  </button>
+                ))}
+              </div>
+              <div className="hud-rule" />
+              <button type="button" className="hud-row" role="switch" aria-checked={soundOn} onClick={toggleSound}>
+                <span>{t.soundPanel}</span>
+                <span className={`hud-toggle${soundOn ? " on" : ""}`} aria-hidden="true" />
+              </button>
+              <label className="hud-range">
+                <HudIcon name={soundOn ? "sound" : "mute"} />
+                <input
+                  type="range"
+                  min="0"
+                  max="1.5"
+                  step="0.05"
+                  value={soundVolume}
+                  onChange={(event) => changeSoundVolume(Number(event.target.value))}
+                  aria-label={t.soundVolume}
+                  aria-valuetext={`${Math.round(soundVolume * 100)}%`}
+                />
+                <span className="num">{localDigits(locale, Math.round(soundVolume * 100))}%</span>
+              </label>
+              <div className="hud-rule" />
+              {!touchDevice && (
+                <button type="button" className="hud-btn" onClick={() => setHudOpen("readout")}>
+                  <HudIcon name="help" />{t.controlsTitle}<kbd lang="en">?</kbd>
+                </button>
+              )}
+              <button type="button" className="hud-btn" onClick={backToStart}><HudIcon name="home" />{t.backToStart}</button>
+            </div>
+          </div>
+
+          {/* Bottom left: speed and height, opening into the full readout. */}
+          <div className={`hud-w hud-readout${hudOpen === "readout" ? " open" : ""}`}>
+            <div className="readout-card" role={hudOpen === "readout" ? "dialog" : undefined} aria-label={t.telemetry}>
+              {hudOpen === "readout" && (
+                <div className="hud-head">
+                  <h2>
+                    <i className="tile-swatch" style={{ background: selectedBird.swatch[0] }} />
+                    {t[selectedBird.name]}
+                    <span className="flight-mode"><i /><span ref={flightModeRef} data-mode="cruise">{t.modeCruise}</span></span>
+                  </h2>
+                  <button type="button" className="hud-x" onClick={() => setHudOpen("")} aria-label={t.panelClose}><HudIcon name="close" /></button>
+                </div>
+              )}
+              <button type="button" className="readout-chip" onClick={() => toggleHud("readout")} aria-expanded={hudOpen === "readout"} aria-label={t.readoutOpen}>
+                <span className="tele"><b ref={speedRef} className="num">{localDigits(locale, 48)}</b><small>{t.unitSpeed}</small></span>
+                <i className="chip-sep" />
+                <span className="tele"><b ref={altitudeRef} className="num">{localDigits(locale, DEFAULT_FLIGHT_ALTITUDE)}</b><small>{t.unitAltitude}</small></span>
+                {hudOpen === "readout" && (
+                  <>
+                    <span className="tele small"><b ref={verticalSpeedRef} className="num">{localDigits(locale, "+0.0")}</b><small>{t.unitVertical}</small></span>
+                    <span className="tele compass" title={t.unitHeading}><b ref={compassRef}>{t.minimapNorth}</b></span>
+                  </>
+                )}
+                <HudIcon name="chev" className="hud-chev" />
+              </button>
+              {hudOpen === "readout" && (
+                <div className="readout-more">
+                  {touchDevice
+                    ? <p className="hud-note">{t.touchNote}</p>
+                    : <>{keyRow(flightKeys)}<div className="hud-rule" />{keyRow(hudKeys)}</>}
+                  <a className="sound-credits" href="/audio/CREDITS.txt" target="_blank" rel="noreferrer">{t.soundCredits}</a>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Bottom right: a map dial that opens into the full map. The map is
+              drawn once; the dial and the panel are two sizes of the same thing. */}
+          <div className={`hud-w hud-map${hudOpen === "map" ? " open" : ""}`} data-daylight={skyIsDay ? "day" : "night"}>
+            <div className="map-card" role={hudOpen === "map" ? "dialog" : undefined} aria-label={t.mapTitle}>
+              {hudOpen === "map" && (
+                <>
+                  {touchDevice && <div className="sheet-grab" aria-hidden="true" />}
+                  {panelHead(t.mapTitle)}
+                  {sheetNote}
+                </>
+              )}
+              <div className="minimap" aria-label={t.minimap}>
+                <div className="map-canvas">
+                  <span className="north">{t.minimapNorth}</span>
+                  <div className="map-water one" /><div className="map-water two" />
+                  <div className="map-road" />
+                  {AREA_LANDMARKS.filter((landmark) => landmark.minimap).map((landmark) => (
+                    <span key={landmark.label} className="map-area" lang="en" title={placeName(locale, landmark.label)} style={mapPosition(landmark.lat, landmark.lon)}>{landmark.shortLabel}</span>
+                  ))}
+                  {DHAKA_LANDMARKS.filter((landmark) => landmark.minimap).map((landmark) => (
+                    <button
+                      type="button"
+                      key={landmark.label}
+                      className="map-landmark"
+                      lang="en"
+                      title={placeName(locale, landmark.label)}
+                      aria-label={fill(t.inspectLandmark, { name: placeName(locale, landmark.label) })}
+                      tabIndex={hudOpen === "map" ? 0 : -1}
+                      onClick={() => focusLandmarkRef.current(landmark.kind)}
+                      style={mapPosition(landmark.lat, landmark.lon)}
+                    >{landmark.shortLabel}</button>
+                  ))}
+                  {WATER_LANDMARKS.filter((landmark) => landmark.minimap).map((landmark) => (
+                    <span key={landmark.label} className="map-river" lang="en" title={placeName(locale, landmark.label)} style={mapPosition(landmark.lat, landmark.lon)}>{landmark.shortLabel}</span>
+                  ))}
+                  <div ref={mapBirdRef} className="map-bird" />
+                </div>
+                {hudOpen !== "map" && <button type="button" className="map-dial-hit" onClick={() => toggleHud("map")} aria-expanded={false} aria-label={t.mapOpen} />}
+              </div>
+              {hudOpen === "map" && (
+                <>
+                  <p className="map-near">
+                    <HudIcon name="pin" />{t.mapNearest}: <b>{nearestLandmark ? placeName(locale, nearestLandmark) : "…"}</b> <span ref={landmarkRangeRef} className="num" />
+                  </p>
+                  <p className="hud-note">{touchDevice ? t.mapHintTouch : t.mapHint}</p>
+                  <p className={`map-source ${mapStatus}`}>
+                    {mapStatus === "live" ? t.mapSourceLive : mapStatus === "loading" ? t.mapSourceLoading : t.mapSourceFallback}
+                    <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">{t.mapAttribution}</a>
+                  </p>
+                </>
+              )}
+            </div>
+            {hudOpen !== "map" && <a className="hud-credit" href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">© OpenStreetMap</a>}
+          </div>
+
+          <div ref={perchPromptRef} className="perch-prompt" data-visible="false" data-state="approach" role="status">
+            <kbd lang="en">E</kbd><span ref={perchLabelRef}>{t.perchLand}</span><i ref={perchRangeRef} className="perch-range num" />
+          </div>
           {inspecting && (
-            <button type="button" className="inspect-exit" onClick={releaseInspectionCamera}>
+            <button type="button" className="inspect-exit hud-chip" onClick={releaseInspectionCamera}>
               <span>{t.inspecting}</span><b>{t.inspectReturn}</b>
             </button>
           )}
@@ -7372,130 +7635,32 @@ export function BirdFlight() {
               <TouchStick onAxes={setFlightAxes} label={t.touchStick} />
               <div className="touch-actions">
                 <div className="touch-action-row">
-                  <TouchHoldButton label={t.touchBrake} hint={t.touchBrakeHint} onHold={(held) => holdFlightKey("KeyQ", held)} />
-                  <TouchHoldButton label={t.touchBoost} hint={t.touchBoostHint} className="touch-boost" onHold={(held) => holdFlightKey("ShiftLeft", held)} />
-                </div>
-                <div className="touch-action-row">
                   <button type="button" className="touch-button touch-secondary" aria-label={t.touchCameraHint} onClick={() => flightActionsRef.current?.toggleCamera()}>{t.touchCamera}</button>
                   <button type="button" className="touch-button touch-secondary" aria-label={t.touchSitesHint} onClick={() => flightActionsRef.current?.cycleInspection()}>{t.touchSites}</button>
-                  <button type="button" className="touch-button touch-secondary" aria-label={t.touchLandHint} onClick={() => flightActionsRef.current?.togglePerch()}>{resting ? t.touchFly : t.touchLand}</button>
+                  <button type="button" className="touch-button touch-land" aria-label={t.touchLandHint} onClick={() => flightActionsRef.current?.togglePerch()}>{resting ? t.touchFly : t.touchLand}</button>
+                </div>
+                <div className="touch-action-row">
+                  <TouchHoldButton label={t.touchBrake} hint={t.touchBrakeHint} onHold={(held) => holdFlightKey("KeyQ", held)} />
+                  <TouchHoldButton label={t.touchBoost} hint={t.touchBoostHint} className="touch-boost" onHold={(held) => holdFlightKey("ShiftLeft", held)} />
                 </div>
                 <button type="button" className="touch-button touch-flap" aria-label={t.touchFlapHint} onPointerDown={() => flightActionsRef.current?.flap()}>{t.touchFlap}</button>
               </div>
             </section>
           )}
-          {resting && <div className="resting-chip"><i /> {t.resting}</div>}
-          <button type="button" className={`share-view ${shareState}`} onClick={shareView}>
-            {shareState === "copied" ? t.shareCopied : shareState === "failed" ? t.shareFailed : t.share}
-          </button>
-          {shareState === "failed" && (
-            <label className="share-fallback">
-              <span>{t.shareFallback}</span>
-              <input readOnly value={sharedLink} onFocus={(event) => event.target.select()} aria-label={t.shareLink} />
-            </label>
-          )}
-          <div className={`map-source ${mapStatus}`}>
-            <i /> {mapStatus === "live" ? t.mapSourceLive : mapStatus === "loading" ? t.mapSourceLoading : t.mapSourceFallback}
-            <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">{t.mapAttribution}</a>
-          </div>
-        </>
-      )}
-
-      {!flying && (
-        <section className="title-screen" aria-label={t.titleScreen}>
-          {/* The scrim is the only opaque thing on the welcome screen: it darkens
-              the bottom of the city just enough to carry text, so the attract-mode
-              flyover stays the hero instead of being covered by a panel. */}
-          <div className="title-scrim" aria-hidden="true" />
-          <div className="title-lower">
-            {/* The name is always set in Bengali: its headline bar runs on past
-                the last letter and off the screen, as the horizon the crow flies along. */}
-            <h1 className="title-wordmark" lang="bn">{t.titleWordmark}</h1>
-            <p className="title-lead">{t.titleLead}</p>
-            <div className="title-actions">
-              <div className="title-choices">
-              {birdPicker}
-              <div className="launch-ticker" role="group" aria-label={t.launchGroup}>
-                <span className="launch-ticker-label">{t.launchLabel}</span>
-                <div className="launch-sites">
-                  {LAUNCH_SITES.map((site) => (
-                    <button
-                      key={site.id}
-                      type="button"
-                      className={`launch-code${launchSiteId === site.id ? " active" : ""}`}
-                      aria-pressed={launchSiteId === site.id}
-                      aria-label={fill(t.launchFrom, { name: placeName(locale, site.label) })}
-                      onClick={() => chooseLaunchSite(site)}
-                    >
-                      {placeName(locale, site.label)}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              </div>
-              <button onClick={beginFlight} className="title-start">
-                <span>{t.startFlight}</span>
-                {!touchDevice && <kbd lang="en">{t.startKeyHint}</kbd>}
-              </button>
-            </div>
-            <div className="title-foot">
-              <div className={`title-load ${mapStatus}`} role="status">
-                <i />{mapStatus === "live" ? t.loadLive : mapStatus === "loading" ? t.loadLoading : t.loadFallback}
-              </div>
-              <div className="title-controls" aria-hidden="true">
-                {touchDevice
-                  ? <><span>{t.hintTouchSteer}</span><span>{t.hintTouchFlap}</span><span>{t.hintTouchBoost}</span></>
-                  : <><span><kbd lang="en">WASD</kbd>{t.hintSteer}</span><span><kbd lang="en">Space</kbd>{t.hintFlap}</span><span><kbd lang="en">Ctrl</kbd>{t.hintBrake}</span><span><kbd lang="en">E</kbd>{t.hintLand}</span></>}
-              </div>
-            </div>
-          </div>
-        </section>
-      )}
-
-      {controlsOpen && (
-        <section className="controls-panel">
-          <button onClick={() => setControlsOpen(false)} aria-label={t.manualClose}>×</button>
-          <span className="eyebrow">{t.manualHeading}</span>
-          <h2>{t.manualTitle}</h2>
-          <dl>
-            {touchDevice
-              ? <>
-                  <div><dt>{t.manualPad}</dt><dd>{t.manualPadText}</dd></div>
-                  <div><dt>{t.manualFlap}</dt><dd>{t.manualFlapTouchText}</dd></div>
-                  <div><dt>{t.manualBrake}</dt><dd>{t.manualBrakeTouchText}</dd></div>
-                  <div><dt>{t.manualBoost}</dt><dd>{t.manualBoostTouchText}</dd></div>
-                  <div><dt>{t.manualCam}</dt><dd>{t.manualCamText}</dd></div>
-                  <div><dt>{t.manualSites}</dt><dd>{t.manualSitesText}</dd></div>
-                  <div><dt>{t.manualLand}</dt><dd>{t.manualLandTouchText}</dd></div>
-                </>
-              : <>
-                  <div><dt lang="en">W / S</dt><dd>{t.manualClimbDive}</dd></div>
-                  <div><dt lang="en">A / D</dt><dd>{t.manualBank}</dd></div>
-                  <div><dt lang="en">Space</dt><dd>{t.manualFlapText}</dd></div>
-                  <div><dt lang="en">Ctrl / Q</dt><dd>{t.manualBrakeText}</dd></div>
-                  <div><dt lang="en">Shift</dt><dd>{t.manualBoostText}</dd></div>
-                  <div><dt lang="en">C</dt><dd>{t.manualCameraText}</dd></div>
-                  <div><dt lang="en">L</dt><dd>{t.manualInspectText}</dd></div>
-                  <div><dt lang="en">P / Esc</dt><dd>{t.manualPauseText}</dd></div>
-                  <div><dt lang="en">E</dt><dd>{t.manualLandText}</dd></div>
-                </>}
-            <div><dt>{t.manualMinimap}</dt><dd>{t.manualMinimapText}</dd></div>
-            <div><dt>◐</dt><dd>{t.manualSkyText}</dd></div>
-            <div><dt>♫</dt><dd>{t.manualSoundText}</dd></div>
-            <div><dt lang="en">R / [ ]</dt><dd>{t.manualRadioText}</dd></div>
-          </dl>
-          <a className="sound-credits" href="/audio/CREDITS.txt" target="_blank" rel="noreferrer">{t.soundCredits}</a>
-        </section>
+        </div>
       )}
 
       {flying && paused && (
         <section className="pause-overlay" role="dialog" aria-modal="true" aria-label={t.pauseDialog}>
-          <span className="eyebrow">{t.pauseHeading}</span>
           <h2>{t.pauseTitle}</h2>
-          <p>{t.pauseBody}</p>
-          {birdPicker}
-          <button ref={resumeButtonRef} className="primary-button resume-button" onClick={togglePause}><span>{t.pauseResume}</span><b>▶</b></button>
-          <small>{t.pauseHint}</small>
+          <p>{fill(t.pauseBody, { place: areaName })}</p>
+          <button ref={resumeButtonRef} type="button" className="commit-button" onClick={togglePause}>
+            <span>{t.pauseResume}</span>{!touchDevice && <kbd lang="en">Esc</kbd>}
+          </button>
+          <div className="pause-links">
+            <button type="button" onClick={openSettings}>{t.pauseSettings}</button>
+            <button type="button" onClick={backToStart}>{t.backToStart}</button>
+          </div>
         </section>
       )}
 
@@ -7506,12 +7671,12 @@ export function BirdFlight() {
           ? t.statusReady
           : paused
             ? t.statusPaused
-            : resting
-              ? t.statusResting
-              : mapStatus === "live" ? t.statusFlyingLive : mapStatus === "loading" ? t.statusFlyingLoading : t.statusFlyingFallback}
+            : hudHidden
+              ? t.hudHidden
+              : resting
+                ? t.statusResting
+                : mapStatus === "live" ? t.statusFlyingLive : mapStatus === "loading" ? t.statusFlyingLoading : t.statusFlyingFallback}
       </p>
-
-      <div className="desktop-note">{touchDevice ? t.noteTouch : t.noteKeyboard}</div>
     </main>
   );
 }
