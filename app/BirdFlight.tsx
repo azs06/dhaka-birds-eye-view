@@ -23,7 +23,7 @@ import {
   type Locale,
   type Strings,
 } from "./i18n";
-import { BIRDS, birdById, chooseBird, readBird, subscribeToBird, type Bird, type BirdId } from "./birds";
+import { BIRDS, DEFAULT_BIRD, birdById, chooseBird, readBird, subscribeToBird, type Bird, type BirdId } from "./birds";
 import { HudIcon, weatherIconName } from "./HudIcon";
 import soundClips from "./sound-clips.json";
 import { DHAKA_LANDMARK_FOOTPRINTS, type LandmarkFootprintPart } from "./dhaka-landmark-footprints";
@@ -7256,6 +7256,26 @@ export function BirdFlight() {
   const weatherIconKey = weatherIconName(weather.mode, skyIsDay);
   // Night and dusk skies get the dusk painting; every other hour opens at dawn.
   const titleArt = skyPresetId === "dusk" || skyPresetId === "night" || (skyPresetId === "live" && !skyIsDay) ? "dusk" : "dawn";
+  // Each bird has its own painting. Fetch the set for this sky up front so
+  // picking a bird swaps the art at once, and keep showing the last painting
+  // until the new one has decoded so a slow load never blinks.
+  const [skyBird, setSkyBird] = useState<BirdId>(birdId);
+  useEffect(() => {
+    if (flying) return;
+    const phone = titleArt === "dawn" && window.matchMedia("(max-width: 700px) and (orientation: portrait)").matches;
+    const art = phone ? "sky-dawn-phone" : `sky-${titleArt}`;
+    const url = (id: BirdId) => (id === DEFAULT_BIRD ? `/title/${art}.jpg` : `/title/${art}-${id}.jpg`);
+    for (const bird of BIRDS) new Image().src = url(bird.id);
+    let current = true;
+    const next = new Image();
+    next.src = url(birdId);
+    next.decode().catch(() => {}).then(() => {
+      if (current) setSkyBird(birdId);
+    });
+    return () => {
+      current = false;
+    };
+  }, [flying, titleArt, birdId]);
   const temperature = `${localDigits(locale, Math.round(weather.temperature))}°`;
   const radioActive = radioStatus === "playing" || radioStatus === "buffering";
   const radioStateText = radioStatus === "playing" ? t.radioStatePlaying : radioStatus === "buffering" ? t.radioStateTuning : radioStatus === "paused" ? t.radioStatePaused : radioStatus === "error" ? t.radioStateLost : t.radioStateOff;
@@ -7324,7 +7344,7 @@ export function BirdFlight() {
             if (titleBeat === "title" && !(event.target as Element).closest("button, a")) setTitleBeat("menu");
           }}
         >
-          <div className="title-sky" data-art={titleArt} aria-hidden="true" />
+          <div className="title-sky" data-art={titleArt} data-bird={skyBird} aria-hidden="true" />
           <div className="title-shade" aria-hidden="true" />
           <div className="title-top">
             <span className="title-mark"><HudIcon name="brand" className="brand-icon" />{t.titleNameA} {t.titleNameB}</span>

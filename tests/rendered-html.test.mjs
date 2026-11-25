@@ -244,12 +244,16 @@ test("keeps the finished flight experience free of starter preview code", async 
   // Two beats, like a flight-sim opening: the sky alone with "press any key",
   // then a slim bar of tiles that leaves the upper sky clear.
   assert.match(component, /useState<"title" \| "menu">\("title"\)/);
-  assert.match(component, /className="title-sky" data-art=\{titleArt\}/);
+  assert.match(component, /className="title-sky" data-art=\{titleArt\} data-bird=\{skyBird\}/);
   assert.match(component, /className="menu-bar"/);
   assert.match(component, /className="menu-tile go" onClick=\{beginFlight\}/);
   assert.equal(STRINGS.en.startFlight, "Take off");
-  for (const art of ["sky-dawn.jpg", "sky-dusk.jpg", "sky-dawn-phone.jpg"]) {
-    await access(new URL(`../public/title/${art}`, import.meta.url));
+  for (const art of ["sky-dawn", "sky-dusk", "sky-dawn-phone"]) {
+    await access(new URL(`../public/title/${art}.jpg`, import.meta.url));
+    // The title sky shows the chosen bird; the crow uses the plain art.
+    for (const bird of ["doel", "shalik", "chil", "tiya", "machhranga"]) {
+      await access(new URL(`../public/title/${art}-${bird}.jpg`, import.meta.url));
+    }
   }
   // In flight only five controls are on screen; each opens its own panel in place.
   for (const panel of ["hud-place", "hud-more", "hud-readout", "hud-map"]) {
