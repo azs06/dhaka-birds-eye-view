@@ -9,10 +9,29 @@ import { Sky } from "three/examples/jsm/objects/Sky.js";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { resolveBuildingCollision } from "./flight-collision.mjs";
 import {
+  ELEVATED_ROAD_PIER_KEEP_OUT,
+  ELEVATED_ROAD_STYLES,
+  ELEVATED_ROAD_TRIM_WAY_IDS,
+  ELEVATED_ROAD_WAY_IDS,
+  buildElevatedRoadCorridor,
+  elevatedDeckBelow,
+  groundRunsOfTrimmedWay,
+  layoutElevatedRoads,
+  type ElevatedRoadLayout,
+} from "./elevated-roads";
+import {
+  GABTOLI_BUS_TERMINAL,
+  SAYEDABAD_BUS_TERMINAL,
+  TEJGAON_AIRPORT,
+  type BusTerminal,
+  type LatLon,
+} from "./ground-infrastructure";
+import {
   METRO_GIRDER_HALF_WIDTH,
   METRO_PIER_CAP_WIDTH,
   buildMetroCorridor,
   metroGirderSampleCount,
+  type MetroCorridorIndex,
   type MetroStationFootprint,
 } from "./metro-corridor";
 import {
@@ -133,6 +152,7 @@ type DhakaLandmark = AreaLandmark & {
     | "army-stadium"
     | "tsc-raju"
     | "doyel-chattar"
+    | "shapla-chattar"
     | "three-leaders-mausoleum"
     | "hussaini-dalan"
     | "sadarghat-terminal"
@@ -144,7 +164,10 @@ type DhakaLandmark = AreaLandmark & {
     | "pm-office"
     | "armenian-church"
     | "bahadur-shah-park"
-    | "rose-garden-palace";
+    | "rose-garden-palace"
+    | "tejgaon-airport"
+    | "sayedabad-bus-terminal"
+    | "gabtoli-bus-terminal";
 };
 type ProceduralDistrictTile = {
   group: THREE.Group;
@@ -579,6 +602,8 @@ const DHAKA_LANDMARKS: DhakaLandmark[] = [
   { label: "TSC & Raju Memorial", shortLabel: "TSC", lat: 23.73225, lon: 90.3959, altitude: 16, heading: -2.985, kind: "tsc-raju" },
   // OSM 296816607, the magpie-robin pair in the roundabout basin; beaks to the NW.
   { label: "Doyel Chattar", shortLabel: "DOY", lat: 23.727996, lon: 90.400293, altitude: 9, heading: -2.356, kind: "doyel-chattar" },
+  // Centre of the Motijheel roundabout (OSM ways 15491646 and 1099855656).
+  { label: "Shapla Chattar", shortLabel: "SHP", lat: 23.726557, lon: 90.421619, altitude: 13, heading: 0, kind: "shapla-chattar" },
   // OSM 296802766, the 60 × 33 m plinth (long axis 167°) under three hypar
   // shells; the main stair faces WSW (257°) toward the Shahbag road.
   { label: "Mausoleum of Three Leaders", shortLabel: "TNM", lat: 23.729107, lon: 90.399921, altitude: 14, heading: -1.344, kind: "three-leaders-mausoleum" },
@@ -616,6 +641,13 @@ const DHAKA_LANDMARKS: DhakaLandmark[] = [
   // OSM 439770540 (26 × 15 m, long axis 174°) in its walled garden (way
   // 439770049); the belvedere front faces west (264°) across the lawn to the pond.
   { label: "Rose Garden Palace", shortLabel: "RGP", lat: 23.718358, lon: 90.4264, altitude: 22, heading: -1.466, kind: "rose-garden-palace" },
+  // The old airport, now BAF Base Bashar (OSM aerodrome 622567201). The row
+  // sits on the midpoint of runway 17/35 and its heading turns local +Z down
+  // the runway (bearing 164.4°); see TEJGAON_AIRPORT in ground-infrastructure.ts.
+  { label: "Tejgaon Airport", shortLabel: "TEJ", lat: TEJGAON_AIRPORT.centre[0], lon: TEJGAON_AIRPORT.centre[1], altitude: 14, heading: TEJGAON_AIRPORT.heading, kind: "tejgaon-airport" },
+  // The intercity bus terminals, built in world axes on their OSM yards.
+  { label: "Sayedabad Bus Terminal", shortLabel: "SBT", lat: SAYEDABAD_BUS_TERMINAL.centre[0], lon: SAYEDABAD_BUS_TERMINAL.centre[1], altitude: 8, heading: 0, kind: "sayedabad-bus-terminal" },
+  { label: "Gabtoli Bus Terminal", shortLabel: "GBT", lat: GABTOLI_BUS_TERMINAL.centre[0], lon: GABTOLI_BUS_TERMINAL.centre[1], altitude: 8, heading: 0, kind: "gabtoli-bus-terminal" },
 ];
 
 // Launch sites offered on the title screen. Picking one moves the attract-mode
@@ -720,34 +752,118 @@ function worldToCoordinates(x: number, z: number) {
 // The procedural airport runway (3.2 km) and terminal apron extend far past the
 // small landmark anchor box, so OSM roads/buildings and procedural tiles all
 // test against its rotated footprint to keep the tarmac clear of z-fighting.
-// The frame is the airport landmark's own detail group: origin at the table
-// lat/lon, turned by its heading (0.628, runway 14/32 at bearing 144°), local +Z
-// down the runway to the SE and local +X toward the terminals (NE).
-const AIRPORT_WORLD = coordinatesToWorld(23.845004, 90.396455);
-const AIRPORT_COS = Math.cos(0.628);
-const AIRPORT_SIN = Math.sin(0.628);
-const AIRPORT_CLEARANCE_RECTS = [
-  // The airfield: runway, both parallel taxiways, the west aprons, the main
-  // apron and the Terminal 1/2 hall.
-  { minX: -490, maxX: 1_000, minZ: -1_480, maxZ: 1_930 },
-  // Terminal 3 and its landside canopy.
-  { minX: 990, maxX: 1_330, minZ: 670, maxZ: 1_450 },
-  // The Terminal 1/2 forecourt and car parks, up to Airport Road.
-  { minX: 979, maxX: 1_300, minZ: -100, maxZ: 680 },
-] as const;
+// Each airfield's frame is its landmark's own detail group: origin at the table
+// lat/lon, turned by its heading, local +Z down the runway. Rectangles are in
+// that frame.
+const AIRFIELD_CLEARANCES = [
+  {
+    // Hazrat Shahjalal: heading 0.628 (runway 14/32 at bearing 144°), local +Z
+    // down the runway to the SE and local +X toward the terminals (NE).
+    lat: 23.845004,
+    lon: 90.396455,
+    heading: 0.628,
+    rects: [
+      // The airfield: runway, both parallel taxiways, the west aprons, the main
+      // apron and the Terminal 1/2 hall.
+      { minX: -490, maxX: 1_000, minZ: -1_480, maxZ: 1_930 },
+      // Terminal 3 and its landside canopy.
+      { minX: 990, maxX: 1_330, minZ: 670, maxZ: 1_450 },
+      // The Terminal 1/2 forecourt and car parks, up to Airport Road.
+      { minX: 979, maxX: 1_300, minZ: -100, maxZ: 680 },
+    ],
+  },
+  {
+    // Tejgaon: local +Z down runway 17/35 to the SSE, local +X east to the
+    // aprons. The rectangles tile the inside of the aerodrome fence (OSM way
+    // 622567201) and stop short of everything round it: the Air Force Museum
+    // strip and its lawns (west of x -62 for z < 240), Agargaon Link Road,
+    // which hugs the fence down the west side and round the south tip, the
+    // street along the east aprons, and the pond beside the north-east grass.
+    // They are what roads are clipped against. The mown grass fills the whole
+    // fence polygon, which the rectangles cannot tile exactly, so buildings
+    // and trees are also kept out of `fence` itself (see inAirportClearance).
+    lat: TEJGAON_AIRPORT.centre[0],
+    lon: TEJGAON_AIRPORT.centre[1],
+    heading: TEJGAON_AIRPORT.heading,
+    fence: TEJGAON_AIRPORT.boundary,
+    rects: [
+      // Runway strip and its shoulders, end to end.
+      { minX: -50, maxX: 75, minZ: -1_400, maxZ: 1_380 },
+      // The grass east of the runway's north half.
+      { minX: 75, maxX: 195, minZ: -1_310, maxZ: -480 },
+      { minX: 75, maxX: 150, minZ: -480, maxZ: -290 },
+      // The taxiway's north leg, stepped under the fence line it follows.
+      { minX: 150, maxX: 260, minZ: -362, maxZ: -290 },
+      { minX: 260, maxX: 432, minZ: -335, maxZ: -290 },
+      // Taxiway loop, the three east aprons and the big hangars.
+      { minX: 75, maxX: 432, minZ: -290, maxZ: 960 },
+      { minX: 432, maxX: 455, minZ: -235, maxZ: -60 },
+      { minX: 432, maxX: 470, minZ: -60, maxZ: 80 },
+      { minX: 432, maxX: 490, minZ: 80, maxZ: 830 },
+      { minX: 490, maxX: 515, minZ: 400, maxZ: 440 },
+      { minX: 490, maxX: 545, minZ: 440, maxZ: 760 },
+      // South-east grass down to the Bijoy Sarani end.
+      { minX: 75, maxX: 205, minZ: 960, maxZ: 1_380 },
+      // West hangars and the parade-ground lawns south of them.
+      { minX: -170, maxX: -50, minZ: 250, maxZ: 370 },
+      { minX: -205, maxX: -50, minZ: 370, maxZ: 1_340 },
+      // The south tip, inside the bend of Agargaon Link Road.
+      { minX: -120, maxX: 75, minZ: 1_380, maxZ: 1_430 },
+      { minX: -40, maxX: 75, minZ: 1_430, maxZ: 1_480 },
+      { minX: 75, maxX: 190, minZ: 1_380, maxZ: 1_460 },
+    ],
+  },
+].map((field) => {
+  const world = coordinatesToWorld(field.lat, field.lon);
+  const reach = Math.max(...field.rects.map((rect) => Math.hypot(
+    Math.max(Math.abs(rect.minX), Math.abs(rect.maxX)),
+    Math.max(Math.abs(rect.minZ), Math.abs(rect.maxZ)),
+  )));
+  // The fence in world metres, with its bounding box for a quick reject.
+  const fence = (field.fence ?? []).map(([lat, lon]): MapPoint => {
+    const point = coordinatesToWorld(lat, lon);
+    return [point.x, point.y];
+  });
+  const fenceBox = {
+    minX: Math.min(...fence.map(([x]) => x)),
+    maxX: Math.max(...fence.map(([x]) => x)),
+    minZ: Math.min(...fence.map(([, z]) => z)),
+    maxZ: Math.max(...fence.map(([, z]) => z)),
+  };
+  return { x: world.x, z: world.y, cos: Math.cos(field.heading), sin: Math.sin(field.heading), rects: field.rects, reach, fence, fenceBox };
+});
+// Callers pad the rectangles by 20 to 40 m; the fence is only padded this far,
+// so the streets and plots that hug its outside keep their buildings and trees.
+const AIRFIELD_FENCE_PAD = 6;
+type AirfieldClearance = (typeof AIRFIELD_CLEARANCES)[number];
 
-function toAirportLocal(x: number, z: number): [number, number] {
-  const dx = x - AIRPORT_WORLD.x;
-  const dz = z - AIRPORT_WORLD.y;
-  return [dx * AIRPORT_COS - dz * AIRPORT_SIN, dx * AIRPORT_SIN + dz * AIRPORT_COS];
+function toAirfieldLocal(field: AirfieldClearance, x: number, z: number): [number, number] {
+  const dx = x - field.x;
+  const dz = z - field.z;
+  return [dx * field.cos - dz * field.sin, dx * field.sin + dz * field.cos];
 }
 
 function inAirportClearance(x: number, z: number, pad = 0) {
-  const [localX, localZ] = toAirportLocal(x, z);
-  for (const rect of AIRPORT_CLEARANCE_RECTS) {
-    if (localX > rect.minX - pad && localX < rect.maxX + pad && localZ > rect.minZ - pad && localZ < rect.maxZ + pad) {
-      return true;
+  for (const field of AIRFIELD_CLEARANCES) {
+    const reach = field.reach + pad;
+    if (Math.abs(x - field.x) > reach || Math.abs(z - field.z) > reach) continue;
+    const [localX, localZ] = toAirfieldLocal(field, x, z);
+    for (const rect of field.rects) {
+      if (localX > rect.minX - pad && localX < rect.maxX + pad && localZ > rect.minZ - pad && localZ < rect.maxZ + pad) {
+        return true;
+      }
     }
+  }
+  // Inside an aerodrome fence, or within a few metres of it.
+  for (const { fence, fenceBox } of AIRFIELD_CLEARANCES) {
+    if (fence.length < 3) continue;
+    const reach = Math.min(Math.max(pad, 0), AIRFIELD_FENCE_PAD);
+    if (x < fenceBox.minX - reach || x > fenceBox.maxX + reach || z < fenceBox.minZ - reach || z > fenceBox.maxZ + reach) continue;
+    if (pointInPolygon(x, z, fence)) return true;
+    if (reach > 0 && (
+      pointInPolygon(x - reach, z, fence) || pointInPolygon(x + reach, z, fence)
+      || pointInPolygon(x, z - reach, fence) || pointInPolygon(x, z + reach, fence)
+    )) return true;
   }
   return false;
 }
@@ -1083,7 +1199,7 @@ function polygonArea2D(points: MapPoint[]) {
   return Math.abs(area) * 0.5;
 }
 
-/** Clip a world-space segment against the rotated airport runway and apron rectangles. */
+/** Clip a world-space segment against every airfield's rotated runway and apron rectangles. */
 function clipSegmentOutsideAirport(
   x1: number,
   z1: number,
@@ -1091,55 +1207,60 @@ function clipSegmentOutsideAirport(
   z2: number,
   pad = 0,
 ): Array<[number, number, number, number]> {
-  const [lx1, lz1] = toAirportLocal(x1, z1);
-  const [lx2, lz2] = toAirportLocal(x2, z2);
-  const dlx = lx2 - lx1;
-  const dlz = lz2 - lz1;
   let surviving: Array<[number, number]> = [[0, 1]];
 
-  for (const rect of AIRPORT_CLEARANCE_RECTS) {
-    const minX = rect.minX - pad;
-    const maxX = rect.maxX + pad;
-    const minZ = rect.minZ - pad;
-    const maxZ = rect.maxZ + pad;
-    let tEnter = 0;
-    let tExit = 1;
-    let intersects = true;
+  for (const field of AIRFIELD_CLEARANCES) {
+    const reach = field.reach + pad;
+    if (Math.min(x1, x2) - field.x > reach || field.x - Math.max(x1, x2) > reach) continue;
+    if (Math.min(z1, z2) - field.z > reach || field.z - Math.max(z1, z2) > reach) continue;
+    const [lx1, lz1] = toAirfieldLocal(field, x1, z1);
+    const [lx2, lz2] = toAirfieldLocal(field, x2, z2);
+    const dlx = lx2 - lx1;
+    const dlz = lz2 - lz1;
+    for (const rect of field.rects) {
+      const minX = rect.minX - pad;
+      const maxX = rect.maxX + pad;
+      const minZ = rect.minZ - pad;
+      const maxZ = rect.maxZ + pad;
+      let tEnter = 0;
+      let tExit = 1;
+      let intersects = true;
 
-    if (Math.abs(dlx) < 1e-9) {
-      if (lx1 <= minX || lx1 >= maxX) intersects = false;
-    } else {
-      let tx0 = (minX - lx1) / dlx;
-      let tx1 = (maxX - lx1) / dlx;
-      if (tx0 > tx1) [tx0, tx1] = [tx1, tx0];
-      tEnter = Math.max(tEnter, tx0);
-      tExit = Math.min(tExit, tx1);
-    }
-
-    if (intersects) {
-      if (Math.abs(dlz) < 1e-9) {
-        if (lz1 <= minZ || lz1 >= maxZ) intersects = false;
+      if (Math.abs(dlx) < 1e-9) {
+        if (lx1 <= minX || lx1 >= maxX) intersects = false;
       } else {
-        let tz0 = (minZ - lz1) / dlz;
-        let tz1 = (maxZ - lz1) / dlz;
-        if (tz0 > tz1) [tz0, tz1] = [tz1, tz0];
-        tEnter = Math.max(tEnter, tz0);
-        tExit = Math.min(tExit, tz1);
+        let tx0 = (minX - lx1) / dlx;
+        let tx1 = (maxX - lx1) / dlx;
+        if (tx0 > tx1) [tx0, tx1] = [tx1, tx0];
+        tEnter = Math.max(tEnter, tx0);
+        tExit = Math.min(tExit, tx1);
       }
-    }
 
-    if (!intersects || tEnter >= tExit) continue;
-    const next: Array<[number, number]> = [];
-    for (const [start, end] of surviving) {
-      if (tExit <= start || tEnter >= end) {
-        next.push([start, end]);
-        continue;
+      if (intersects) {
+        if (Math.abs(dlz) < 1e-9) {
+          if (lz1 <= minZ || lz1 >= maxZ) intersects = false;
+        } else {
+          let tz0 = (minZ - lz1) / dlz;
+          let tz1 = (maxZ - lz1) / dlz;
+          if (tz0 > tz1) [tz0, tz1] = [tz1, tz0];
+          tEnter = Math.max(tEnter, tz0);
+          tExit = Math.min(tExit, tz1);
+        }
       }
-      if (tEnter > start + 1e-4) next.push([start, tEnter]);
-      if (tExit < end - 1e-4) next.push([tExit, end]);
+
+      if (!intersects || tEnter >= tExit) continue;
+      const next: Array<[number, number]> = [];
+      for (const [start, end] of surviving) {
+        if (tExit <= start || tEnter >= end) {
+          next.push([start, end]);
+          continue;
+        }
+        if (tEnter > start + 1e-4) next.push([start, tEnter]);
+        if (tExit < end - 1e-4) next.push([tExit, end]);
+      }
+      surviving = next;
+      if (surviving.length === 0) return [];
     }
-    surviving = next;
-    if (surviving.length === 0) return [];
   }
 
   return surviving.map(([a, b]) => [
@@ -1278,7 +1399,10 @@ function selectTrafficRoads(roads: OsmMapData["roads"]) {
   const majorKinds = new Set(["motorway", "trunk", "primary", "secondary"]);
   const localKinds = new Set(["tertiary", "residential", "unclassified", "service"]);
   const candidates = roads.flatMap((road, index) => {
-    const points = road.points.filter(([x, z]) => Number.isFinite(x) && Number.isFinite(z));
+    // Ways rebuilt as elevated decks carry no ground-level traffic.
+    const ground = longestGroundRun(road);
+    if (!ground) return [];
+    const points = ground.filter(([x, z]) => Number.isFinite(x) && Number.isFinite(z));
     if ((!majorKinds.has(road.kind) && !localKinds.has(road.kind)) || points.length < 2) return [];
     const length = trafficRoadLength(points);
     if (length < 70) return [];
@@ -1496,7 +1620,7 @@ function createTrafficSimulation(
   // instance count and draw calls stay what they were.
   const majorKindSet = new Set(["motorway", "trunk", "primary", "secondary"]);
   const localRoads = roads.flatMap((road) => {
-    const points = road.points.filter(([x, z]) => Number.isFinite(x) && Number.isFinite(z));
+    const points = (longestGroundRun(road) ?? []).filter(([x, z]) => Number.isFinite(x) && Number.isFinite(z));
     if (!majorKindSet.has(road.kind) || points.length < 2) return [];
     const middle = points[Math.floor(points.length / 2)];
     return [{ points, x: middle[0], z: middle[1], width: road.kind === "motorway" || road.kind === "trunk" ? 17 : 14 }];
@@ -2429,6 +2553,10 @@ async function addRoadNetworkMeshes(
   };
 
   for (const road of roads) {
+    // Flyover and viaduct ways are drawn as decks by buildElevatedRoads.
+    // A way that runs on beyond a bridge keeps the part that is on the ground.
+    const groundRuns = groundRunsOfRoad(road);
+    if (groundRuns.length === 0) continue;
     const bucket = majorRoads.has(road.kind) ? 0 : localRoads.has(road.kind) ? 1 : 2;
     const width = bucket === 0 ? (road.kind === "motorway" || road.kind === "trunk" ? 17 : 14) : bucket === 1 ? 7.5 : 4.2;
     // Separate road classes vertically and with per-layer polygonOffset so
@@ -2440,9 +2568,9 @@ async function addRoadNetworkMeshes(
     const shoulderY = 0.7 + roadJitter * 0.5;
     const shoulderWidth = width + (bucket === 0 ? 5.5 : 2.4);
     const airportPad = shoulderWidth / 2 + 1;
-    for (let index = 1; index < road.points.length; index++) {
-      const [rawX1, rawZ1] = road.points[index - 1];
-      const [rawX2, rawZ2] = road.points[index];
+    for (const runPoints of groundRuns) for (let index = 1; index < runPoints.length; index++) {
+      const [rawX1, rawZ1] = runPoints[index - 1];
+      const [rawX2, rawZ2] = runPoints[index];
       const segStep = (index & 1) * 0.002;
       for (const [x1, z1, x2, z2] of clipSegmentOutsideAirport(rawX1, rawZ1, rawX2, rawZ2, airportPad)) {
         const surface = segmentStrip(x1, z1, x2, z2, width, 0.34, surfaceY + segStep);
@@ -2683,6 +2811,44 @@ if ( bevNightGlow > 0.001 ) {
   return material;
 }
 
+// The elevated-road table projected into world metres, and the clearance index
+// over it. Both depend only on the table, so they are worked out once.
+let elevatedRoadLayoutCache: ElevatedRoadLayout[] | null = null;
+function elevatedRoadLayouts() {
+  elevatedRoadLayoutCache ??= layoutElevatedRoads((lat, lon) => {
+    const world = coordinatesToWorld(lat, lon);
+    return [world.x, world.y];
+  });
+  return elevatedRoadLayoutCache;
+}
+/**
+ * What is left of a road at ground level: nothing of a way rebuilt as an
+ * elevated deck, and only the stretches beyond the deck of a way that a
+ * bridge approach trims. Every other road is returned whole.
+ */
+function groundRunsOfRoad(road: { id: number; points: MapPoint[] }): MapPoint[][] {
+  if (ELEVATED_ROAD_WAY_IDS.has(road.id)) return [];
+  const trimmedBy = ELEVATED_ROAD_TRIM_WAY_IDS.get(road.id);
+  if (trimmedBy === undefined) return [road.points];
+  return groundRunsOfTrimmedWay(elevatedRoadLayouts()[trimmedBy], road.points);
+}
+/** The one stretch of a road that ground traffic drives: its longest ground run. */
+function longestGroundRun(road: { id: number; points: MapPoint[] }): MapPoint[] | null {
+  if (!ELEVATED_ROAD_WAY_IDS.has(road.id) && !ELEVATED_ROAD_TRIM_WAY_IDS.has(road.id)) return road.points;
+  let best: MapPoint[] | null = null;
+  let bestLength = 0;
+  for (const run of groundRunsOfRoad(road)) {
+    const length = trafficRoadLength(run);
+    if (length > bestLength) [best, bestLength] = [run, length];
+  }
+  return best;
+}
+let elevatedRoadCorridorCache: MetroCorridorIndex | null = null;
+function elevatedRoadCorridor() {
+  elevatedRoadCorridorCache ??= buildElevatedRoadCorridor(elevatedRoadLayouts());
+  return elevatedRoadCorridorCache;
+}
+
 function createMetroCorridor(
   metroLines?: OsmMapData["metroLines"],
   metroStations?: OsmMapData["metroStations"],
@@ -2729,7 +2895,15 @@ function createMetroCorridor(
       tz: tangent.z / tangentLength,
     });
   }
-  return buildMetroCorridor(sampledCenterline, projectedStations);
+  // Every caller clears buildings and trees off this index, so the elevated
+  // roads ride along with the metro viaduct at all of those sites.
+  const metro = buildMetroCorridor(sampledCenterline, projectedStations);
+  const elevated = elevatedRoadCorridor();
+  const corridor: MetroCorridorIndex = {
+    blocksCircle: (x, z, radius, viaductClearance) => metro.blocksCircle(x, z, radius, viaductClearance) || elevated.blocksCircle(x, z, radius),
+    blocksPolygon: (points, viaductClearance) => metro.blocksPolygon(points, viaductClearance) || elevated.blocksPolygon(points),
+  };
+  return corridor;
 }
 
 function addImmediateCityMass(scene: THREE.Scene, roads: OsmMapData["roads"]) {
@@ -2749,6 +2923,10 @@ function addImmediateCityMass(scene: THREE.Scene, roads: OsmMapData["roads"]) {
   // hospital spine, the mausoleum's walk down to the bridge) clear further.
   const clearingRadius: Partial<Record<DhakaLandmark["kind"], number>> = {
     airport: 1_350,
+    // The airfield itself is kept clear by its clearance rectangles.
+    "tejgaon-airport": 60,
+    "sayedabad-bus-terminal": 120,
+    "gabtoli-bus-terminal": 120,
     "sher-e-bangla-stadium": 165,
     "dhaka-medical": 130,
     "zia-udyan": 140,
@@ -2760,6 +2938,7 @@ function addImmediateCityMass(scene: THREE.Scene, roads: OsmMapData["roads"]) {
     "army-stadium": 140,
     "gulshan-central-mosque": 95,
     "doyel-chattar": 28,
+    "shapla-chattar": 24,
     "tsc-raju": 70,
     "hatirjheel-bridge": 60,
     "three-leaders-mausoleum": 70,
@@ -4653,6 +4832,21 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
   const silverPanel = new THREE.MeshStandardMaterial({ color: 0xcdd2d4, roughness: 0.46, metalness: 0.32 });
   const roofGrey = new THREE.MeshStandardMaterial({ color: 0x858c8a, roughness: 0.9 });
   const plantGrey = new THREE.MeshStandardMaterial({ color: 0xa9adab, roughness: 0.7, metalness: 0.2 });
+  // Ground infrastructure: the old airfield and the bus terminal yards.
+  const airfieldGrass = new THREE.MeshStandardMaterial({ color: 0x788a57, roughness: 1 });
+  const wornAsphalt = new THREE.MeshStandardMaterial({ color: 0x3b3f40, roughness: 0.96 });
+  const agedConcrete = new THREE.MeshStandardMaterial({ color: 0xa6a498, roughness: 0.92 });
+  const fadedPaint = new THREE.MeshStandardMaterial({ color: 0xc9c7b8, roughness: 0.9 });
+  const yardPaving = new THREE.MeshStandardMaterial({ color: 0x5c5d5a, roughness: 0.97 });
+  const tinRoof = new THREE.MeshStandardMaterial({ color: 0x8c9ca1, roughness: 0.55, metalness: 0.35 });
+  const hangarWall = new THREE.MeshStandardMaterial({ color: 0xb4bcae, roughness: 0.8, metalness: 0.1 });
+  const busGlass = new THREE.MeshStandardMaterial({ color: 0x1c2a30, roughness: 0.3, metalness: 0.2 });
+  const busPaint = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.5, metalness: 0.15 });
+  const busBodyGeometry = new THREE.BoxGeometry(11.6, 2.9, 2.55);
+  const busWindowGeometry = new THREE.BoxGeometry(11.7, 0.85, 2.62);
+  // Coach liveries: mostly white, with the greens, blues and reds of the
+  // intercity lines and a few of the street-traffic body colours.
+  const BUS_LIVERIES = [0xf1efe6, 0xf1efe6, 0xf1efe6, 0x2f7d4f, 0x2c5f9e, 0xc23b32, 0xe0b653, 0xd8d2ba, 0x4e7380, 0x1f6b62];
   const bronze = new THREE.MeshStandardMaterial({ color: 0x6f6a5c, roughness: 0.5, metalness: 0.45 });
   // Materials that glow after dark share the city's night-window uniform, so
   // landmark openings come on with the rest of the skyline.
@@ -5399,6 +5593,10 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
       const defaultExtents: Partial<Record<DhakaLandmark["kind"], [number, number]>> = {
         // The runway strip only; the terminals carry their own columns.
         airport: [40, 40],
+        // A patch of runway; hangars and sheds carry their own columns.
+        "tejgaon-airport": [20, 20],
+        "sayedabad-bus-terminal": [6, 6],
+        "gabtoli-bus-terminal": [6, 6],
         "bangladesh-bank": [23.5, 13.5],
         "novo-theatre": [42, 34],
         // Only the outfield centre; the stands carry their own columns.
@@ -5436,6 +5634,8 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
         "army-stadium": [76, 110],
         // The blue basin on its island.
         "doyel-chattar": [9.5, 9.5],
+        // The fountain basin on the roundabout island.
+        "shapla-chattar": [8, 8],
         // World half extents of the plinth (its 60 m side runs at 167°).
         "three-leaders-mausoleum": [23, 33],
         // These sites carry their own collision boxes; the extents only
@@ -5540,6 +5740,9 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
     "amphitheatre",
     "bangladesh-bank",
     "airport",
+    "tejgaon-airport",
+    "sayedabad-bus-terminal",
+    "gabtoli-bus-terminal",
     "ramna-park",
     "suhrawardy-udyan",
     "rabindra-sarobar",
@@ -5565,6 +5768,7 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
     "gulshan-central-mosque",
     "army-stadium",
     "doyel-chattar",
+    "shapla-chattar",
     "three-leaders-mausoleum",
     "hussaini-dalan",
     "sadarghat-terminal",
@@ -10383,6 +10587,60 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
       solid(0, 0, 4, 6.9);
       clearSite(0, 0, 14, 14);
       perchTarget = [2.4, 0.6];
+    } else if (landmark.kind === "shapla-chattar") {
+      // Shapla Chattar, Motijheel: a white water lily (shapla, the national
+      // flower) in three rings of pointed petals round a yellow heart, raised
+      // on a stem from a round fountain basin, on the lawn island of the
+      // roundabout. The roundabout's centreline radius is about 25 m.
+      colliderTop = 1.2;
+      addCylinder(group, 12.5, 12.5, 0.14, [0, 0.07, 0], lawn, 36).castShadow = false;
+      addLathe(group, [[8.2, 0.1], [8.2, 1.1], [7.5, 1.1], [7.5, 0.5]], 40, [0, 0, 0], whiteStone);
+      addCylinder(group, 7.55, 7.55, 0.2, [0, 0.75, 0], water, 36).castShadow = false;
+      // Lily pads floating round the stem.
+      for (let pad = 0; pad < 6; pad++) {
+        const angle = (pad / 6) * Math.PI * 2 + 0.4;
+        const reach = 4.4 + (pad % 2) * 1.5;
+        addCylinder(group, 1.25, 1.25, 0.08, [Math.cos(angle) * reach, 0.9, Math.sin(angle) * reach], lawn, 12).castShadow = false;
+      }
+      // Stem and calyx.
+      addCylinder(group, 0.55, 0.8, 4.6, [0, 3.1, 0], whiteStone, 12);
+      addLathe(group, [[0.55, 5.1], [1.9, 5.9], [2.1, 6.3], [0.01, 6.3]], 20, [0, 0, 0], lawn);
+      const petalGeometry = (length: number, width: number) => {
+        const shape = new THREE.Shape();
+        shape.moveTo(0, 0);
+        shape.quadraticCurveTo(width, length * 0.3, width * 0.72, length * 0.62);
+        shape.lineTo(0, length);
+        shape.lineTo(-width * 0.72, length * 0.62);
+        shape.quadraticCurveTo(-width, length * 0.3, 0, 0);
+        const geometry = new THREE.ExtrudeGeometry(shape, { depth: 0.22, bevelEnabled: false, curveSegments: 4 });
+        geometry.translate(0, 0, -0.11);
+        return geometry;
+      };
+      // [petals, length, half width, lean from vertical, root radius, phase]
+      for (const [count, length, width, lean, root, phase] of [
+        [10, 6.2, 1.25, 1.08, 1.5, 0],
+        [8, 5.6, 1.1, 0.68, 1.0, 0.39],
+        [6, 4.6, 0.9, 0.3, 0.55, 0.2],
+      ] as const) {
+        const geometry = petalGeometry(length, width);
+        for (let index = 0; index < count; index++) {
+          const holder = new THREE.Group();
+          holder.position.set(0, 6.2, 0);
+          holder.rotation.y = (index / count) * Math.PI * 2 + phase;
+          const petal = new THREE.Mesh(geometry, whiteStone);
+          petal.position.z = root;
+          petal.rotation.x = lean;
+          petal.castShadow = true;
+          holder.add(petal);
+          group.add(holder);
+        }
+      }
+      const heart = new THREE.Mesh(new THREE.SphereGeometry(0.95, 12, 8), accent);
+      heart.scale.y = 0.7;
+      heart.position.set(0, 6.9, 0);
+      group.add(heart);
+      solid(0, 0, 5, 11);
+      clearSite(0, 0, 12.5, 12.5);
     } else if (landmark.kind === "three-leaders-mausoleum") {
       // Mausoleum of Three Leaders (OSM 296802766): three white hyperbolic-
       // paraboloid shells in a row over the graves, each four tall pointed
@@ -11938,6 +12196,279 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
         [-50, -22, 5.2, 5.8], [-35, -24, 4.6, 5.4], [-64, -22, 4.8, 5.6], [27, 10, 5.0, 5.6], [24, 26, 4.6, 5.2],
         [42, 4, 4.4, 5.0], [44, 22, 4.8, 5.4], [-8, 30, 4.2, 5.0],
       ] as const) addLandmarkTree(group, x, z, radius, trunk, landmarkLightCanopy);
+    } else if (landmark.kind === "tejgaon-airport") {
+      // Tejgaon Airport, the city's first, now the Air Force's Base Bashar.
+      // Local +Z runs down runway 17/35 (bearing 164.4°) and local +X points
+      // east across the taxiway loop to the aprons and hangars; every outline
+      // is an OSM chain from TEJGAON_AIRPORT turned into this frame. The
+      // runway is disused, so its paint is worn: faded, with dashes missing.
+      // Paving is flat and never struck; hangars and buildings are solid.
+      boundsCollider = false;
+      const GROUND = -0.9; // world y = 0
+      const field = TEJGAON_AIRPORT;
+      const local = (points: LatLon[]) => points.map(([lat, lon]) => toLocal(lat, lon) as MapPoint);
+      const ground = (points: MapPoint[], y: number, material: THREE.Material) => {
+        const geometry = new THREE.ShapeGeometry(polygonShape(points));
+        geometry.rotateX(-Math.PI / 2);
+        const mesh = new THREE.Mesh(geometry, material);
+        mesh.position.y = GROUND + y;
+        group.add(mesh);
+      };
+      // A strip of paving along a chain: one flat box per leg, run on past
+      // each joint so the bends close up.
+      const strip = (points: MapPoint[], width: number, y: number, material: THREE.Material) => {
+        for (let index = 1; index < points.length; index++) {
+          const [x1, z1] = points[index - 1];
+          const [x2, z2] = points[index];
+          const length = Math.hypot(x2 - x1, z2 - z1);
+          if (length < 0.5) continue;
+          const leg = addBox(group, [width, 0.16, length + width * 0.5], [(x1 + x2) / 2, GROUND + y - 0.08, (z1 + z2) / 2], material);
+          leg.rotation.y = Math.atan2(x2 - x1, z2 - z1);
+        }
+      };
+      // A flat-roofed block on an OSM outline, struck as the world-axis box
+      // round it. The column also keeps the map's own copy of the building
+      // and any generic plot off the spot.
+      const block = (ring: LatLon[], height: number, wall: THREE.Material, roof: THREE.Material) => {
+        const points = local(ring);
+        const shape = polygonShape(points);
+        const body = new THREE.Mesh(new THREE.ExtrudeGeometry(shape, { depth: height, bevelEnabled: false, curveSegments: 1 }).rotateX(-Math.PI / 2), wall);
+        body.position.y = GROUND;
+        const cap = new THREE.Mesh(new THREE.ExtrudeGeometry(shape, { depth: 0.5, bevelEnabled: false, curveSegments: 1 }).rotateX(-Math.PI / 2), roof);
+        cap.position.y = GROUND + height;
+        group.add(body, cap);
+        let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+        for (const [x, z] of points) {
+          const wx = group.position.x + x * cosH + z * sinH;
+          const wz = group.position.z - x * sinH + z * cosH;
+          minX = Math.min(minX, wx); maxX = Math.max(maxX, wx);
+          minZ = Math.min(minZ, wz); maxZ = Math.max(maxZ, wz);
+        }
+        colliders.push({ x: (minX + maxX) / 2, z: (minZ + maxZ) / 2, halfWidth: (maxX - minX) / 2, halfDepth: (maxZ - minZ) / 2, top: height + 0.5 });
+      };
+
+      // Mown grass inside the fence (above park turf, below map water).
+      ground(local(field.boundary), 0.36, airfieldGrass);
+      // Aprons, then the taxiway loop and its stubs over them.
+      for (const apron of field.aprons) ground(local(apron), 0.44, agedConcrete);
+      for (const taxiway of field.taxiways) strip(local(taxiway), 23, 0.52, agedConcrete);
+
+      // Runway 17/35: concrete shoulders, asphalt, and what is left of the paint.
+      const LENGTH = field.runway.length;
+      const WIDTH = field.runway.width;
+      const HALF = LENGTH / 2;
+      addBox(group, [WIDTH + 15, 0.2, LENGTH + 60], [0, GROUND + 0.5, 0], agedConcrete);
+      addBox(group, [WIDTH, 0.2, LENGTH], [0, GROUND + 0.65, 0], wornAsphalt);
+      const PAINT = GROUND + 0.78;
+      const paint = (x: number, z: number, sizeX: number, sizeZ: number) => addBox(group, [sizeX, 0.06, sizeZ], [x, PAINT, z], fadedPaint);
+      for (const side of [-1, 1]) paint(side * (WIDTH / 2 - 1.5), 0, 0.9, LENGTH - 20);
+      let dash = 0;
+      for (let z = -HALF + 110; z < HALF - 110; z += 60) {
+        // About one dash in five has worn away.
+        if ((dash++ * 7 + 3) % 5 !== 0) paint(0, z, 0.9, 30);
+      }
+      // Seven-segment numerals, read by a pilot on approach: `towards` is the
+      // way that pilot is flying along local Z.
+      const SEGMENTS: Record<string, string> = { "1": "i", "3": "abgcd", "5": "afgcd", "7": "abc" };
+      const numeral = (digit: string, across: number, z: number, towards: 1 | -1) => {
+        const W = 5.5, H = 16, S = 1.5;
+        const bars: Record<string, [number, number, number, number]> = {
+          a: [0, H / 2, W + S, S], g: [0, 0, W + S, S], d: [0, -H / 2, W + S, S],
+          f: [-W / 2, H / 4, S, H / 2 + S], b: [W / 2, H / 4, S, H / 2 + S],
+          e: [-W / 2, -H / 4, S, H / 2 + S], c: [W / 2, -H / 4, S, H / 2 + S],
+          i: [0, 0, S, H + S],
+        };
+        for (const key of SEGMENTS[digit]) {
+          const [u, v, sizeU, sizeV] = bars[key];
+          paint(-towards * (across + u), z + towards * v, sizeU, sizeV);
+        }
+      };
+      for (const [towards, digits] of [[1, "17"], [-1, "35"]] as const) {
+        const threshold = -towards * HALF;
+        for (let bar = -6; bar <= 6; bar++) {
+          if (bar !== 0) paint(bar * 3.1, threshold + towards * 22, 1.8, 30);
+        }
+        numeral(digits[0], -5.6, threshold + towards * 56, towards);
+        numeral(digits[1], 5.6, threshold + towards * 56, towards);
+        for (const side of [-1, 1]) {
+          for (const offset of [150, 300, 600]) paint(side * 9, threshold + towards * offset, 3, 22);
+          paint(side * 10, threshold + towards * 420, 6, 45);
+        }
+      }
+
+      // Hangars (metal sheds) and the base's other buildings.
+      for (const hangar of field.hangars) block(hangar.ring, hangar.height, hangarWall, tinRoof);
+      for (const building of field.buildings) block(building.ring, building.height, paleConcrete, roofGrey);
+      // Helipads on the east aprons: a painted ring each.
+      for (const [lat, lon, diameter] of field.helipads) {
+        const [x, z] = toLocal(lat, lon);
+        addCylinder(group, diameter / 2 + 1.6, diameter / 2 + 1.6, 0.04, [x, GROUND + 0.48, z], fadedPaint, 20);
+        addCylinder(group, diameter / 2 + 0.7, diameter / 2 + 0.7, 0.04, [x, GROUND + 0.52, z], agedConcrete, 20);
+        paint(x, z, 0.8, diameter * 0.6).position.y = GROUND + 0.57;
+      }
+      const [sockX, sockZ] = toLocal(...field.windsock);
+      addCylinder(group, 0.18, 0.18, 7, [sockX, GROUND + 3.5, sockZ], plantGrey, 6);
+      addBox(group, [3.2, 0.8, 0.8], [sockX + 1.6, GROUND + 6.6, sockZ], monumentRed);
+      const hero = local(field.hangars[0].ring);
+      perchTarget = [
+        hero.reduce((sum, [x]) => sum + x, 0) / hero.length,
+        hero.reduce((sum, [, z]) => sum + z, 0) / hero.length,
+      ];
+    } else if (landmark.kind === "sayedabad-bus-terminal" || landmark.kind === "gabtoli-bus-terminal") {
+      // An intercity bus terminal: an oil-stained paved yard on the OSM
+      // outline, the counter halls and sheds that stand on it, and coaches
+      // parked nose-in at an angle down both sides of every service aisle.
+      // Built in world axes (heading 0), so local offsets are world offsets.
+      // The yard is never struck; the halls are solid; the parked coaches are
+      // not (they are lower than the bird's ground clearance checks need).
+      const sayedabad = landmark.kind === "sayedabad-bus-terminal";
+      const terminal: BusTerminal = sayedabad ? SAYEDABAD_BUS_TERMINAL : GABTOLI_BUS_TERMINAL;
+      boundsCollider = false;
+      const GROUND = -0.9; // world y = 0
+      // Below every road tier (shoulders start at 0.7), so the streets that
+      // bound the yard draw over its edge.
+      const YARD = GROUND + 0.45;
+      const local = (points: LatLon[]) => points.map(([lat, lon]) => toLocal(lat, lon) as MapPoint);
+      const yard = local(terminal.yard);
+      const paving = new THREE.ShapeGeometry(polygonShape(yard));
+      paving.rotateX(-Math.PI / 2);
+      const pavingMesh = new THREE.Mesh(paving, yardPaving);
+      pavingMesh.position.y = YARD;
+      group.add(pavingMesh);
+      const rings = terminal.blocks.map((entry) => local(entry.ring));
+      terminal.blocks.forEach((entry, index) => {
+        const shape = polygonShape(rings[index]);
+        const body = new THREE.Mesh(new THREE.ExtrudeGeometry(shape, { depth: entry.height, bevelEnabled: false, curveSegments: 1 }).rotateX(-Math.PI / 2), index % 2 === 0 ? paleConcrete : cream);
+        body.position.y = GROUND;
+        const cap = new THREE.Mesh(new THREE.ExtrudeGeometry(shape, { depth: 0.4, bevelEnabled: false, curveSegments: 1 }).rotateX(-Math.PI / 2), tinRoof);
+        cap.position.y = GROUND + entry.height;
+        group.add(body, cap);
+        const xs = rings[index].map(([x]) => x);
+        const zs = rings[index].map(([, z]) => z);
+        solidBox(
+          (Math.min(...xs) + Math.max(...xs)) / 2,
+          (Math.min(...zs) + Math.max(...zs)) / 2,
+          (Math.max(...xs) - Math.min(...xs)) / 2,
+          (Math.max(...zs) - Math.min(...zs)) / 2,
+          GROUND + entry.height + 0.4,
+        );
+      });
+      // An open tin shed: a roof on two rows of posts (local centre, size).
+      const shed = (x: number, z: number, sizeX: number, sizeZ: number, height = 4.6) => {
+        addBox(group, [sizeX, 0.3, sizeZ], [x, GROUND + height, z], tinRoof);
+        const alongX = sizeX >= sizeZ;
+        const run = alongX ? sizeX : sizeZ;
+        const across = (alongX ? sizeZ : sizeX) / 2 - 0.6;
+        for (let step = -run / 2 + 1; step <= run / 2 - 0.9; step += (run - 2) / Math.max(1, Math.round(run / 9))) {
+          for (const side of [-1, 1]) {
+            addBox(group, [0.35, height, 0.35], alongX ? [x + step, GROUND + height / 2, z + side * across] : [x + side * across, GROUND + height / 2, z + step], plantGrey);
+          }
+        }
+      };
+      if (sayedabad) {
+        // Not in OSM: the passenger sheds in front of the south counter block
+        // and along the west side of the yard.
+        shed(38, 87, 76, 9);
+        shed(-62, 96, 9, 44);
+        clearSite(45, -37, 73, 71);
+        clearSite(30, 70, 125, 34);
+        clearSite(85, 108, 65, 4);
+        clearSite(-70, 113, 25, 9);
+        perchTarget = [38, 100];
+      } else {
+        clearSite(-112.5, -20, 92.5, 25);
+        clearSite(74, -28.5, 94, 33.5);
+        clearSite(50, 25, 110, 20);
+        clearSite(72.5, 53.5, 72.5, 8.5);
+        clearSite(67, 65, 48, 3.5);
+        clearSite(-77.5, 13.5, 17.5, 8.5);
+        perchTarget = [30, -38];
+      }
+
+      // Parked coaches. Each aisle is walked at one bay pitch; a coach stands
+      // at 60° to it on either side, nose to the aisle. A bay is dropped if it
+      // leaves the yard, crowds a hall, another aisle or a coach already
+      // parked, or stands under an elevated road's deck or pier.
+      const BAY_ANGLE = Math.PI / 3;
+      const BAY_PITCH = 3.75;
+      const HALF_LENGTH = 5.8;
+      // Gabtoli's outline is road centrelines (Mirpur Road and the outer
+      // loop), so its coaches stand further in.
+      const EDGE_GAP = sayedabad ? 6 : 10;
+      const aisles = terminal.aisles.map(local);
+      const elevated = elevatedRoadCorridor();
+      const random = seededRandom(sayedabad ? 4_101 : 4_217);
+      const edgeDistance = (x: number, z: number, ring: MapPoint[]) => {
+        let best = Infinity;
+        for (let index = 0; index < ring.length; index++) {
+          const [ax, az] = ring[index];
+          const [bx, bz] = ring[(index + 1) % ring.length];
+          best = Math.min(best, distanceToSegmentSquared(x, z, ax, az, bx, bz));
+        }
+        return Math.sqrt(best);
+      };
+      const chainDistance = (x: number, z: number, chain: MapPoint[]) => {
+        let best = Infinity;
+        for (let index = 1; index < chain.length; index++) {
+          best = Math.min(best, distanceToSegmentSquared(x, z, chain[index - 1][0], chain[index - 1][1], chain[index][0], chain[index][1]));
+        }
+        return Math.sqrt(best);
+      };
+      const bays: Array<{ x: number; z: number; dx: number; dz: number }> = [];
+      aisles.forEach((aisle, aisleIndex) => {
+        let carried = BAY_PITCH;
+        for (let index = 1; index < aisle.length; index++) {
+          const [x1, z1] = aisle[index - 1];
+          const [x2, z2] = aisle[index];
+          const length = Math.hypot(x2 - x1, z2 - z1);
+          if (length < 0.5) continue;
+          const tx = (x2 - x1) / length;
+          const tz = (z2 - z1) / length;
+          for (; carried < length; carried += BAY_PITCH) {
+            for (const side of [-1, 1]) {
+              // The coach's long axis: the aisle direction swung 60° to this side.
+              const cos = Math.cos(BAY_ANGLE * side);
+              const sin = Math.sin(BAY_ANGLE * side);
+              const dx = tx * cos - tz * sin;
+              const dz = tx * sin + tz * cos;
+              const x = x1 + tx * carried + dx * (HALF_LENGTH + 4.4);
+              const z = z1 + tz * carried + dz * (HALF_LENGTH + 4.4);
+              const probes: MapPoint[] = [[x, z], [x + dx * HALF_LENGTH, z + dz * HALF_LENGTH], [x - dx * HALF_LENGTH, z - dz * HALF_LENGTH]];
+              if (probes.some(([px, pz]) => !pointInPolygon(px, pz, yard) || edgeDistance(px, pz, yard) < EDGE_GAP)) continue;
+              if (probes.some(([px, pz]) => rings.some((ring) => pointInPolygon(px, pz, ring) || edgeDistance(px, pz, ring) < 3))) continue;
+              if (probes.some(([px, pz]) => aisles.some((other, otherIndex) => chainDistance(px, pz, other) < (otherIndex === aisleIndex ? 2.6 : 4.2)))) continue;
+              if (probes.some(([px, pz]) => elevated.blocksCircle(group.position.x + px, group.position.z + pz, 3))) continue;
+              if (bays.some((bay) => {
+                const others: MapPoint[] = [[bay.x, bay.z], [bay.x + bay.dx * HALF_LENGTH, bay.z + bay.dz * HALF_LENGTH], [bay.x - bay.dx * HALF_LENGTH, bay.z - bay.dz * HALF_LENGTH]];
+                return probes.some(([px, pz]) => others.some(([ox, oz]) => Math.hypot(px - ox, pz - oz) < 3.1));
+              })) continue;
+              // The slot is taken either way; a fifth of the bays stand empty.
+              bays.push({ x, z, dx, dz });
+            }
+          }
+          carried -= length;
+        }
+      });
+      const parked = bays.filter(() => random() > 0.2);
+      const bodies = new THREE.InstancedMesh(busBodyGeometry, busPaint, parked.length);
+      const windows = new THREE.InstancedMesh(busWindowGeometry, busGlass, parked.length);
+      bodies.name = `${landmark.label} parked coaches`;
+      const bayMatrix = new THREE.Matrix4();
+      const bayColor = new THREE.Color();
+      parked.forEach((bay, index) => {
+        const turn = -Math.atan2(bay.dz, bay.dx) + (random() - 0.5) * 0.05;
+        bayMatrix.makeRotationY(turn).setPosition(bay.x, YARD + 0.45 + 1.45, bay.z);
+        bodies.setMatrixAt(index, bayMatrix);
+        bayMatrix.setPosition(bay.x, YARD + 0.45 + 2.05, bay.z);
+        windows.setMatrixAt(index, bayMatrix);
+        bodies.setColorAt(index, bayColor.setHex(BUS_LIVERIES[Math.floor(random() * BUS_LIVERIES.length)]));
+      });
+      bodies.instanceMatrix.needsUpdate = true;
+      windows.instanceMatrix.needsUpdate = true;
+      if (bodies.instanceColor) bodies.instanceColor.needsUpdate = true;
+      bodies.castShadow = true;
+      bodies.receiveShadow = true;
+      group.add(bodies, windows);
     }
 
     bakeGroup(group);
@@ -12275,6 +12806,311 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
     disposeMetroGroup(metroRoot);
     metroRoot = buildMetro(centerline, specs.length >= 2 ? specs : fallbackStationSpecs);
   };
+
+  // ELEVATED ROADS: every structure in the ELEVATED_ROADS table (see
+  // elevated-roads.ts for the format), swept as a box-girder deck per chain.
+  // A deck is one vertex-coloured mesh per structure per square kilometre, so
+  // the frustum can drop most of a long viaduct; piers are two instanced
+  // meshes per structure. Low ramp ends stand on solid walls instead of piers.
+  const buildElevatedRoads = () => {
+    const elevatedRoot = new THREE.Group();
+    elevatedRoot.name = "Elevated roads";
+    root.add(elevatedRoot);
+    const deckMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, roughness: 0.86 });
+    const columnGeometry = new THREE.CylinderGeometry(1, 1, 1, 8, 1, true).translate(0, 0.5, 0);
+    const bladeGeometry = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
+    // A lamp post standing on the parapet line: mast, arm reaching +x, lantern.
+    const lampGeometry = mergeGeometries([
+      new THREE.BoxGeometry(0.24, 9, 0.24).translate(0, 4.5, 0),
+      new THREE.BoxGeometry(2.6, 0.16, 0.16).translate(1.2, 8.9, 0),
+      new THREE.BoxGeometry(0.9, 0.2, 0.42).translate(2.3, 8.72, 0),
+    ], false);
+    const lampMaterial = new THREE.MeshStandardMaterial({ color: 0x4a5354, roughness: 0.6, metalness: 0.45 });
+    // Marks a strip corner that sits on the girder's soffit, whatever its depth there.
+    const SOFFIT = -1000;
+    const DECK_CELL = 1000;
+    const EDGE_SLAB = 0.45;
+    const PARAPET_WIDTH = 0.45;
+    const CAP_DEPTH = 1.4;
+    // Decks lower than this stand on fill between walls and take no piers.
+    const WALL_SOFFIT = 2.6;
+    const tint = new THREE.Color();
+    const deckColliders: BuildingCollider[] = [];
+    type PierSet = {
+      layout: ElevatedRoadLayout;
+      shafts: THREE.InstancedMesh;
+      caps: THREE.InstancedMesh;
+    };
+    const pierSets: PierSet[] = [];
+
+    for (const layout of elevatedRoadLayouts()) {
+      const { road, chains } = layout;
+      const style = ELEVATED_ROAD_STYLES[road.style];
+      const cells = new Map<string, { positions: number[]; colors: number[] }>();
+      let pierCapacity = 0;
+      for (const chain of chains) {
+        const half = chain.half;
+        const web = half * style.webRatio;
+        pierCapacity += chain.pierStations.length;
+        // Sibling chains may overlap at one level; a few centimetres between
+        // their road surfaces stops a lane line fighting asphalt.
+        const lift = chain.lift;
+        for (let index = 0; index < chain.rings.length - 1; index++) {
+          const p = chain.rings[index];
+          const q = chain.rings[index + 1];
+          const key = `${Math.floor((p.x + q.x) / 2 / DECK_CELL)}:${Math.floor((p.z + q.z) / 2 / DECK_CELL)}`;
+          let cell = cells.get(key);
+          if (!cell) cells.set(key, cell = { positions: [], colors: [] });
+          const { positions, colors } = cell;
+          // One strip of the cross-section between the two rings, from
+          // [offset, height above the road surface] a to b. `out` is the way
+          // it faces: sideways (-1 left, 1 right), up or down.
+          const strip = (a: [number, number], b: [number, number], color: number, out: [number, number]) => {
+            const corner = (ring: typeof p, [offset, rise]: [number, number]): QuadPoint => (
+              [ring.x + ring.rx * offset, Math.max(0.2, ring.top + (rise === SOFFIT ? -ring.depth : rise)), ring.z + ring.rz * offset]
+            );
+            const [c0, c1, c2, c3] = [corner(p, a), corner(p, b), corner(q, b), corner(q, a)];
+            const ux = c1[0] - c0[0], uy = c1[1] - c0[1], uz = c1[2] - c0[2];
+            const vx = c2[0] - c0[0], vy = c2[1] - c0[1], vz = c2[2] - c0[2];
+            const facing = (uy * vz - uz * vy) * p.rx * out[0] + (uz * vx - ux * vz) * out[1] + (ux * vy - uy * vx) * p.rz * out[0];
+            const ring = facing >= 0 ? [c0, c1, c2, c3] : [c0, c3, c2, c1];
+            positions.push(...ring[0], ...ring[1], ...ring[2], ...ring[0], ...ring[2], ...ring[3]);
+            tint.setHex(color);
+            for (let vertex = 0; vertex < 6; vertex++) colors.push(tint.r, tint.g, tint.b);
+          };
+          if (chain.atGrade) {
+            // A link road on the ground: just its surface and kerbs.
+            strip([-half, lift], [-0.16, lift], style.asphalt, [0, 1]);
+            strip([-0.16, lift], [0.16, lift], 0xdad6c8, [0, 1]);
+            strip([0.16, lift], [half, lift], style.asphalt, [0, 1]);
+            for (const side of [-1, 1]) strip([side * half, lift], [side * half, -EDGE_SLAB], style.girder, [side, 0]);
+            continue;
+          }
+          const onWalls = Math.max(p.top - p.depth, q.top - q.depth) < WALL_SOFFIT;
+          const edges = [-1, 1].map((side) => {
+            const parapet = p.parapet[side < 0 ? 0 : 1] && q.parapet[side < 0 ? 0 : 1];
+            const edge = side * half;
+            if (parapet) {
+              const inner = side * (half - PARAPET_WIDTH);
+              strip([inner, 0], [inner, style.parapetHeight], style.parapet, [-side, 0]);
+              strip([inner, style.parapetHeight], [edge, style.parapetHeight], style.parapet, [0, 1]);
+              strip([edge, style.parapetHeight], [edge, -EDGE_SLAB], style.parapet, [side, 0]);
+            } else {
+              strip([edge, 0], [edge, -EDGE_SLAB], style.girder, [side, 0]);
+            }
+            if (onWalls) strip([edge, -EDGE_SLAB], [edge, -40], style.girder, [side, 0]);
+            else strip([edge, -EDGE_SLAB], [side * web, SOFFIT], style.soffit, [side * 0.4, -1]);
+            return parapet ? side * (half - PARAPET_WIDTH) : edge;
+          });
+          if (style.laneLine) {
+            // Lane lines split the carriageway into `lanes` equal lanes.
+            const lanes = chain.lanes;
+            let from = edges[0];
+            for (let line = 1; line < lanes; line++) {
+              const offset = (half - PARAPET_WIDTH) * ((2 * line) / lanes - 1);
+              strip([from, lift], [offset - 0.16, lift], style.asphalt, [0, 1]);
+              strip([offset - 0.16, lift], [offset + 0.16, lift], 0xdad6c8, [0, 1]);
+              from = offset + 0.16;
+            }
+            strip([from, lift], [edges[1], lift], style.asphalt, [0, 1]);
+          } else {
+            strip([edges[0], lift], [edges[1], lift], style.asphalt, [0, 1]);
+          }
+          if (!onWalls) strip([-web, SOFFIT], [web, SOFFIT], style.soffit, [0, -1]);
+        }
+        // What the bird strikes: overlapping columns under the deck wherever
+        // it is clear of the ground, as the Kuril ramps have.
+        if (road.collide !== false && !chain.atGrade) {
+          const step = Math.max(6, half * 1.4);
+          for (let s = 0; s <= chain.length; s += step) {
+            const { x, z, top } = chain.at(s);
+            if (top > 2.4) deckColliders.push({ x, z, halfWidth: half + 0.8, halfDepth: half + 0.8, top: top + 0.4 });
+          }
+        }
+      }
+      for (const [key, { positions, colors }] of cells) {
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+        geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+        geometry.computeVertexNormals();
+        const deck = new THREE.Mesh(geometry, deckMaterial);
+        deck.name = `${road.key} deck ${key}`;
+        deck.castShadow = true;
+        deck.receiveShadow = true;
+        deck.matrixAutoUpdate = false;
+        elevatedRoot.add(deck);
+      }
+      const shafts = new THREE.InstancedMesh(style.pier === "wall" ? bladeGeometry : columnGeometry, concrete, pierCapacity);
+      const caps = new THREE.InstancedMesh(unitBox, concrete, pierCapacity);
+      for (const mesh of [shafts, caps]) {
+        mesh.name = `${road.key} ${mesh === shafts ? "pier shafts" : "pier caps"}`;
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        mesh.matrixAutoUpdate = false;
+        elevatedRoot.add(mesh);
+      }
+      pierSets.push({ layout, shafts, caps });
+      if (road.lampSpacing) {
+        // Lamp posts down both parapets, staggered side to side.
+        const spots: Array<{ x: number; z: number; top: number; turn: number }> = [];
+        for (const chain of chains) {
+          // Only the bridge itself is lit, not the link ramps beside it.
+          if (!chain.pierStations.some((station) => station.river)) continue;
+          for (const side of [-1, 1]) {
+            for (let s = road.lampSpacing * (side < 0 ? 0.5 : 1); s < chain.length; s += road.lampSpacing) {
+              const { x, z, tx, tz, top } = chain.at(s);
+              if (top - chain.depthAt(s) < WALL_SOFFIT) continue;
+              const reach = side * (chain.half - PARAPET_WIDTH / 2);
+              // The arm (+x of the post) points back across the deck.
+              spots.push({ x: x - tz * reach, z: z + tx * reach, top, turn: Math.atan2(side * tx, side * tz) });
+            }
+          }
+        }
+        const lamps = new THREE.InstancedMesh(lampGeometry, lampMaterial, spots.length);
+        const lampMatrix = new THREE.Matrix4();
+        spots.forEach((spot, index) => lamps.setMatrixAt(index, lampMatrix.makeRotationY(spot.turn).setPosition(spot.x, spot.top + style.parapetHeight - 0.2, spot.z)));
+        lamps.name = `${road.key} lamps`;
+        lamps.matrixAutoUpdate = false;
+        lamps.computeBoundingBox();
+        lamps.computeBoundingSphere();
+        elevatedRoot.add(lamps);
+      }
+      if (road.label) {
+        const middle = chains[0].at(road.labelAt ?? chains[0].length / 2);
+        addLabel(new THREE.Vector3(middle.x, middle.top + 26, middle.z), road.label, elevatedRoot);
+      }
+    }
+
+    // Piers stand every `pierSpacing` metres wherever the deck is up on its
+    // girder. `blocked` reports a spot a pier must not stand on (open water,
+    // the carriageway of a street crossing underneath); a blocked pier slides
+    // along the deck to the nearest free spot, or is left out.
+    const pierMatrix = new THREE.Matrix4();
+    const pierPosition = new THREE.Vector3();
+    const pierQuaternion = new THREE.Quaternion();
+    const pierScale = new THREE.Vector3();
+    const upAxis = new THREE.Vector3(0, 1, 0);
+    const keepOut = ELEVATED_ROAD_PIER_KEEP_OUT.map(({ points, halfWidth }) => ({
+      plan: points.map(([lat, lon]) => coordinatesToWorld(lat, lon)),
+      halfWidth,
+    }));
+    const placePiers = (blocked: (x: number, z: number, tx: number, tz: number, inWaterAllowed: boolean) => boolean) => {
+      const layouts = elevatedRoadLayouts();
+      for (const { layout, shafts, caps } of pierSets) {
+        const { road, chains } = layout;
+        const style = ELEVATED_ROAD_STYLES[road.style];
+        let count = 0;
+        for (const chain of chains) {
+          if (chain.atGrade) continue;
+          const web = chain.half * style.webRatio;
+          for (const { s, river } of chain.pierStations) {
+            if (count >= shafts.instanceMatrix.count) break;
+            // A main-span pier stands where the span puts it; the rest may slide.
+            for (const shift of river ? [0] : [0, 5, -5, 10, -10]) {
+              const { x, z, tx, tz, top } = chain.at(s + shift);
+              const soffit = top - chain.depthAt(s + shift);
+              if (soffit < WALL_SOFFIT) break;
+              // Not through a lower deck or a link road at a crossing or merge.
+              if (elevatedDeckBelow(layouts, chain, x, z, tx, tz, soffit, style.pierRadius + 0.4)) continue;
+              if (keepOut.some(({ plan, halfWidth }) => plan.some((point, index) => index > 0
+                && distanceToSegmentSquared(x, z, plan[index - 1].x, plan[index - 1].y, point.x, point.y) < (halfWidth + style.pierRadius + 0.4) ** 2))) continue;
+              if (!river && blocked(x, z, tx, tz, style.piersInWater)) continue;
+              pierQuaternion.setFromAxisAngle(upAxis, Math.atan2(tx, tz));
+              if (style.pier === "wall" && river) {
+                // A blade as wide as the soffit on a pile cap at the waterline.
+                shafts.setMatrixAt(count, pierMatrix.compose(pierPosition.set(x, 0, z), pierQuaternion, pierScale.set(web * 1.7, soffit, style.pierRadius * 1.4)));
+                caps.setMatrixAt(count, pierMatrix.compose(pierPosition.set(x, 1.1, z), pierQuaternion, pierScale.set(web * 1.7 + 3, 1.8, style.pierRadius * 1.4 + 3.4)));
+              } else if (style.pier === "wall") {
+                // An approach pier on land: a narrower blade under a crosshead.
+                shafts.setMatrixAt(count, pierMatrix.compose(pierPosition.set(x, 0, z), pierQuaternion, pierScale.set(web * 1.1, soffit - 1.2, style.pierRadius * 1.4)));
+                caps.setMatrixAt(count, pierMatrix.compose(pierPosition.set(x, soffit - 0.6, z), pierQuaternion, pierScale.set(web * 1.9, 1.2, style.pierRadius * 1.4 + 0.7)));
+              } else {
+                shafts.setMatrixAt(count, pierMatrix.compose(pierPosition.set(x, 0, z), pierQuaternion, pierScale.set(style.pierRadius, soffit - CAP_DEPTH, style.pierRadius)));
+                caps.setMatrixAt(count, pierMatrix.compose(pierPosition.set(x, soffit - CAP_DEPTH / 2, z), pierQuaternion, pierScale.set(web * 2 + 0.8, CAP_DEPTH, style.pierRadius * 2.2)));
+              }
+              count++;
+              break;
+            }
+          }
+        }
+        for (const mesh of [shafts, caps]) {
+          mesh.count = count;
+          mesh.instanceMatrix.needsUpdate = true;
+          mesh.computeBoundingBox();
+          mesh.computeBoundingSphere();
+        }
+      }
+    };
+    placePiers(() => false);
+
+    // Once the map arrives, move piers out of its water and off the streets
+    // that cross under the decks. Streets running along a deck are left alone:
+    // the piers stand in their median.
+    scene.userData.placeElevatedRoadPiers = (water: OsmMapData["water"], roads: OsmMapData["roads"]) => {
+      const corridor = elevatedRoadCorridor();
+      const CELL = 120;
+      type Obstacle = { x1: number; z1: number; x2: number; z2: number; radius: number; water: boolean };
+      const obstacles = new Map<string, Obstacle[]>();
+      const waterAreas = new Map<string, MapPoint[][]>();
+      const addToCells = <T,>(grid: Map<string, T[]>, item: T, minX: number, maxX: number, minZ: number, maxZ: number) => {
+        for (let cellX = Math.floor(minX / CELL); cellX <= Math.floor(maxX / CELL); cellX++) {
+          for (let cellZ = Math.floor(minZ / CELL); cellZ <= Math.floor(maxZ / CELL); cellZ++) {
+            const key = `${cellX}:${cellZ}`;
+            const bucket = grid.get(key);
+            if (bucket) bucket.push(item);
+            else grid.set(key, [item]);
+          }
+        }
+      };
+      const addSegments = (points: MapPoint[], radius: number, isWater: boolean) => {
+        for (let index = 1; index < points.length; index++) {
+          const [x1, z1] = points[index - 1];
+          const [x2, z2] = points[index];
+          // Only what lies near a deck matters.
+          if (!corridor.blocksCircle((x1 + x2) / 2, (z1 + z2) / 2, Math.hypot(x2 - x1, z2 - z1) / 2 + radius + 12)) continue;
+          addToCells(obstacles, { x1, z1, x2, z2, radius, water: isWater }, Math.min(x1, x2) - radius, Math.max(x1, x2) + radius, Math.min(z1, z2) - radius, Math.max(z1, z2) + radius);
+        }
+      };
+      for (const road of roads) {
+        if (ELEVATED_ROAD_WAY_IDS.has(road.id) || road.points.length < 2) continue;
+        const major = road.kind === "motorway" || road.kind === "trunk" || road.kind === "primary" || road.kind === "secondary";
+        addSegments(road.points, (major ? (road.kind === "motorway" || road.kind === "trunk" ? 8.5 : 7) : 3.75) + 1.5, false);
+      }
+      for (const feature of water) {
+        if (feature.area && feature.points.length >= 3) {
+          let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+          for (const [x, z] of feature.points) {
+            minX = Math.min(minX, x);
+            maxX = Math.max(maxX, x);
+            minZ = Math.min(minZ, z);
+            maxZ = Math.max(maxZ, z);
+          }
+          if (corridor.blocksCircle((minX + maxX) / 2, (minZ + maxZ) / 2, Math.hypot(maxX - minX, maxZ - minZ) / 2 + 12)) {
+            addToCells(waterAreas, feature.points, minX, maxX, minZ, maxZ);
+          }
+        } else {
+          const width = waterLineWidth(feature.points);
+          if (width > 0) addSegments(feature.points, width / 2 + 1.5, true);
+        }
+      }
+      placePiers((x, z, tx, tz, inWaterAllowed) => {
+        const key = `${Math.floor(x / CELL)}:${Math.floor(z / CELL)}`;
+        if (!inWaterAllowed && (waterAreas.get(key) ?? []).some((points) => pointInPolygon(x, z, points))) return true;
+        for (const obstacle of obstacles.get(key) ?? []) {
+          if (obstacle.water && inWaterAllowed) continue;
+          if (distanceToSegmentSquared(x, z, obstacle.x1, obstacle.z1, obstacle.x2, obstacle.z2) > obstacle.radius ** 2) continue;
+          if (obstacle.water) return true;
+          const dx = obstacle.x2 - obstacle.x1;
+          const dz = obstacle.z2 - obstacle.z1;
+          // A street within about 35° of the deck's line runs along it, not across.
+          if (Math.abs(dx * tx + dz * tz) < 0.82 * Math.hypot(dx, dz)) return true;
+        }
+        return false;
+      });
+    };
+    scene.userData.elevatedRoadColliders = deckColliders;
+  };
+  buildElevatedRoads();
 
   scene.add(root);
   scene.userData.landmarkColliders = colliders;
@@ -13900,7 +14736,10 @@ void main() {`,
     const buildingColliders = addCity(scene);
     relabelRef.current = (nextLocale) => (scene.userData.relabel as ((locale: Locale) => void) | undefined)?.(nextLocale);
     relabelRef.current(localeRef.current);
-    let buildingColliderGrid = buildColliderGrid(buildingColliders);
+    // Elevated-road decks are struck like buildings but kept out of the
+    // building lists, which the map passes scan linearly for clearings.
+    const elevatedRoadColliders = (scene.userData.elevatedRoadColliders as BuildingCollider[] | undefined) ?? [];
+    let buildingColliderGrid = buildColliderGrid([...buildingColliders, ...elevatedRoadColliders]);
     const fallbackRoads = proceduralFallbackRoads();
     addImmediateCityMass(scene, fallbackRoads);
     const immediateRoadFallback = new THREE.Group();
@@ -13946,7 +14785,7 @@ void main() {`,
         for (const group of [osmWorld.colliders, proceduralTiles.colliders, landmarkColliders]) {
           for (const collider of group) nextColliders.push(collider);
         }
-        const nextColliderGrid = await buildColliderGridAsync(nextColliders, () => disposed);
+        const nextColliderGrid = await buildColliderGridAsync([...nextColliders, ...elevatedRoadColliders], () => disposed);
         if (disposed) {
           proceduralTiles.dispose();
           osmWorld.dispose();
@@ -13968,6 +14807,7 @@ void main() {`,
           | ((lines: MapPoint[][], stations: NonNullable<OsmMapData["metroStations"]>) => void)
           | undefined;
         if (rebuildMetro && data.metroLines?.length) rebuildMetro(data.metroLines, data.metroStations ?? []);
+        (scene.userData.placeElevatedRoadPiers as ((water: OsmMapData["water"], roads: OsmMapData["roads"]) => void) | undefined)?.(data.water, data.roads);
         renderer.domElement.dataset.mapRequestMs = (performance.now() - mapRequestStartedAt).toFixed(1);
         renderer.domElement.dataset.mapBuildMs = (performance.now() - mapBuildStartedAt).toFixed(1);
         // New geometry needs one shadow pass now that the map is no longer redrawn
@@ -14000,7 +14840,7 @@ void main() {`,
           pendingProceduralTiles = proceduralTiles;
           const nextColliders = [...buildingColliders];
           for (const collider of proceduralTiles.colliders) nextColliders.push(collider);
-          const nextColliderGrid = await buildColliderGridAsync(nextColliders, () => disposed);
+          const nextColliderGrid = await buildColliderGridAsync([...nextColliders, ...elevatedRoadColliders], () => disposed);
           if (disposed) {
             proceduralTiles.dispose();
             pendingProceduralTiles = null;
@@ -14327,6 +15167,8 @@ void main() {`,
       inspectionTarget = new THREE.Vector3(world.x, Math.max(6, landmark.altitude * 0.42), world.y);
       inspectionCameraOffset = kind === "airport"
         ? 900 // the runway and both terminals span 1.3 × 3.2 km
+        : kind === "tejgaon-airport" ? 700
+        : kind === "sayedabad-bus-terminal" || kind === "gabtoli-bus-terminal" ? 230
         : ["parliament", "lalbagh-fort", "ahsan-manzil", "zia-udyan", "dhaka-medical", "kamalapur-station", "military-museum", "bcfcc", "supreme-court", "sadarghat-terminal", "rayer-bazar-memorial", "shishu-park", "baldha-garden", "science-museum", "air-force-museum", "sonargaon-hotel", "pm-office"].includes(kind) ? 190
           : kind === "jamuna-future-park" || kind === "national-zoo" || kind === "army-stadium" || kind === "national-stadium" || kind === "botanical-garden" ? 260
           : kind === "kuril-flyover" ? 560
