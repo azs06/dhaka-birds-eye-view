@@ -234,8 +234,15 @@ kbd { display: inline-grid; place-items: center; min-width: 24px; height: 24px; 
    thirds of the sky stay clear. */
 .title-screen { position: absolute; inset: 0; z-index: 6; overflow: hidden; color: var(--chalk); transition: opacity .9s ease; }
 .title-screen.leaving { opacity: 0; pointer-events: none; }
-.title-sky { position: absolute; inset: -4%; z-index: -2; background: url("/title/sky-dawn.jpg") center / cover; animation: title-drift 38s ease-in-out infinite alternate; }
-.title-sky[data-art="dusk"] { background-image: url("/title/sky-dusk.jpg"); }
+/* The painted sky carries the chosen bird: one set of art per bird, picked by data-bird.
+   The crow's art sits underneath, so a bird still loading never uncovers the scene. */
+.title-sky { --sky-dawn: url("/title/sky-dawn.jpg"); --sky-dusk: url("/title/sky-dusk.jpg"); --sky-phone: url("/title/sky-dawn-phone.jpg"); position: absolute; inset: -4%; z-index: -2; background: var(--sky-dawn) center / cover, url("/title/sky-dawn.jpg") center / cover; animation: title-drift 38s ease-in-out infinite alternate; }
+.title-sky[data-bird="doel"] { --sky-dawn: url("/title/sky-dawn-doel.jpg"); --sky-dusk: url("/title/sky-dusk-doel.jpg"); --sky-phone: url("/title/sky-dawn-phone-doel.jpg"); }
+.title-sky[data-bird="shalik"] { --sky-dawn: url("/title/sky-dawn-shalik.jpg"); --sky-dusk: url("/title/sky-dusk-shalik.jpg"); --sky-phone: url("/title/sky-dawn-phone-shalik.jpg"); }
+.title-sky[data-bird="chil"] { --sky-dawn: url("/title/sky-dawn-chil.jpg"); --sky-dusk: url("/title/sky-dusk-chil.jpg"); --sky-phone: url("/title/sky-dawn-phone-chil.jpg"); }
+.title-sky[data-bird="tiya"] { --sky-dawn: url("/title/sky-dawn-tiya.jpg"); --sky-dusk: url("/title/sky-dusk-tiya.jpg"); --sky-phone: url("/title/sky-dawn-phone-tiya.jpg"); }
+.title-sky[data-bird="machhranga"] { --sky-dawn: url("/title/sky-dawn-machhranga.jpg"); --sky-dusk: url("/title/sky-dusk-machhranga.jpg"); --sky-phone: url("/title/sky-dawn-phone-machhranga.jpg"); }
+.title-sky[data-art="dusk"] { background-image: var(--sky-dusk), url("/title/sky-dusk.jpg"); }
 @keyframes title-drift { from { transform: scale(1.02) translate(0, 0); } to { transform: scale(1.09) translate(-2.2%, -1.2%); } }
 .title-shade { position: absolute; inset: 0; z-index: -1; pointer-events: none; background: linear-gradient(180deg, rgba(20,12,8,.28), transparent 22%, transparent 58%, rgba(20,12,8,.55)); }
 .title-top { position: absolute; top: 22px; left: 28px; right: 16px; display: flex; align-items: center; gap: 8px; }
@@ -347,7 +354,9 @@ kbd { display: inline-grid; place-items: center; min-width: 24px; height: 24px; 
   .menu-list, .menu-bird .menu-list, .menu-sky .menu-list { position: fixed; top: calc(max(16px, env(safe-area-inset-top)) + 60px); left: 12px; right: 12px; bottom: auto; width: auto; max-height: 55vh; }
 }
 @media (max-width: 700px) and (orientation: portrait) {
-  .title-sky[data-art="dawn"] { background-image: url("/title/sky-dawn-phone.jpg"); }
+  .title-sky[data-art="dawn"] { background-image: var(--sky-phone), url("/title/sky-dawn-phone.jpg"); }
+  /* The dusk art is landscape; slide it so the bird, right of centre, stays on screen. */
+  .title-sky[data-art="dusk"] { background-position: 73% center; }
 }
 /* Short screens: keep the bar and its lists clear of the title. */
 @media (max-height: 640px) {
