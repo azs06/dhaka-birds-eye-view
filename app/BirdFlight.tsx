@@ -51,7 +51,19 @@ type FlightActions = {
   /** Current spot in the sky, for building a shareable link back to it. */
   readView: () => { lat: number; lon: number; alt: number; yaw: number };
 };
-type BuildingCollider = { x: number; z: number; halfWidth: number; halfDepth: number; top: number };
+type BuildingCollider = {
+  x: number;
+  z: number;
+  halfWidth: number;
+  halfDepth: number;
+  top: number;
+  /** Landmark colliders only: clear ground procedural plots keep from it, in metres. */
+  gap?: number;
+};
+// Top of a landmark "clearing" collider: low enough that the bird's
+// `y < top + 5.5` strike test never fires, so it only keeps generic buildings
+// and trees off a landmark's plaza or lawn.
+const LANDMARK_CLEARING_TOP = -6;
 type Perch = {
   position: THREE.Vector3;
   label: string;
@@ -103,9 +115,47 @@ type DhakaLandmark = AreaLandmark & {
     | "military-museum"
     | "science-museum"
     | "shishu-park"
-    | "shishu-mela";
+    | "shishu-mela"
+    | "novo-theatre"
+    | "dhaka-medical"
+    | "sher-e-bangla-stadium"
+    | "zia-udyan"
+    | "sat-gambuj-mosque"
+    | "dhakeshwari-temple"
+    | "aparajeyo-bangla"
+    | "star-mosque"
+    | "kamalapur-station"
+    | "bcfcc"
+    | "jamuna-future-park"
+    | "hatirjheel-bridge"
+    | "kuril-flyover"
+    | "gulshan-central-mosque"
+    | "army-stadium"
+    | "tsc-raju"
+    | "doyel-chattar"
+    | "three-leaders-mausoleum"
+    | "hussaini-dalan"
+    | "sadarghat-terminal"
+    | "supreme-court"
+    | "national-stadium"
+    | "rayer-bazar-memorial"
+    | "air-force-museum"
+    | "sonargaon-hotel"
+    | "pm-office"
+    | "armenian-church"
+    | "bahadur-shah-park"
+    | "rose-garden-palace";
 };
-type ProceduralDistrictTile = { group: THREE.Group; centerX: number; centerZ: number; colliders: BuildingCollider[] };
+type ProceduralDistrictTile = {
+  group: THREE.Group;
+  centerX: number;
+  centerZ: number;
+  colliders: BuildingCollider[];
+  /** The tile's single building mesh, which alone stays drawn in the far ring. */
+  buildings: THREE.InstancedMesh | null;
+  /** 0 hidden, 1 far ring (buildings only, no shadows), 2 full detail. */
+  detail: 0 | 1 | 2;
+};
 type WaterRibbon = THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
 type MapStatus = "loading" | "live" | "fallback";
 type WeatherStatus = "loading" | "live" | "fallback";
@@ -147,6 +197,7 @@ type BirdFlightWindow = Window & {
     objects: number;
     proceduralTiles: number;
     visibleTiles: number;
+    farTiles: number;
     maxFrameMs: number;
     longFrames: number;
     mapBuildMs: number | null;
@@ -438,33 +489,131 @@ const WATER_LANDMARKS: WaterLandmark[] = [
   { label: "Shitalakshya River", shortLabel: "SHI", lat: 23.71674, lon: 90.51805, minimap: true },
 ];
 const DHAKA_LANDMARKS: DhakaLandmark[] = [
-  { label: "Holy Rosary Church", shortLabel: "HRC", lat: 23.759151, lon: 90.392216, altitude: 61, heading: Math.PI / 2, kind: "church" },
+  { label: "Holy Rosary Church", shortLabel: "HRC", lat: 23.7589, lon: 90.39231, altitude: 29, heading: Math.PI / 2, kind: "church" },
   { label: "Bashundhara City", shortLabel: "BSC", lat: 23.751142, lon: 90.3906411, altitude: 135, heading: Math.PI / 2, kind: "bashundhara-city" },
-  { label: "Hatirjheel Amphitheatre", shortLabel: "HJA", lat: 23.771125, lon: 90.4133385, altitude: 28, heading: Math.PI, kind: "amphitheatre" },
-  { label: "Police Plaza Concord", shortLabel: "PPC", lat: 23.772911, lon: 90.4161391, altitude: 86, heading: 0, kind: "police-plaza" },
-  { label: "BRAC Centre", shortLabel: "BRC", lat: 23.7799167, lon: 90.4101944, altitude: 64, heading: Math.PI / 2, kind: "brac" },
-  { label: "Four Points by Sheraton", shortLabel: "SHD", lat: 23.7943691, lon: 90.413838, altitude: 112, heading: 0, kind: "hotel" },
+  // OSM theatre way 1065574904. The red stage disk is at the east lake tip and
+  // the seat fans face it, so the audience looks east (bearing 95°).
+  { label: "Hatirjheel Amphitheatre", shortLabel: "HJA", lat: 23.771154, lon: 90.413435, altitude: 14, heading: 1.48, kind: "amphitheatre" },
+  { label: "Police Plaza Concord", shortLabel: "PPC", lat: 23.772911, lon: 90.4161391, altitude: 78, heading: 0, kind: "police-plaza" },
+  { label: "BRAC Centre", shortLabel: "BRC", lat: 23.7799167, lon: 90.4101944, altitude: 81, heading: Math.PI / 2, kind: "brac" },
+  { label: "Four Points by Sheraton", shortLabel: "FPS", lat: 23.7943691, lon: 90.413838, altitude: 112, heading: 0, kind: "hotel" },
   { label: "Jatiya Sangsad Bhaban", shortLabel: "JSB", lat: 23.7622884, lon: 90.3785482, altitude: 46, heading: Math.PI, kind: "parliament", minimap: true },
   { label: "Lalbagh Fort", shortLabel: "LBF", lat: 23.718843, lon: 90.3881528, altitude: 18, heading: Math.PI, kind: "lalbagh-fort", minimap: true },
   { label: "Ahsan Manzil", shortLabel: "AHM", lat: 23.7084768, lon: 90.4055988, altitude: 34, heading: 0, kind: "ahsan-manzil", minimap: true },
   { label: "Central Shaheed Minar", shortLabel: "CSM", lat: 23.7272114, lon: 90.3966368, altitude: 16, heading: Math.PI, kind: "shaheed-minar" },
   { label: "Curzon Hall", shortLabel: "CRZ", lat: 23.7273259, lon: 90.4019331, altitude: 28, heading: Math.PI, kind: "curzon-hall" },
   { label: "Baitul Mukarram", shortLabel: "BTM", lat: 23.7294725, lon: 90.412617, altitude: 72, heading: Math.PI, kind: "baitul-mukarram", minimap: true },
-  { label: "Bangladesh Bank Tower", shortLabel: "BBT", lat: 23.72596, lon: 90.42228, altitude: 108, heading: -Math.PI / 2, kind: "bangladesh-bank", minimap: true },
-  { label: "Hazrat Shahjalal Airport", shortLabel: "DAC", lat: 23.84343, lon: 90.39784, altitude: 48, heading: -0.56, kind: "airport", minimap: true },
+  // The 31-storey tower is OSM way 498175910 (46 × 26 m, long side E–W).
+  { label: "Bangladesh Bank Tower", shortLabel: "BBT", lat: 23.726443, lon: 90.423328, altitude: 118, heading: 0, kind: "bangladesh-bank", minimap: true },
+  // Runway 14/32 (OSM way 13858653) runs at bearing 144°, so local +Z points down
+  // it to the SE; the terminals stand 850–1300 m to its NE (local +X).
+  { label: "Hazrat Shahjalal Airport", shortLabel: "DAC", lat: 23.845004, lon: 90.396455, altitude: 50, heading: 0.628, kind: "airport", minimap: true },
   // Iconic Dhaka parks, gardens, zoo, museums & children's parks
-  { label: "Ramna Park", shortLabel: "RMP", lat: 23.7380, lon: 90.4025, altitude: 24, heading: 0.12, kind: "ramna-park", minimap: true },
-  { label: "Suhrawardy Udyan", shortLabel: "SUD", lat: 23.73346, lon: 90.39852, altitude: 54, heading: 0.08, kind: "suhrawardy-udyan" },
-  { label: "Rabindra Sarobar", shortLabel: "RBS", lat: 23.7458, lon: 90.3768, altitude: 18, heading: 0.3, kind: "rabindra-sarobar" },
-  { label: "Baldha Garden", shortLabel: "BLG", lat: 23.7177, lon: 90.4187, altitude: 18, heading: 0.05, kind: "baldha-garden" },
+  // Ramna Batamul, the Pohela Boishakh fig (OSM node 3014838436); its stage
+  // looks ESE (120°) over the festival lawn.
+  { label: "Ramna Park", shortLabel: "RMP", lat: 23.735685, lon: 90.401354, altitude: 20, heading: 1.047, kind: "ramna-park", minimap: true },
+  // Swadhinata Stambha (OSM 447734739) at the south end of the museum-roof plaza,
+  // which runs NNW (bearing 349°) between the arms of the lake.
+  { label: "Suhrawardy Udyan", shortLabel: "SUD", lat: 23.733461, lon: 90.398528, altitude: 54, heading: -2.95, kind: "suhrawardy-udyan" },
+  // Stage centre on the west shore of Dhanmondi Lake; the tiers face WNW (bearing 280°).
+  { label: "Rabindra Sarobar", shortLabel: "RBS", lat: 23.745262, lon: 90.377204, altitude: 18, heading: -1.745, kind: "rabindra-sarobar" },
+  { label: "Baldha Garden", shortLabel: "BLG", lat: 23.716829, lon: 90.419405, altitude: 20, heading: 2.88, kind: "baldha-garden" },
   { label: "National Botanical Garden", shortLabel: "NBG", lat: 23.8211, lon: 90.3478, altitude: 24, heading: 0.1, kind: "botanical-garden" },
-  { label: "Bangladesh National Zoo", shortLabel: "ZOO", lat: 23.8136, lon: 90.3469, altitude: 24, heading: 0.05, kind: "national-zoo", minimap: true },
-  { label: "Bangladesh National Museum", shortLabel: "BNM", lat: 23.7375, lon: 90.3945, altitude: 26, heading: 0, kind: "national-museum" },
-  { label: "Liberation War Museum", shortLabel: "LWM", lat: 23.77556, lon: 90.36943, altitude: 32, heading: 0.1, kind: "liberation-museum", minimap: true },
-  { label: "Bangladesh Military Museum", shortLabel: "BMM", lat: 23.7633, lon: 90.3872, altitude: 28, heading: 0, kind: "military-museum" },
-  { label: "National Science Museum", shortLabel: "NSM", lat: 23.7788, lon: 90.3716, altitude: 28, heading: 0.08, kind: "science-museum" },
-  { label: "Shishu Park", shortLabel: "SHP", lat: 23.7360, lon: 90.3987, altitude: 26, heading: 0, kind: "shishu-park" },
-  { label: "Shishu Mela", shortLabel: "SHM", lat: 23.7727, lon: 90.3685, altitude: 24, heading: 0, kind: "shishu-mela" },
+  // Between the two lakes, 116 m inside the main gate (OSM node 1813542591),
+  // which faces east (80°) onto Zoo Road.
+  { label: "Bangladesh National Zoo", shortLabel: "ZOO", lat: 23.8136, lon: 90.3469, altitude: 24, heading: 1.745, kind: "national-zoo", minimap: true },
+  // OSM relation 7392256: a 97 × 95 m ring round a court; the entrance faces
+  // Kazi Nazrul Islam Avenue to the east.
+  { label: "Bangladesh National Museum", shortLabel: "BNM", lat: 23.7375, lon: 90.3945, altitude: 26, heading: Math.PI / 2, kind: "national-museum" },
+  // OSM 478326295: the 63 × 19 m street-front bar, long axis 164°. Its entrance
+  // face is taken to look ENE (74°) onto the road; not confirmed by an aerial.
+  { label: "Liberation War Museum", shortLabel: "LWM", lat: 23.775565, lon: 90.36943, altitude: 26, heading: 1.85, kind: "liberation-museum", minimap: true },
+  { label: "Bangladesh Military Museum", shortLabel: "BMM", lat: 23.763864, lon: 90.385289, altitude: 28, heading: 2.97, kind: "military-museum" },
+  // The blue geodesic dome (OSM 737537259); the front faces Bijoy Sarani (355°).
+  { label: "Novo Theatre", shortLabel: "NOV", lat: 23.763729, lon: 90.387275, altitude: 31, heading: -3.054, kind: "novo-theatre" },
+  { label: "National Science Museum", shortLabel: "NSM", lat: 23.778928, lon: 90.3717, altitude: 24, heading: 0.26, kind: "science-museum" },
+  { label: "Shishu Park", shortLabel: "SHP", lat: 23.736772, lon: 90.397785, altitude: 10, heading: 0, kind: "shishu-park" },
+  // OSM way 32561560: the 86 × 62 m fairground (long axis 161°); the cartoon
+  // gate faces WSW (251°) onto Mirpur Road.
+  { label: "Shishu Mela", shortLabel: "SHM", lat: 23.773007, lon: 90.36788, altitude: 28, heading: -1.24, kind: "shishu-mela" },
+  // OSM way 1036301057: the long NW–SE hospital spine (bearing 138°); the domed
+  // entrance faces the NE forecourt (48°). The lat/lon is the dome.
+  // OSM stadium way 121390579: an oval bowl 196 × 249 m, long axis 152°.
+  { label: "Sher-e-Bangla National Cricket Stadium", shortLabel: "SBS", lat: 23.806854, lon: 90.363583, altitude: 50, heading: 0.489, kind: "sher-e-bangla-stadium", minimap: true },
+  // Ziaur Rahman's mausoleum (OSM node 265576693); the front faces south (175°)
+  // down the brick axis walk to the Crescent Lake bridge and the Parliament.
+  { label: "Zia Udyan", shortLabel: "ZIA", lat: 23.766604, lon: 90.378172, altitude: 17, heading: 0.087, kind: "zia-udyan" },
+  // OSM 1560283156 (Mughal, 15.7 × 22.6 m, long axis N–S); front faces east.
+  { label: "Sat Gambuj Mosque", shortLabel: "SGM", lat: 23.757711, lon: 90.35897, altitude: 24, heading: 1.588, kind: "sat-gambuj-mosque" },
+  // Compound OSM 435104024; the four Shiva temples face SSW (199°) across the
+  // courtyard east of the pond.
+  { label: "Dhakeshwari National Temple", shortLabel: "DKT", lat: 23.72305, lon: 90.39005, altitude: 14, heading: -0.332, kind: "dhakeshwari-temple" },
+  // OSM node 2992690009, just south of the Arts Faculty; the figures face south.
+  { label: "Aparajeyo Bangla", shortLabel: "APB", lat: 23.733799, lon: 90.392412, altitude: 12, heading: 0, kind: "aparajeyo-bangla" },
+  { label: "Dhaka Medical College Hospital", shortLabel: "DMC", lat: 23.72562, lon: 90.39803, altitude: 28, heading: 2.304, kind: "dhaka-medical" },
+  // OSM 245019710 (20 × 12 m, long axis N–S); the arcade faces east onto the
+  // courtyard and its star-shaped pool.
+  { label: "Star Mosque", shortLabel: "STM", lat: 23.715666, lon: 90.401559, altitude: 17, heading: Math.PI / 2, kind: "star-mosque" },
+  // Centre of the 84 × 82 m umbrella-shell roof; the front faces the forecourt
+  // to the west (268°) and the platforms run 440 m north.
+  { label: "Kamalapur Railway Station", shortLabel: "KMR", lat: 23.73193, lon: 90.42611, altitude: 18, heading: -1.536, kind: "kamalapur-station", minimap: true },
+  // OSM 24448507: the 150 × 128 m roof plate; the flagpole forecourt faces
+  // east toward Begum Rokeya Sarani (inferred, 85°).
+  { label: "Bangladesh-China Friendship Conference Centre", shortLabel: "BCF", lat: 23.769168, lon: 90.381376, altitude: 25, heading: 1.658, kind: "bcfcc" },
+  // OSM 586535435 (229 × 212 m, seven floors); the main façade faces west
+  // onto Pragati Sarani. Footprint mode.
+  { label: "Jamuna Future Park", shortLabel: "JFP", lat: 23.813286, lon: 90.42379, altitude: 42, heading: -1.344, kind: "jamuna-future-park" },
+  // OSM way 444229773, the 193 m deck of the white arch bridge across
+  // Hatirjheel; local +Z runs down its axis to the SE (138°).
+  { label: "Hatirjheel Bridge", shortLabel: "HJB", lat: 23.767836, lon: 90.412947, altitude: 23, heading: 0.733, kind: "hatirjheel-bridge" },
+  // The ramps are the ten OSM ways named "Kuril Flyover", built in world axes.
+  { label: "Kuril Flyover", shortLabel: "KFO", lat: 23.8231, lon: 90.4209, altitude: 16, heading: 0, kind: "kuril-flyover" },
+  // OSM 345170898 (Azad Masjid, Road 36); the fin facade faces east over the Eidgah lawn.
+  { label: "Gulshan Central Mosque", shortLabel: "GCM", lat: 23.790106, lon: 90.414579, altitude: 30, heading: 1.571, kind: "gulshan-central-mosque" },
+  // OSM 24821768 (145 × 218 m, long axis N–S); the grandstand faces west (279°) to Airport Road.
+  { label: "Bangladesh Army Stadium", shortLabel: "ARS", lat: 23.805601, lon: 90.404203, altitude: 40, heading: -1.728, kind: "army-stadium" },
+  // TSC main block OSM 655714604 and the Raju sculpture (node 9150960977) on
+  // the TSC Mor roundabout 60 m north. Footprint mode.
+  { label: "TSC & Raju Memorial", shortLabel: "TSC", lat: 23.73225, lon: 90.3959, altitude: 16, heading: -2.985, kind: "tsc-raju" },
+  // OSM 296816607, the magpie-robin pair in the roundabout basin; beaks to the NW.
+  { label: "Doyel Chattar", shortLabel: "DOY", lat: 23.727996, lon: 90.400293, altitude: 9, heading: -2.356, kind: "doyel-chattar" },
+  // OSM 296802766, the 60 × 33 m plinth (long axis 167°) under three hypar
+  // shells; the main stair faces WSW (257°) toward the Shahbag road.
+  { label: "Mausoleum of Three Leaders", shortLabel: "TNM", lat: 23.729107, lon: 90.399921, altitude: 14, heading: -1.344, kind: "three-leaders-mausoleum" },
+  // OSM 234106448 (32 × 22 m) on the north bank of its tank (OSM 234069504);
+  // the columned loggia and the two blue domes face south over the water.
+  { label: "Hussaini Dalan", shortLabel: "HSD", lat: 23.7223, lon: 90.39798, altitude: 19, heading: 0.017, kind: "hussaini-dalan" },
+  // OSM ferry terminal 332507445: the quay and pontoons follow the in-game
+  // Buriganga bank (bearing 121°), and the launches moor bow-in from the
+  // river (front faces 211°).
+  { label: "Sadarghat Launch Terminal", shortLabel: "SLT", lat: 23.7058, lon: 90.4092, altitude: 15, heading: -0.541, kind: "sadarghat-terminal" },
+  // OSM relation 15508050: a white courtyard block (long axis 171°) whose
+  // domed entrance tower faces east (81°) over the lotus fountain.
+  { label: "Supreme Court of Bangladesh", shortLabel: "SPC", lat: 23.731056, lon: 90.402907, altitude: 36, heading: 1.728, kind: "supreme-court" },
+  // OSM 24477071: a near-round 229 × 220 m bowl round a N–S pitch; the
+  // covered stand is on the ESE arc.
+  { label: "National Stadium", shortLabel: "NST", lat: 23.727981, lon: 90.413532, altitude: 24, heading: 0, kind: "national-stadium" },
+  // OSM 1074764129: the curved brick wall hugs the west edge of the D-shaped
+  // pool (OSM 320577211, drawn from map data); its concave face looks ENE (77°).
+  { label: "Rayer Bazar Martyred Intellectuals Memorial", shortLabel: "RBM", lat: 23.75082, lon: 90.35725, altitude: 18, heading: 1.798, kind: "rayer-bazar-memorial" },
+  // OSM way 462486324: a 688 × 170 m lawn strip of parked aircraft (long axis
+  // 165°); the gate faces WSW (255°) onto Begum Rokeya Sarani. The lat/lon is
+  // the site centroid, on the pond; the An-24 is 75 m NNW of it.
+  { label: "Bangladesh Air Force Museum", shortLabel: "AFM", lat: 23.778157, lon: 90.381077, altitude: 10, heading: -1.309, kind: "air-force-museum" },
+  // OSM way 32562242: the room slab runs ENE (70°) along the south side of a
+  // podium wedge; the porte-cochère faces NNW (340°, inferred).
+  { label: "Sonargaon Hotel", shortLabel: "PPS", lat: 23.749564, lon: 90.394453, altitude: 34, heading: -2.793, kind: "sonargaon-hotel" },
+  // OSM 571232877 (the old Sangsad Bhaban, Tejgaon); the portico faces west
+  // over the formal lawns (inferred).
+  { label: "Prime Minister's Office", shortLabel: "PMO", lat: 23.76835, lon: 90.39184, altitude: 12, heading: -1.571, kind: "pm-office" },
+  // OSM 243376194 (31 × 16 m, long axis 98°); the bell tower stands over the
+  // west door (278°), the apse at the east end.
+  { label: "Armenian Church", shortLabel: "ARM", lat: 23.712456, lon: 90.402228, altitude: 22, heading: -1.71, kind: "armenian-church" },
+  // OSM 948448576, the 1857 memorial in the north half of the oval park (way 34339923).
+  { label: "Bahadur Shah Park", shortLabel: "BSP", lat: 23.709417, lon: 90.412344, altitude: 18, heading: 0, kind: "bahadur-shah-park" },
+  // OSM 439770540 (26 × 15 m, long axis 174°) in its walled garden (way
+  // 439770049); the belvedere front faces west (264°) across the lawn to the pond.
+  { label: "Rose Garden Palace", shortLabel: "RGP", lat: 23.718358, lon: 90.4264, altitude: 22, heading: -1.466, kind: "rose-garden-palace" },
 ];
 
 // Launch sites offered on the title screen. Picking one moves the attract-mode
@@ -569,12 +718,20 @@ function worldToCoordinates(x: number, z: number) {
 // The procedural airport runway (3.2 km) and terminal apron extend far past the
 // small landmark anchor box, so OSM roads/buildings and procedural tiles all
 // test against its rotated footprint to keep the tarmac clear of z-fighting.
-const AIRPORT_WORLD = coordinatesToWorld(23.84343, 90.39784);
-const AIRPORT_COS = Math.cos(-0.56);
-const AIRPORT_SIN = Math.sin(-0.56);
+// The frame is the airport landmark's own detail group: origin at the table
+// lat/lon, turned by its heading (0.628, runway 14/32 at bearing 144°), local +Z
+// down the runway to the SE and local +X toward the terminals (NE).
+const AIRPORT_WORLD = coordinatesToWorld(23.845004, 90.396455);
+const AIRPORT_COS = Math.cos(0.628);
+const AIRPORT_SIN = Math.sin(0.628);
 const AIRPORT_CLEARANCE_RECTS = [
-  { minX: -120, maxX: 120, minZ: -1_640, maxZ: 1_640 },
-  { minX: -440, maxX: 120, minZ: -410, maxZ: 140 },
+  // The airfield: runway, both parallel taxiways, the west aprons, the main
+  // apron and the Terminal 1/2 hall.
+  { minX: -490, maxX: 1_000, minZ: -1_480, maxZ: 1_930 },
+  // Terminal 3 and its landside canopy.
+  { minX: 990, maxX: 1_330, minZ: 670, maxZ: 1_450 },
+  // The Terminal 1/2 forecourt and car parks, up to Airport Road.
+  { minX: 979, maxX: 1_300, minZ: -100, maxZ: 680 },
 ] as const;
 
 function toAirportLocal(x: number, z: number): [number, number] {
@@ -599,12 +756,17 @@ function inAirportClearance(x: number, z: number, pad = 0) {
 const DHAKA_PARKS = [
   { name: "Ramna Park", lat: 23.7378, lon: 90.4007, rx: 225, rz: 260, angle: 0.12, hasLoop: false },
   { name: "Suhrawardy Udyan", lat: 23.7332, lon: 90.3992, rx: 155, rz: 255, angle: 0.08, hasLoop: false },
-  { name: "Chandrima Udyan", lat: 23.7679, lon: 90.3788, rx: 215, rz: 150, angle: -0.05, hasLoop: true },
+  // OSM 24448418 (838 × 374 m, centroid 23.7658, 90.3797): woodland round the
+  // mausoleum and along both banks of Crescent Lake.
+  { name: "Zia Udyan", lat: 23.7661, lon: 90.3793, rx: 330, rz: 135, angle: 0.03, hasLoop: false },
   { name: "National Botanical Garden", lat: 23.8211, lon: 90.3478, rx: 460, rz: 350, angle: 0.1, hasLoop: false },
-  { name: "Bangladesh National Zoo", lat: 23.8136, lon: 90.3469, rx: 370, rz: 320, angle: 0.06, hasLoop: false },
+  // OSM 987024670: the zoo runs ≈1.3 km N–S between its North and South
+  // lakes, from the Beribadh road on the west to the main gate on the east.
+  { name: "Bangladesh National Zoo", lat: 23.812605, lon: 90.344937, rx: 285, rz: 690, angle: 0, hasLoop: false },
   { name: "Kurmitola Golf Club", lat: 23.8165, lon: 90.4050, rx: 260, rz: 340, angle: -0.18, hasLoop: true },
-  { name: "Sher-e-Bangla Nagar North Lawn", lat: 23.7641, lon: 90.3785, rx: 175, rz: 55, angle: 0, hasLoop: false },
-  { name: "Sher-e-Bangla Nagar South Lawn", lat: 23.7580, lon: 90.3786, rx: 145, rz: 85, angle: 0, hasLoop: false },
+  { name: "Sher-e-Bangla Nagar North Lawn", lat: 23.7642, lon: 90.3785, rx: 280, rz: 100, angle: 0, hasLoop: false },
+  // One sweep of open lawn from the flanks of the Sangsad South Plaza down to Manik Mia Avenue.
+  { name: "Sher-e-Bangla Nagar South Lawn", lat: 23.7590, lon: 90.3786, rx: 270, rz: 235, angle: 0, hasLoop: false },
   { name: "Dhaka University Mall Green", lat: 23.7322, lon: 90.3940, rx: 120, rz: 145, angle: 0.15, hasLoop: false },
   { name: "Curzon Hall Garden", lat: 23.7266, lon: 90.4034, rx: 105, rz: 85, angle: 0.05, hasLoop: false },
   // Continuous greenbelt hugging the winding crescent of Dhanmondi Lake
@@ -618,10 +780,36 @@ const DHAKA_PARKS = [
   { name: "Baridhara Park", lat: 23.8038, lon: 90.4212, rx: 62, rz: 82, angle: 0, hasLoop: false },
   { name: "Uttara Sector 3 & 7 Park", lat: 23.8685, lon: 90.3995, rx: 85, rz: 135, angle: 0.05, hasLoop: false },
   { name: "Osmani Udyan", lat: 23.7267, lon: 90.4071, rx: 105, rz: 78, angle: 0, hasLoop: false },
-  { name: "Baldha Garden", lat: 23.7177, lon: 90.4187, rx: 56, rz: 52, angle: 0.05, hasLoop: false },
-  { name: "Bahadur Shah Park", lat: 23.7096, lon: 90.4126, rx: 52, rz: 62, angle: 0.1, hasLoop: false },
-  { name: "Shishu Park Grounds", lat: 23.7360, lon: 90.3987, rx: 72, rz: 66, angle: 0, hasLoop: false },
-  { name: "Shishu Mela Grounds", lat: 23.7727, lon: 90.3685, rx: 68, rz: 62, angle: 0, hasLoop: false },
+  // OSM 34597180: a 229 m strip running NNE beside Narinda Road.
+  { name: "Baldha Garden", lat: 23.716829, lon: 90.419405, rx: 32, rz: 115, angle: 0.26, hasLoop: false },
+  // OSM 34339923: a 101 × 53 m oval of old trees inside its railing.
+  { name: "Bahadur Shah Park", lat: 23.709228, lon: 90.412342, rx: 27, rz: 50, angle: 0.03, hasLoop: false },
+  // OSM 31664637 (373 × 268 m), round the promenade being built there.
+  { name: "Shishu Park Grounds", lat: 23.736772, lon: 90.397785, rx: 180, rz: 125, angle: 0, hasLoop: false },
+  { name: "Shishu Mela Grounds", lat: 23.773007, lon: 90.36788, rx: 30, rz: 42, angle: -0.33, hasLoop: false },
+  // OSM 236956073's south lobe, round the Batamul lawn down to the Star Gate.
+  // Appended last: park trees are seeded by index.
+  // Reaches past the tip of the lake's south arm (OSM 31664577 / 941967046).
+  { name: "Ramna Park South", lat: 23.7350, lon: 90.4026, rx: 175, rz: 145, angle: 0, hasLoop: false },
+  // The old Military Museum grounds (OSM site 232998223) round the new hall.
+  { name: "Military Museum Grounds", lat: 23.763792, lon: 90.385691, rx: 100, rz: 92, angle: 0, hasLoop: false },
+  // The Air Force Museum lawn strip (OSM 462486324, long axis 165°).
+  { name: "Air Force Museum Lawns", lat: 23.778954, lon: 90.380967, rx: 80, rz: 335, angle: -0.26, hasLoop: false },
+  // The formal lawns west of the Prime Minister's Office (OSM 296186028, 296187712).
+  { name: "Prime Minister's Office Lawns", lat: 23.768169, lon: 90.390761, rx: 75, rz: 135, angle: 0, hasLoop: false },
+  // Ramna's east half, from the lake across to the Kakrail edge.
+  { name: "Ramna Park East", lat: 23.7372, lon: 90.4034, rx: 160, rz: 235, angle: 0.12, hasLoop: false },
+  // Sher-e-Bangla Nagar: the lawns between the moat and the MP hostels on
+  // the east and west shores (the Manik Mia lawns are the South Lawn row).
+  { name: "Sher-e-Bangla Nagar West Lawn", lat: 23.7618, lon: 90.3752, rx: 120, rz: 200, angle: 0, hasLoop: false },
+  { name: "Sher-e-Bangla Nagar East Lawn", lat: 23.7618, lon: 90.3822, rx: 130, rz: 200, angle: 0, hasLoop: false },
+  // Dhaka University, BUET and Dhaka Medical stand among old campus trees,
+  // not city blocks: OSM keeps the real halls, the rows add turf and canopy.
+  { name: "Dhaka University Arts Campus", lat: 23.7335, lon: 90.3925, rx: 230, rz: 170, angle: 0.1, hasLoop: false },
+  { name: "Dhaka University Science Campus", lat: 23.7288, lon: 90.3995, rx: 210, rz: 120, angle: -0.35, hasLoop: false },
+  { name: "Shaheed Minar & Medical Grounds", lat: 23.7279, lon: 90.3958, rx: 170, rz: 120, angle: 0, hasLoop: false },
+  { name: "BUET Campus", lat: 23.7262, lon: 90.3918, rx: 120, rz: 150, angle: 0, hasLoop: false },
+  { name: "Dhaka University Halls", lat: 23.7306, lon: 90.3950, rx: 200, rz: 115, angle: 0, hasLoop: false },
 ].map((park) => {
   const world = coordinatesToWorld(park.lat, park.lon);
   return {
@@ -634,6 +822,33 @@ const DHAKA_PARKS = [
     fwdSin: Math.sin(park.angle),
   };
 });
+
+// Campus grounds the generic city must stay out of entirely (world-axis
+// lat/lon boxes): Louis Kahn's Sher-e-Bangla Nagar is open lawn, lake and a
+// few low brick hostels from Manik Mia Avenue up to the Agargaon road.
+const DHAKA_OPEN_GROUNDS = [
+  { name: "Sher-e-Bangla Nagar", south: 23.7572, north: 23.7695, west: 90.3730, east: 90.3858 },
+].map((ground) => {
+  const southWest = coordinatesToWorld(ground.south, ground.west);
+  const northEast = coordinatesToWorld(ground.north, ground.east);
+  return { minX: southWest.x, maxX: northEast.x, minZ: northEast.y, maxZ: southWest.y };
+});
+
+function inDhakaOpenGround(x: number, z: number, pad = 0) {
+  return DHAKA_OPEN_GROUNDS.some((ground) => (
+    x > ground.minX - pad && x < ground.maxX + pad && z > ground.minZ - pad && z < ground.maxZ + pad
+  ));
+}
+
+// Clear ground procedural plots keep from a landmark's solid parts (default
+// 16 m): sites that stand in a compound or forecourt keep a wider one.
+const LANDMARK_PLOT_GAP: Partial<Record<DhakaLandmark["kind"], number>> = {
+  "baitul-mukarram": 40,
+  bcfcc: 40,
+  "gulshan-central-mosque": 30,
+  "national-museum": 30,
+  "sat-gambuj-mosque": 20,
+};
 
 function inDhakaPark(x: number, z: number, pad = 0) {
   for (const park of DHAKA_PARKS) {
@@ -695,6 +910,137 @@ function dhakaGreenWeight(x: number, z: number) {
     totalInfluence += influence;
   }
   return weightedSum / totalInfluence;
+}
+
+// Urban fabric of each Dhaka district: plot size, packing and storey range.
+// Old Dhaka and Kamrangirchar are tight low-rise masonry, Mirpur, Mohammadpur
+// and Badda are 5–9 storey walk-ups, Dhanmondi and Uttara are planned 6–10
+// storey blocks, and Motijheel, Karwan Bazar, Gulshan and Banani mix in towers.
+// Lot sizes are in metres along (lotW) and away from (lotD) the street; gap is
+// the space between neighbours and lane the alley between plot blocks.
+type UrbanStyle = {
+  lotW: number;
+  lotD: number;
+  gap: number;
+  lane: number;
+  minFloors: number;
+  maxFloors: number;
+  tower: number;
+  towerMin: number;
+  towerMax: number;
+  organic: number;
+  brick: number;
+};
+const DEFAULT_URBAN_STYLE: UrbanStyle = {
+  lotW: 14, lotD: 16, gap: 3, lane: 9, minFloors: 2, maxFloors: 5, tower: 0, towerMin: 10, towerMax: 14, organic: 0.08, brick: 0.2,
+};
+const URBAN_STYLE_KEYS = Object.keys(DEFAULT_URBAN_STYLE) as Array<keyof UrbanStyle>;
+const DHAKA_URBAN_ZONES = [
+  { lat: 23.7120, lon: 90.4050, radius: 1_600, style: { lotW: 9.5, lotD: 12.5, gap: 0.6, lane: 3.4, minFloors: 3, maxFloors: 7, tower: 0, towerMin: 8, towerMax: 10, organic: 0.1, brick: 0.42 } }, // Old Dhaka & Sadarghat
+  { lat: 23.7185, lon: 90.3880, radius: 1_100, style: { lotW: 10, lotD: 13, gap: 0.7, lane: 3.6, minFloors: 3, maxFloors: 6, tower: 0, towerMin: 8, towerMax: 10, organic: 0.1, brick: 0.4 } }, // Lalbagh & Chawkbazar
+  { lat: 23.7160, lon: 90.3655, radius: 1_000, style: { lotW: 8.5, lotD: 11, gap: 0.8, lane: 3.6, minFloors: 2, maxFloors: 5, tower: 0, towerMin: 6, towerMax: 8, organic: 0.12, brick: 0.46 } }, // Kamrangirchar
+  { lat: 23.7105, lon: 90.4350, radius: 1_100, style: { lotW: 11, lotD: 14, gap: 1, lane: 4, minFloors: 4, maxFloors: 8, tower: 0.01, towerMin: 10, towerMax: 13, organic: 0.06, brick: 0.34 } }, // Jatrabari
+  { lat: 23.7280, lon: 90.4190, radius: 1_000, style: { lotW: 19, lotD: 22, gap: 2.5, lane: 7, minFloors: 8, maxFloors: 16, tower: 0.32, towerMin: 16, towerMax: 30, organic: 0.02, brick: 0.12 } }, // Motijheel & Dilkusha
+  { lat: 23.7370, lon: 90.4130, radius: 900, style: { lotW: 14, lotD: 17, gap: 1.4, lane: 5, minFloors: 6, maxFloors: 12, tower: 0.08, towerMin: 13, towerMax: 20, organic: 0.03, brick: 0.2 } }, // Paltan, Kakrail & Shantinagar
+  { lat: 23.7510, lon: 90.3930, radius: 900, style: { lotW: 18, lotD: 21, gap: 2.5, lane: 7, minFloors: 7, maxFloors: 14, tower: 0.25, towerMin: 14, towerMax: 26, organic: 0.02, brick: 0.12 } }, // Karwan Bazar & Panthapath
+  { lat: 23.7590, lon: 90.3920, radius: 900, style: { lotW: 14, lotD: 17, gap: 1.4, lane: 5, minFloors: 6, maxFloors: 11, tower: 0.08, towerMin: 12, towerMax: 18, organic: 0.03, brick: 0.2 } }, // Farmgate & Tejgaon
+  { lat: 23.7500, lon: 90.4150, radius: 1_300, style: { lotW: 12.5, lotD: 15, gap: 1.2, lane: 4.5, minFloors: 5, maxFloors: 10, tower: 0.04, towerMin: 11, towerMax: 15, organic: 0.05, brick: 0.26 } }, // Moghbazar, Malibagh & Khilgaon
+  { lat: 23.7480, lon: 90.3720, radius: 1_300, style: { lotW: 15, lotD: 18, gap: 1.6, lane: 5, minFloors: 6, maxFloors: 10, tower: 0.04, towerMin: 11, towerMax: 15, organic: 0.02, brick: 0.12 } }, // Dhanmondi & Lalmatia
+  { lat: 23.7630, lon: 90.3600, radius: 1_300, style: { lotW: 12, lotD: 15, gap: 1.2, lane: 4.5, minFloors: 5, maxFloors: 9, tower: 0.02, towerMin: 10, towerMax: 13, organic: 0.05, brick: 0.28 } }, // Mohammadpur & Shyamoli
+  { lat: 23.8040, lon: 90.3650, radius: 2_300, style: { lotW: 12, lotD: 15, gap: 1, lane: 3.8, minFloors: 5, maxFloors: 9, tower: 0.03, towerMin: 10, towerMax: 14, organic: 0.05, brick: 0.24 } }, // Mirpur & Pallabi
+  { lat: 23.7930, lon: 90.4150, radius: 1_400, style: { lotW: 19, lotD: 22, gap: 3, lane: 8, minFloors: 7, maxFloors: 14, tower: 0.3, towerMin: 14, towerMax: 26, organic: 0.02, brick: 0.1 } }, // Gulshan & Baridhara
+  { lat: 23.7900, lon: 90.4020, radius: 1_000, style: { lotW: 17, lotD: 20, gap: 2.6, lane: 7, minFloors: 6, maxFloors: 13, tower: 0.2, towerMin: 13, towerMax: 24, organic: 0.02, brick: 0.12 } }, // Banani & Mohakhali
+  { lat: 23.7700, lon: 90.4300, radius: 1_700, style: { lotW: 11.5, lotD: 14.5, gap: 1.1, lane: 4.2, minFloors: 4, maxFloors: 8, tower: 0.01, towerMin: 9, towerMax: 12, organic: 0.06, brick: 0.3 } }, // Badda, Rampura & Banasree
+  { lat: 23.8700, lon: 90.3990, radius: 2_000, style: { lotW: 15, lotD: 18, gap: 2.2, lane: 6.5, minFloors: 6, maxFloors: 10, tower: 0.05, towerMin: 11, towerMax: 16, organic: 0.02, brick: 0.16 } }, // Uttara
+  { lat: 23.8190, lon: 90.4340, radius: 1_300, style: { lotW: 17, lotD: 20, gap: 2.6, lane: 7, minFloors: 6, maxFloors: 12, tower: 0.08, towerMin: 13, towerMax: 20, organic: 0.02, brick: 0.12 } }, // Bashundhara
+  { lat: 23.7222, lon: 90.3958, radius: 700, style: { lotW: 10, lotD: 13, gap: 0.8, lane: 3.8, minFloors: 3, maxFloors: 7, tower: 0, towerMin: 8, towerMax: 10, organic: 0.09, brick: 0.36 } }, // Bakshibazar & Chankharpul
+  { lat: 23.7300, lon: 90.3855, radius: 650, style: { lotW: 11, lotD: 14, gap: 1, lane: 4, minFloors: 4, maxFloors: 8, tower: 0.01, towerMin: 9, towerMax: 12, organic: 0.07, brick: 0.3 } }, // Azimpur & Nilkhet
+  { lat: 23.7395, lon: 90.3900, radius: 650, style: { lotW: 13, lotD: 16, gap: 1.3, lane: 4.6, minFloors: 5, maxFloors: 10, tower: 0.05, towerMin: 11, towerMax: 16, organic: 0.04, brick: 0.22 } }, // Shahbag, Elephant Road & Katabon
+  { lat: 23.7770, lon: 90.3740, radius: 800, style: { lotW: 30, lotD: 24, gap: 9, lane: 14, minFloors: 6, maxFloors: 12, tower: 0.15, towerMin: 13, towerMax: 20, organic: 0.02, brick: 0.08 } }, // Agargaon government offices
+].map((zone) => {
+  const world = coordinatesToWorld(zone.lat, zone.lon);
+  return { x: world.x, z: world.y, radius: zone.radius, style: zone.style as UrbanStyle };
+});
+
+/** Blended district style at a point, plus how strongly any district claims it (0–1). */
+function dhakaUrbanFabric(x: number, z: number) {
+  const baseInfluence = 0.3;
+  const sums = {} as Record<keyof UrbanStyle, number>;
+  for (const key of URBAN_STYLE_KEYS) sums[key] = DEFAULT_URBAN_STYLE[key] * baseInfluence;
+  let totalInfluence = baseInfluence;
+  let strongest = 0;
+  for (const zone of DHAKA_URBAN_ZONES) {
+    const dist = Math.hypot(x - zone.x, z - zone.z);
+    if (dist >= zone.radius) continue;
+    const t = 1 - dist / zone.radius;
+    const influence = t * t * (3 - 2 * t);
+    for (const key of URBAN_STYLE_KEYS) sums[key] += zone.style[key] * influence;
+    totalInfluence += influence;
+    strongest = Math.max(strongest, influence);
+  }
+  for (const key of URBAN_STYLE_KEYS) sums[key] /= totalInfluence;
+  return { style: sums as UrbanStyle, zoneInfluence: strongest };
+}
+
+// Dhaka masonry palette for procedural buildings: sun-bleached plaster and
+// concrete, the odd pastel repaint, bare terracotta brick, monsoon-weathered
+// grey, and blue-grey glass or white cladding on towers.
+const PLASTER_SHADES = [0xd6cec0, 0xc5bdb2, 0xd1b48f, 0xddd3c3, 0xcbc2b4];
+const PASTEL_SHADES = [0xd8b9a0, 0xc6cdb9, 0xbcc6c9, 0xdcc58e, 0xd2aeae];
+const BRICK_SHADES = [0xb97159, 0xa9654f];
+const WEATHERED_SHADES = [0x9d978c, 0x8c877e];
+const TOWER_SHADES = [0x969fa8, 0x8e9fac, 0xb4bcc2, 0xd6d6d0];
+
+function pickBuildingShade(target: THREE.Color, style: UrbanStyle, tower: boolean, height: number, random: () => number) {
+  const pick = (shades: number[]) => shades[Math.floor(random() * shades.length)];
+  const roll = random();
+  let hex: number;
+  if (tower || (height > 40 && roll < 0.45)) hex = pick(TOWER_SHADES);
+  else if (roll < style.brick) hex = pick(BRICK_SHADES);
+  else if (roll < style.brick + 0.11) hex = pick(PASTEL_SHADES);
+  else if (roll < style.brick + 0.11 + 0.06 + style.brick * 0.2) hex = pick(WEATHERED_SHADES);
+  else hex = pick(PLASTER_SHADES);
+  return target.setHex(hex).offsetHSL(0, (random() - 0.5) * 0.04, (random() - 0.5) * 0.05);
+}
+
+const FOOTPRINT_CELL = 24;
+const FOOTPRINT_COLUMNS = Math.ceil(460 / FOOTPRINT_CELL) + 1;
+
+/**
+ * Separating-axis test for two yawed rectangles on the ground plane. Each is a
+ * centre, the cos/sin of its yaw (local X runs along (cos, -sin) in world x/z,
+ * as THREE's Y rotation maps it) and half extents; `gap` is the clear space
+ * required between them.
+ */
+function orientedRectsOverlap(
+  ax: number, az: number, aCos: number, aSin: number, aHalfWidth: number, aHalfDepth: number,
+  bx: number, bz: number, bCos: number, bSin: number, bHalfWidth: number, bHalfDepth: number,
+  gap: number,
+) {
+  const dx = bx - ax;
+  const dz = bz - az;
+  const parallel = Math.abs(aCos * bCos + aSin * bSin);
+  const cross = Math.abs(aCos * bSin - aSin * bCos);
+  if (Math.abs(dx * aCos - dz * aSin) >= aHalfWidth + bHalfWidth * parallel + bHalfDepth * cross + gap) return false;
+  if (Math.abs(dx * aSin + dz * aCos) >= aHalfDepth + bHalfWidth * cross + bHalfDepth * parallel + gap) return false;
+  if (Math.abs(dx * bCos - dz * bSin) >= bHalfWidth + aHalfWidth * parallel + aHalfDepth * cross + gap) return false;
+  if (Math.abs(dx * bSin + dz * bCos) >= bHalfDepth + aHalfWidth * cross + aHalfDepth * parallel + gap) return false;
+  return true;
+}
+
+/**
+ * Drawn width of a non-area OSM waterway (0 = not drawn). The bundled map
+ * carries no waterway tags, so total length stands in for them: Old Dhaka's
+ * web of short, mostly covered drains is skipped, streams and khals draw
+ * narrow, and only long lines (canals, river centrelines) keep 8 m.
+ */
+function waterLineWidth(points: MapPoint[]) {
+  let length = 0;
+  for (let index = 1; index < points.length; index++) {
+    length += Math.hypot(points[index][0] - points[index - 1][0], points[index][1] - points[index - 1][1]);
+  }
+  if (length < 400) return 0;
+  return length < 1_500 ? 3 : 8;
 }
 
 function polygonArea2D(points: MapPoint[]) {
@@ -2227,9 +2573,41 @@ function addImmediateCityMass(scene: THREE.Scene, roads: OsmMapData["roads"]) {
     const world = coordinatesToWorld(landmark.lat, landmark.lon);
     return { x: world.x, z: world.y, intensity: clamp(landmark.altitude / 88, 0.42, 1.08) };
   });
+  // Sites much bigger than the default 105 m (the stadium bowl and masts, the
+  // hospital spine, the mausoleum's walk down to the bridge) clear further.
+  const clearingRadius: Partial<Record<DhakaLandmark["kind"], number>> = {
+    airport: 1_350,
+    "sher-e-bangla-stadium": 165,
+    "dhaka-medical": 130,
+    "zia-udyan": 140,
+    "star-mosque": 40,
+    "military-museum": 120,
+    bcfcc: 125,
+    "jamuna-future-park": 185,
+    "kuril-flyover": 320,
+    "army-stadium": 140,
+    "gulshan-central-mosque": 95,
+    "doyel-chattar": 28,
+    "tsc-raju": 70,
+    "hatirjheel-bridge": 60,
+    "three-leaders-mausoleum": 70,
+    "hussaini-dalan": 75,
+    "sadarghat-terminal": 40,
+    "supreme-court": 120,
+    "national-stadium": 125,
+    "rayer-bazar-memorial": 115,
+    "shishu-park": 150,
+    "shishu-mela": 60,
+    "air-force-museum": 100,
+    "sonargaon-hotel": 90,
+    "pm-office": 100,
+    "armenian-church": 35,
+    "bahadur-shah-park": 60,
+    "rose-garden-palace": 75,
+  };
   const landmarkClearings = DHAKA_LANDMARKS.map((landmark) => {
     const world = coordinatesToWorld(landmark.lat, landmark.lon);
-    return { x: world.x, z: world.y, radius: landmark.kind === "airport" ? 1_350 : 105 };
+    return { x: world.x, z: world.y, radius: clearingRadius[landmark.kind] ?? 105 };
   });
   const roadCellSize = 180;
   const roadGrid = new Map<string, Array<{ x1: number; z1: number; x2: number; z2: number; radius: number }>>();
@@ -2272,6 +2650,7 @@ function addImmediateCityMass(scene: THREE.Scene, roads: OsmMapData["roads"]) {
       if (Math.abs(buildingX) < 1_090 && Math.abs(buildingZ) < 1_010) continue;
       if (inAirportClearance(buildingX, buildingZ, 40)) continue;
       if (inDhakaPark(buildingX, buildingZ, 18)) continue;
+      if (inDhakaOpenGround(buildingX, buildingZ, 30)) continue;
       if (landmarkClearings.some((landmark) => Math.hypot(buildingX - landmark.x, buildingZ - landmark.z) < landmark.radius)) continue;
       const width = 20 + random() * 28;
       const depth = 18 + random() * 28;
@@ -2395,6 +2774,27 @@ function addImmediateCityMass(scene: THREE.Scene, roads: OsmMapData["roads"]) {
   return group;
 }
 
+// District tiles within the visibility radius draw everything; a ring beyond
+// it keeps only the tile's one building mesh (no trees, no shadow casting), so
+// the city carries on toward the haze instead of ending in bare ground.
+const PROCEDURAL_FAR_RING_FACTOR = 1.45;
+
+function proceduralTileDetailAt(tile: ProceduralDistrictTile, x: number, z: number, visibilityRadius: number): 0 | 1 | 2 {
+  const distanceSquared = (tile.centerX - x) ** 2 + (tile.centerZ - z) ** 2;
+  if (distanceSquared < visibilityRadius ** 2) return 2;
+  if (tile.buildings && distanceSquared < (visibilityRadius * PROCEDURAL_FAR_RING_FACTOR) ** 2) return 1;
+  return 0;
+}
+
+function setProceduralTileDetail(scene: THREE.Scene, tile: ProceduralDistrictTile, detail: 0 | 1 | 2) {
+  tile.detail = detail;
+  tile.group.visible = detail > 0;
+  if (detail > 0) scene.add(tile.group);
+  else scene.remove(tile.group);
+  for (const child of tile.group.children) child.visible = detail === 2 || child === tile.buildings;
+  if (tile.buildings) tile.buildings.castShadow = detail === 2;
+}
+
 async function addProceduralDistrictTiles(
   scene: THREE.Scene,
   data: OsmMapData,
@@ -2406,17 +2806,23 @@ async function addProceduralDistrictTiles(
   const visibilityRadius = 2_250;
   const tiles: ProceduralDistrictTile[] = [];
   const colliders: BuildingCollider[] = [];
+  // Every building and stair head stands on something, so the unit box drops
+  // its never-seen underside: 10 triangles per instance instead of 12.
   const unitBox = new THREE.BoxGeometry(1, 1, 1);
-  const roofBox = new THREE.BoxGeometry(1, 1, 1);
+  const boxIndex = Array.from(unitBox.getIndex()?.array ?? []);
+  unitBox.setIndex([...boxIndex.slice(0, 18), ...boxIndex.slice(24)]);
+  unitBox.clearGroups();
   const foliageGeometry = new THREE.IcosahedronGeometry(1, 1);
   const trunkGeometry = new THREE.CylinderGeometry(0.5, 0.72, 1, 6);
-  // Authentic Dhaka urban masonry & concrete palette: sun-bleached stucco,
-  // weathered grey-beige concrete, terracotta brick, warm ochre, and modern
-  // slate-grey commercial towers.
-  const materials = [0xd6cec0, 0xc5bdb2, 0xb97159, 0xd1b48f, 0x969fa8].map(
-    (color) => applyNightWindows(new THREE.MeshStandardMaterial({ color, roughness: 0.9, metalness: 0.01 }), 0.5),
-  );
-  const roofMaterial = new THREE.MeshStandardMaterial({ color: 0x7c7770, roughness: 0.94 });
+  // One white, night-windowed material for every procedural building; the
+  // colour comes per instance from the Dhaka masonry palette below.
+  const buildingMaterial = applyNightWindows(new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.9, metalness: 0.01 }), 0.5);
+  const landmarkColliders = (scene.userData.landmarkColliders as BuildingCollider[] | undefined) ?? [];
+  const areaPerches = AREA_LANDMARKS.map((landmark) => {
+    const world = coordinatesToWorld(landmark.lat, landmark.lon);
+    return { x: world.x, z: world.y, altitude: landmark.altitude };
+  });
+  const shadeColor = new THREE.Color();
   const trunkMaterial = new THREE.MeshStandardMaterial({ color: 0x5d4739, roughness: 1 });
   const foliageMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.86 });
   // Tropical Dhaka canopy palette: mango/banyan shade, mahogany, kadam, koroi,
@@ -2446,7 +2852,10 @@ async function addProceduralDistrictTiles(
   const colliderGrid = new Map<string, BuildingCollider[]>();
   const tileRoadSegments = new Map<string, TileRoadSegment[]>();
   const tileShoreSegments = new Map<string, TileShoreSegment[]>();
-  const yieldIfNeeded = createMainThreadYielder();
+  // Longer slices than the default: each yield is a nested setTimeout that the
+  // browser clamps to ~4 ms, and this pass yields a few thousand times. Ten
+  // milliseconds of work still leaves room for a 60 fps frame in between.
+  const yieldIfNeeded = createMainThreadYielder(10);
   const roads = data.roads.length > 0 ? data.roads : proceduralFallbackRoads();
   const spatialKey = (cellX: number, cellZ: number) => `${cellX}:${cellZ}`;
   const addToGrid = <T,>(grid: Map<string, T[]>, item: T, minX: number, maxX: number, minZ: number, maxZ: number) => {
@@ -2506,11 +2915,14 @@ async function addProceduralDistrictTiles(
       addToGrid(waterAreaGrid, feature.points, Math.min(...xs), Math.max(...xs), Math.min(...zs), Math.max(...zs));
       isMajorWaterBody = polygonArea2D(feature.points) >= 3_500;
     }
-    const edgeCount = feature.area && feature.points.length >= 3 ? feature.points.length : feature.points.length - 1;
+    const isArea = feature.area && feature.points.length >= 3;
+    // Undrawn drains do not hold buildings apart; narrow khals hold less.
+    const lineWidth = isArea ? 8 : waterLineWidth(feature.points);
+    const edgeCount = lineWidth === 0 ? 0 : isArea ? feature.points.length : feature.points.length - 1;
     for (let index = 0; index < edgeCount; index++) {
       const [x1, z1] = feature.points[index];
       const [x2, z2] = feature.points[(index + 1) % feature.points.length];
-      const segment = { x1, z1, x2, z2, radius: 10 };
+      const segment = { x1, z1, x2, z2, radius: lineWidth === 3 ? 6 : 10 };
       addToGrid(waterGrid, segment, Math.min(x1, x2) - 46, Math.max(x1, x2) + 46, Math.min(z1, z2) - 46, Math.max(z1, z2) + 46);
       if (isMajorWaterBody) {
         const length = Math.hypot(x2 - x1, z2 - z1);
@@ -2628,81 +3040,242 @@ async function addProceduralDistrictTiles(
       const centerX = tileX * tileSize;
       const centerZ = tileZ * tileSize;
       if (Math.abs(centerX) > FLIGHT_EXTENT.x + tileSize / 2 || Math.abs(centerZ) > FLIGHT_EXTENT.z + tileSize / 2) continue;
-      const transforms: THREE.Matrix4[][] = [[], [], [], [], []];
-      const roofTransforms: THREE.Matrix4[] = [];
       const trunkTransforms: THREE.Matrix4[] = [];
       const foliageTransforms: THREE.Matrix4[] = [];
       const foliageColors: THREE.Color[] = [];
       const tileColliders: BuildingCollider[] = [];
       const rooftopGardenCandidates: Array<{ x: number; z: number; width: number; depth: number; topY: number; heading: number; stairX: number; stairZ: number }> = [];
-      let tileIntensity = 0.24;
-      for (const district of districtCenters) {
-        const proximity = clamp(1 - Math.hypot(centerX - district.x, centerZ - district.z) / 1_350, 0, 1);
-        tileIntensity = Math.max(tileIntensity, proximity * district.intensity);
-      }
+      // Buildings and their stair heads share one instanced mesh per tile, written
+      // straight into flat arrays; per-instance colour replaces the five
+      // single-colour meshes (and draw calls) a tile used to need.
+      const buildingMatrices: number[] = [];
+      const buildingColors: number[] = [];
+      const roofMatrices: number[] = [];
+      const roofColors: number[] = [];
+      const vacantLots: number[] = [];
       const greenWeight = dhakaGreenWeight(centerX, centerZ);
-      // Dense Dhaka urban fabric: tight concrete and brick lots packed shoulder
-      // to shoulder, still rendered in just five instanced meshes per tile.
-      const targetBuildings = 135 + Math.floor(tileIntensity * 105 + random() * 30);
+      const tileMinX = centerX - tileSize / 2;
+      const tileMinZ = centerZ - tileSize / 2;
+      const tileNearPark = DHAKA_PARKS.some((park) => (
+        Math.abs(centerX - park.x) < tileSize / 2 + Math.max(park.rx, park.rz) + 40
+        && Math.abs(centerZ - park.z) < tileSize / 2 + Math.max(park.rx, park.rz) + 40
+      ));
+      const tileLandmarks = landmarkColliders.filter((collider) => (
+        Math.abs(collider.x - centerX) < tileSize / 2 + collider.halfWidth + 90
+        && Math.abs(collider.z - centerZ) < tileSize / 2 + collider.halfDepth + 90
+      ));
+      const tileAreaPerches = areaPerches.filter((perch) => (
+        Math.abs(perch.x - centerX) < tileSize / 2 + 70 && Math.abs(perch.z - centerZ) < tileSize / 2 + 70
+      ));
 
-      for (let index = 0; index < targetBuildings; index++) {
-        const x = centerX + (random() - 0.5) * (tileSize - 32);
-        const z = centerZ + (random() - 0.5) * (tileSize - 32);
-        const width = 10 + random() * 18;
-        const depth = 10 + random() * 19;
+      // Oriented footprints (x, z, cos, sin, halfWidth, halfDepth) bucketed on a
+      // small grid so overlap and tree-clearance tests stay O(1) per lot.
+      const footprints: number[] = [];
+      const footprintGrid = new Map<number, number[]>();
+      const footprintCells = (minX: number, maxX: number, minZ: number, maxZ: number, visit: (bucket: number[] | undefined, key: number) => boolean | void) => {
+        const startX = Math.max(0, Math.floor((minX - tileMinX) / FOOTPRINT_CELL));
+        const endX = Math.min(FOOTPRINT_COLUMNS - 1, Math.floor((maxX - tileMinX) / FOOTPRINT_CELL));
+        const startZ = Math.max(0, Math.floor((minZ - tileMinZ) / FOOTPRINT_CELL));
+        const endZ = Math.min(FOOTPRINT_COLUMNS - 1, Math.floor((maxZ - tileMinZ) / FOOTPRINT_CELL));
+        for (let cellX = startX; cellX <= endX; cellX++) {
+          for (let cellZ = startZ; cellZ <= endZ; cellZ++) {
+            const key = cellX * FOOTPRINT_COLUMNS + cellZ;
+            if (visit(footprintGrid.get(key), key)) return true;
+          }
+        }
+        return false;
+      };
+      const footprintOverlaps = (x: number, z: number, cos: number, sin: number, halfWidth: number, halfDepth: number, reachX: number, reachZ: number, gap: number) => (
+        footprintCells(x - reachX - gap, x + reachX + gap, z - reachZ - gap, z + reachZ + gap, (bucket) => {
+          if (!bucket) return false;
+          for (const index of bucket) {
+            if (orientedRectsOverlap(
+              x, z, cos, sin, halfWidth, halfDepth,
+              footprints[index], footprints[index + 1], footprints[index + 2], footprints[index + 3], footprints[index + 4], footprints[index + 5],
+              gap,
+            )) return true;
+          }
+          return false;
+        })
+      );
+      const nearFootprint = (x: number, z: number, margin: number) => (
+        footprintCells(x - margin - 18, x + margin + 18, z - margin - 18, z + margin + 18, (bucket) => {
+          if (!bucket) return false;
+          for (const index of bucket) {
+            const dx = x - footprints[index];
+            const dz = z - footprints[index + 1];
+            const cos = footprints[index + 2];
+            const sin = footprints[index + 3];
+            const halfWidth = footprints[index + 4];
+            const halfDepth = footprints[index + 5];
+            if (
+              Math.abs(dx * cos - dz * sin) < halfWidth + margin
+              && Math.abs(dx * sin + dz * cos) < halfDepth + margin
+            ) return true;
+            // Nor inside the building's (axis-aligned) collider, where a perch
+            // beside a turned building could not be reached.
+            if (
+              Math.abs(dx) < Math.abs(cos) * halfWidth + Math.abs(sin) * halfDepth
+              && Math.abs(dz) < Math.abs(sin) * halfWidth + Math.abs(cos) * halfDepth
+            ) return true;
+          }
+          return false;
+        })
+      );
+
+      // One plot: clearance tests in rising cost order, then the box, its
+      // collider (the axis-aligned bounds of the turned footprint, so a bird
+      // can never clip a corner) and an optional stair head.
+      const placeBuilding = (x: number, z: number, yaw: number, width: number, depth: number, height: number, gap: number, color: THREE.Color, roofChance: number) => {
+        const cos = Math.cos(yaw);
+        const sin = Math.sin(yaw);
         const halfWidth = width / 2;
         const halfDepth = depth / 2;
-        if (Math.abs(x) > FLIGHT_EXTENT.x - halfWidth || Math.abs(z) > FLIGHT_EXTENT.z - halfDepth) continue;
-        if (inDhakaPark(x, z, Math.max(halfWidth, halfDepth) + 6)) continue;
-        if (blockedByMap(x, z, halfWidth, halfDepth)) continue;
-        if (tileColliders.some((collider) => (
-          Math.abs(x - collider.x) < halfWidth + collider.halfWidth + 1.8 &&
-          Math.abs(z - collider.z) < halfDepth + collider.halfDepth + 1.8
-        ))) continue;
-        let districtInfluence = 0.2;
-        for (const district of districtCenters) {
-          const proximity = clamp(1 - Math.hypot(x - district.x, z - district.z) / 1_150, 0, 1);
-          districtInfluence = Math.max(districtInfluence, proximity * district.intensity);
+        const reachX = Math.abs(cos) * halfWidth + Math.abs(sin) * halfDepth;
+        const reachZ = Math.abs(sin) * halfWidth + Math.abs(cos) * halfDepth;
+        if (Math.abs(x - centerX) + reachX > tileSize / 2 - 0.8 || Math.abs(z - centerZ) + reachZ > tileSize / 2 - 0.8) return false;
+        if (Math.abs(x) > FLIGHT_EXTENT.x - reachX || Math.abs(z) > FLIGHT_EXTENT.z - reachZ) return false;
+        if (footprintOverlaps(x, z, cos, sin, halfWidth, halfDepth, reachX, reachZ, gap)) return false;
+        if (tileNearPark && inDhakaPark(x, z, Math.max(halfWidth, halfDepth) + 6)) return false;
+        if (inDhakaOpenGround(x, z, Math.max(halfWidth, halfDepth))) return false;
+        if (blockedByMap(x, z, halfWidth, halfDepth)) return false;
+        let top = height;
+        // Landmarks keep a small forecourt and are never towered over by the
+        // plots right next to them.
+        for (const landmark of tileLandmarks) {
+          const gapX = Math.max(0, Math.abs(x - landmark.x) - landmark.halfWidth - reachX);
+          const gapZ = Math.max(0, Math.abs(z - landmark.z) - landmark.halfDepth - reachZ);
+          const distance = Math.hypot(gapX, gapZ);
+          // Open landmark ground (plazas, lawns, bowls) only keeps plots off;
+          // it has no height, so it never caps its neighbours.
+          if (landmark.top <= 0) {
+            if (distance < 10) return false;
+            continue;
+          }
+          if (distance < (landmark.gap ?? 10)) return false;
+          if (distance < 80) top = Math.min(top, Math.max(12, landmark.top * 0.6 + distance * 0.3));
         }
-        const floors = 2 + Math.floor(random() * 5 + districtInfluence * 9);
-        const height = floors * (2.95 + random() * 0.38);
-        const shadeRoll = random();
-        const bucket = height > 34
-          ? (shadeRoll < 0.36 ? 4 : shadeRoll < 0.72 ? 0 : 1)
-          : shadeRoll < 0.30
-            ? 0
-            : shadeRoll < 0.56
-              ? 1
-              : shadeRoll < 0.78
-                ? 2
-                : 3;
-        const streetHeading = roadHeadingAt(x, z);
-        const yaw = streetHeading + (random() - 0.5) * 0.055;
-        quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
-        position.set(x, height / 2 + 0.92, z);
-        scale.set(width, height, depth);
-        transforms[bucket].push(matrix.compose(position, quaternion, scale).clone());
-        const collider = { x, z, halfWidth, halfDepth, top: height + 0.92 };
+        for (const perch of tileAreaPerches) {
+          const gapX = Math.max(0, Math.abs(x - perch.x) - reachX);
+          const gapZ = Math.max(0, Math.abs(z - perch.z) - reachZ);
+          if (gapX * gapX + gapZ * gapZ < 50 * 50) top = Math.min(top, perch.altitude - 8);
+        }
+        if (top < 6) return false;
+        buildingMatrices.push(
+          cos * width, 0, -sin * width, 0,
+          0, top, 0, 0,
+          sin * depth, 0, cos * depth, 0,
+          x, top / 2 + 0.92, z, 1,
+        );
+        buildingColors.push(color.r, color.g, color.b);
+        const footprintIndex = footprints.length;
+        footprints.push(x, z, cos, sin, halfWidth, halfDepth);
+        footprintCells(x - reachX, x + reachX, z - reachZ, z + reachZ, (bucket, key) => {
+          if (bucket) bucket.push(footprintIndex);
+          else footprintGrid.set(key, [footprintIndex]);
+        });
+        const collider = { x, z, halfWidth: reachX, halfDepth: reachZ, top: top + 0.92 };
         tileColliders.push(collider);
         colliders.push(collider);
         let stairX = 0;
         let stairZ = 0;
-        if (height > 14 && random() > 0.32) {
+        if (top > 14 && random() < roofChance) {
           const roofHeight = 2.4 + random() * 3.0;
           stairX = (random() - 0.5) * width * 0.24;
           stairZ = (random() - 0.5) * depth * 0.24;
-          const cosY = Math.cos(-yaw);
-          const sinY = Math.sin(-yaw);
-          position.set(
-            x + stairX * cosY - stairZ * sinY,
-            height + roofHeight / 2 + 0.92,
-            z + stairX * sinY + stairZ * cosY,
+          const roofWidth = width * (0.2 + random() * 0.18);
+          const roofDepth = depth * (0.2 + random() * 0.18);
+          roofMatrices.push(
+            cos * roofWidth, 0, -sin * roofWidth, 0,
+            0, roofHeight, 0, 0,
+            sin * roofDepth, 0, cos * roofDepth, 0,
+            x + stairX * cos + stairZ * sin, top + roofHeight / 2 + 0.92, z - stairX * sin + stairZ * cos, 1,
           );
-          scale.set(width * (0.2 + random() * 0.18), roofHeight, depth * (0.2 + random() * 0.18));
-          roofTransforms.push(matrix.compose(position, quaternion, scale).clone());
+          shadeColor.setHex(0x7c7770).offsetHSL(0, 0, (random() - 0.5) * 0.05);
+          roofColors.push(shadeColor.r, shadeColor.g, shadeColor.b);
         }
-        if (height >= 10 && height <= 46 && width >= 12 && depth >= 12) {
-          rooftopGardenCandidates.push({ x, z, width, depth, topY: height + 0.92, heading: yaw, stairX, stairZ });
+        if (top >= 10 && top <= 46 && width >= 12 && depth >= 12) {
+          rooftopGardenCandidates.push({ x, z, width, depth, topY: top + 0.92, heading: yaw, stairX, stairZ });
+        }
+        return true;
+      };
+
+      // Dense Dhaka urban fabric: each 115 m block of the tile is laid out as
+      // plots facing its nearest road — rows of buildings back to back, a lane
+      // every few plots — sized and stacked by district (see DHAKA_URBAN_ZONES)
+      // and thinned out where the city frays into fields and wetland.
+      const blockSize = tileSize / 4;
+      for (let blockX = 0; blockX < 4; blockX++) {
+        for (let blockZ = 0; blockZ < 4; blockZ++) {
+          const blockCenterX = tileMinX + (blockX + 0.5) * blockSize;
+          const blockCenterZ = tileMinZ + (blockZ + 0.5) * blockSize;
+          if (Math.abs(blockCenterX) > FLIGHT_EXTENT.x + blockSize / 2 || Math.abs(blockCenterZ) > FLIGHT_EXTENT.z + blockSize / 2) continue;
+          if (tileNearPark && inDhakaPark(blockCenterX, blockCenterZ, -blockSize * 0.75)) continue;
+          if (inDhakaOpenGround(blockCenterX, blockCenterZ, -blockSize * 0.75)) continue;
+          const { style, zoneInfluence } = dhakaUrbanFabric(blockCenterX, blockCenterZ);
+          let districtProximity = 0;
+          for (const district of districtCenters) {
+            const proximity = clamp(1 - Math.hypot(blockCenterX - district.x, blockCenterZ - district.z) / 2_000, 0, 1);
+            districtProximity = Math.max(districtProximity, proximity * district.intensity);
+          }
+          const urban = clamp(Math.max(districtProximity, zoneInfluence > 0 ? 0.4 + 0.6 * zoneInfluence : 0), 0.12, 1);
+          const blockGreen = dhakaGreenWeight(blockCenterX, blockCenterZ);
+          const plotBlockVacancy = 0.78 * (1 - urban) ** 1.3;
+          const lotVacancy = 0.02 + 0.2 * (1 - urban) + clamp((blockGreen - 0.95) * 0.2, 0, 0.16);
+          const roofChance = 0.32 + 0.2 * (1 - urban);
+          const heading = roadHeadingAt(blockCenterX, blockCenterZ);
+          const headingCos = Math.cos(heading);
+          const headingSin = Math.sin(heading);
+          const pitchU = style.lotW + style.gap;
+          const pitchV = style.lotD + style.gap;
+          const reach = blockSize * 0.72;
+          let row = 0;
+          for (let v = -reach + random() * pitchV; v < reach; row++) {
+            const rowCenter = v + pitchV / 2;
+            for (let u = -reach + random() * pitchU; u < reach; u += style.lane) {
+              const plotsInBlock = 3 + Math.floor(random() * 3);
+              const emptyBlock = random() < plotBlockVacancy;
+              for (let plot = 0; plot < plotsInBlock && u < reach; plot++) {
+                const span = !emptyBlock && plot + 1 < plotsInBlock && random() < 0.1 ? 2 : 1;
+                plot += span - 1;
+                const plotCenter = u + (pitchU * span) / 2;
+                u += pitchU * span;
+                const lotX = blockCenterX + headingCos * plotCenter + headingSin * rowCenter;
+                const lotZ = blockCenterZ - headingSin * plotCenter + headingCos * rowCenter;
+                if (Math.abs(lotX - blockCenterX) > blockSize / 2 || Math.abs(lotZ - blockCenterZ) > blockSize / 2) continue;
+                if (emptyBlock || random() < lotVacancy) {
+                  vacantLots.push(lotX, lotZ);
+                  continue;
+                }
+                const tower = random() < style.tower;
+                const floors = tower
+                  ? Math.round(style.towerMin + random() * (style.towerMax - style.towerMin))
+                  : Math.floor(style.minFloors + random() ** 1.25 * (style.maxFloors - style.minFloors + 1));
+                const height = floors * (2.95 + random() * 0.38);
+                let width = (pitchU * span - style.gap) * (0.88 + random() * 0.12);
+                let depth = (pitchV - style.gap) * (0.85 + random() * 0.15);
+                if (tower) {
+                  width *= 0.88;
+                  depth *= 0.88;
+                }
+                // Back-to-back rows: each building hugs the lane its row faces.
+                const shift = ((pitchV - style.gap - depth) / 2) * (row % 2 === 0 ? -1 : 1);
+                const x = lotX + headingSin * shift;
+                const z = lotZ + headingCos * shift;
+                const yaw = heading + (random() - 0.5) * 2 * style.organic;
+                pickBuildingShade(shadeColor, style, tower, height, random);
+                if (!placeBuilding(x, z, yaw, width, depth, height, style.gap, shadeColor, roofChance)) {
+                  // Squeeze a smaller building into what the neighbours, roads
+                  // and water leave of the plot.
+                  width *= 0.64;
+                  depth *= 0.64;
+                  if (width >= 6 && depth >= 6) placeBuilding(lotX, lotZ, yaw, width, depth, Math.min(height, 24), style.gap, shadeColor, roofChance);
+                }
+              }
+            }
+            v += pitchV;
+            if (row % 2 === 1) v += style.lane;
+          }
         }
       }
 
@@ -2736,11 +3309,7 @@ async function addProceduralDistrictTiles(
           return (x - spot.x) ** 2 + (z - spot.z) ** 2 < sep * sep;
         })) return false;
         if (treeBlockedByMap(x, z, canopyRadius)) return false;
-        const wallClearance = Math.max(1.4, canopyRadius * 0.42);
-        if (tileColliders.some((collider) => (
-          Math.abs(x - collider.x) < collider.halfWidth + wallClearance &&
-          Math.abs(z - collider.z) < collider.halfDepth + wallClearance
-        ))) return false;
+        if (nearFootprint(x, z, Math.max(1.4, canopyRadius * 0.42))) return false;
 
         treeSpots.push({ x, z, minSep });
         const trunkHeight = tier === "park"
@@ -2899,9 +3468,18 @@ async function addProceduralDistrictTiles(
       // Pass 4: Courtyard & compound pocket trees (with up to 4 retries per tree)
       // scaled by neighborhood greenness so leafy neighborhoods feel distinct from
       // Old Dhaka and Motijheel while keeping treetop perches available citywide.
+      // Open plots left by the lot layout come first, since the packed blocks
+      // leave few random gaps wide enough for a canopy.
       const targetCourtyardTrees = Math.max(2, Math.round((9 + vegRandom() * 5) * greenWeight * outerTaper));
-      for (let index = 0; index < targetCourtyardTrees; index++) {
-        for (let attempt = 0; attempt < 4; attempt++) {
+      let courtyardTrees = 0;
+      for (let lot = 0; lot < vacantLots.length && courtyardTrees < targetCourtyardTrees; lot += 2) {
+        if (vegRandom() > 0.5) continue;
+        const x = vacantLots[lot] + (vegRandom() - 0.5) * 6;
+        const z = vacantLots[lot + 1] + (vegRandom() - 0.5) * 6;
+        if (placeTree(x, z, inDhakaPark(x, z) ? "park" : "courtyard")) courtyardTrees++;
+      }
+      for (let index = courtyardTrees; index < targetCourtyardTrees; index++) {
+        for (let attempt = 0; attempt < 6; attempt++) {
           const x = centerX + (vegRandom() - 0.5) * (tileSize - 32);
           const z = centerZ + (vegRandom() - 0.5) * (tileSize - 32);
           if (placeTree(x, z, inDhakaPark(x, z) ? "park" : "courtyard")) break;
@@ -2910,9 +3488,14 @@ async function addProceduralDistrictTiles(
 
       // Pass 5: Dhaka chhad-bagan (rooftop gardens) along flat residential roofs —
       // reuses the tile's foliage InstancedMesh (0 extra draw calls, no perches).
-      const gardenChance = clamp(0.06 + 0.13 * greenWeight, 0.07, 0.24);
+      // Held to about the per-tile count the sparser layout produced, so the
+      // denser roofscape does not multiply 80-triangle shrubs.
+      const gardenChance = clamp(0.06 + 0.13 * greenWeight, 0.07, 0.24) * 0.5;
+      let gardenRoofs = 0;
       for (const roof of rooftopGardenCandidates) {
+        if (gardenRoofs >= 7) break;
         if (vegRandom() > gardenChance) continue;
+        gardenRoofs++;
         const cosH = Math.cos(-roof.heading);
         const sinH = Math.sin(-roof.heading);
         const edgeSide = vegRandom() < 0.5 ? -1 : 1;
@@ -2940,21 +3523,23 @@ async function addProceduralDistrictTiles(
 
       const group = new THREE.Group();
       group.name = `Procedural district tile ${tileX},${tileZ}`;
-      transforms.forEach((bucketTransforms, bucket) => {
-        if (bucketTransforms.length === 0) return;
-        const mesh = new THREE.InstancedMesh(unitBox, materials[bucket], bucketTransforms.length);
-        bucketTransforms.forEach((transform, index) => mesh.setMatrixAt(index, transform));
-        mesh.instanceMatrix.needsUpdate = true;
-        mesh.castShadow = bucket === 2 || bucket === 4;
-        mesh.receiveShadow = true;
-        group.add(mesh);
-      });
-      if (roofTransforms.length > 0) {
-        const roofs = new THREE.InstancedMesh(roofBox, roofMaterial, roofTransforms.length);
-        roofTransforms.forEach((transform, index) => roofs.setMatrixAt(index, transform));
-        roofs.instanceMatrix.needsUpdate = true;
-        roofs.castShadow = true;
-        group.add(roofs);
+      const buildingCount = buildingMatrices.length / 16;
+      const instanceCount = buildingCount + roofMatrices.length / 16;
+      let buildings: THREE.InstancedMesh | null = null;
+      if (instanceCount > 0) {
+        buildings = new THREE.InstancedMesh(unitBox, buildingMaterial, instanceCount);
+        buildings.name = "Procedural buildings";
+        buildings.instanceMatrix.array.set(buildingMatrices);
+        buildings.instanceMatrix.array.set(roofMatrices, buildingMatrices.length);
+        const instanceColors = new Float32Array(instanceCount * 3);
+        instanceColors.set(buildingColors);
+        instanceColors.set(roofColors, buildingColors.length);
+        buildings.instanceColor = new THREE.InstancedBufferAttribute(instanceColors, 3);
+        // Stair heads follow the buildings in the instance list.
+        buildings.userData.buildingCount = buildingCount;
+        buildings.castShadow = true;
+        buildings.receiveShadow = true;
+        group.add(buildings);
       }
       if (trunkTransforms.length > 0) {
         const trunks = new THREE.InstancedMesh(trunkGeometry, trunkMaterial, trunkTransforms.length);
@@ -2985,15 +3570,12 @@ async function addProceduralDistrictTiles(
       group.visible = false;
       group.updateMatrixWorld(true);
       group.traverse((object) => { object.matrixAutoUpdate = false; });
-      tiles.push({ group, centerX, centerZ, colliders: tileColliders });
+      tiles.push({ group, centerX, centerZ, colliders: tileColliders, buildings, detail: 0 });
       await yieldIfNeeded(isCancelled);
   }
   const reveal = (anchor: THREE.Vector3) => {
-    const visibilitySquared = visibilityRadius ** 2;
     for (const tile of tiles) {
-      const visible = (tile.centerX - anchor.x) ** 2 + (tile.centerZ - anchor.z) ** 2 < visibilitySquared;
-      tile.group.visible = visible;
-      if (visible) scene.add(tile.group);
+      setProceduralTileDetail(scene, tile, proceduralTileDetailAt(tile, anchor.x, anchor.z, visibilityRadius));
     }
     scene.userData.proceduralDistrictTiles = tiles;
     scene.userData.proceduralTileVisibilityRadius = visibilityRadius;
@@ -3006,11 +3588,9 @@ async function addProceduralDistrictTiles(
   const dispose = () => {
     for (const tile of tiles) scene.remove(tile.group);
     unitBox.dispose();
-    roofBox.dispose();
     foliageGeometry.dispose();
     trunkGeometry.dispose();
-    materials.forEach((material) => material.dispose());
-    roofMaterial.dispose();
+    buildingMaterial.dispose();
     trunkMaterial.dispose();
     foliageMaterial.dispose();
   };
@@ -3796,17 +4376,19 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
   const plazaBrick = new THREE.MeshStandardMaterial({ color: 0x8f4a3a, roughness: 0.96 });
   const deepBrick = new THREE.MeshStandardMaterial({ color: 0x9a3f31, roughness: 0.9 });
   const brickTrim = new THREE.MeshStandardMaterial({ color: 0xc27a62, roughness: 0.86 });
-  const bronze = new THREE.MeshStandardMaterial({ color: 0x6f6a5c, roughness: 0.5, metalness: 0.45 });
   const cream = new THREE.MeshStandardMaterial({ color: 0xefe6cf, roughness: 0.82 });
   const peach = new THREE.MeshStandardMaterial({ color: 0xe6b497, roughness: 0.86 });
   const tileRoof = new THREE.MeshStandardMaterial({ color: 0x9c4f3c, roughness: 0.9 });
   const salmon = new THREE.MeshStandardMaterial({ color: 0xdf9184, roughness: 0.84 });
-  const salmonTrim = new THREE.MeshStandardMaterial({ color: 0xf4d6cb, roughness: 0.78 });
+  // Ahsan Manzil's pastel pink, with lighter pink-cream for its trims.
+  const pink = new THREE.MeshStandardMaterial({ color: 0xec92b8, roughness: 0.8 });
+  const pinkTrim = new THREE.MeshStandardMaterial({ color: 0xf7cfdc, roughness: 0.76 });
   const roofTerrace = new THREE.MeshStandardMaterial({ color: 0xb59c90, roughness: 0.95 });
   const stoneStep = new THREE.MeshStandardMaterial({ color: 0x8d7868, roughness: 0.93 });
   const silverPanel = new THREE.MeshStandardMaterial({ color: 0xcdd2d4, roughness: 0.46, metalness: 0.32 });
   const roofGrey = new THREE.MeshStandardMaterial({ color: 0x858c8a, roughness: 0.9 });
   const plantGrey = new THREE.MeshStandardMaterial({ color: 0xa9adab, roughness: 0.7, metalness: 0.2 });
+  const bronze = new THREE.MeshStandardMaterial({ color: 0x6f6a5c, roughness: 0.5, metalness: 0.45 });
   // Materials that glow after dark share the city's night-window uniform, so
   // landmark openings come on with the rest of the skyline.
   const nightLit = <T extends THREE.MeshStandardMaterial>(material: T, strength: number, tint = 0xffc27a) => {
@@ -3836,6 +4418,39 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
   const landmarkLightCanopy = new THREE.MeshStandardMaterial({ color: 0x4f7f40, roughness: 0.86 });
   const landmarkKrishnachura = new THREE.MeshStandardMaterial({ color: 0xc84628, roughness: 0.86 });
   const carnivalBlue = new THREE.MeshStandardMaterial({ color: 0x2f7ea0, roughness: 0.52, metalness: 0.16 });
+  // Worn footpaths and festival grounds: packed earth, not paving or lawn.
+  const packedEarth = new THREE.MeshStandardMaterial({ color: 0xa88b6a, roughness: 1 });
+  // Weathered dark green-black copper, as on the dome of Pari Bibi's tomb.
+  // Baitul Mukarram: the beige sheet-steel canopy over the prayer deck, and
+  // the deep teal inside its portal arches.
+  const canopyBeige = new THREE.MeshStandardMaterial({ color: 0xcdbfa6, roughness: 0.7, metalness: 0.15 });
+  const tealArch = new THREE.MeshStandardMaterial({ color: 0x2e6e78, roughness: 0.8 });
+  const copperDark = new THREE.MeshStandardMaterial({ color: 0x2e3b39, roughness: 0.5, metalness: 0.35 });
+  // Kahn's South Plaza brick: brighter and redder than terracotta.
+  const plazaRed = new THREE.MeshStandardMaterial({ color: 0xc9563e, roughness: 0.92 });
+  // Novo Theatre's pale sky-blue geodesic glass dome.
+  // Pan Pacific Sonargaon's dusty pink-beige render.
+  const roseBeige = new THREE.MeshStandardMaterial({ color: 0xd3b3a8, roughness: 0.86 });
+  const skyGlass = nightLit(new THREE.MeshPhysicalMaterial({ color: 0xa3c2de, roughness: 0.25, metalness: 0.1, clearcoat: 0.5 }), 0.32, 0xdfeaff);
+  // Bangladesh Bank Tower: buff-olive spandrel panels and the weathered
+  // sage-green concrete of its blank end walls.
+  const oliveBuff = new THREE.MeshStandardMaterial({ color: 0xcbc398, roughness: 0.8 });
+  const sageConcrete = new THREE.MeshStandardMaterial({ color: 0x8f9a86, roughness: 0.9 });
+  // Board-marked fair-faced grey concrete (Liberation War Museum, the
+  // Museum of Independence wall).
+  const boardConcrete = new THREE.MeshStandardMaterial({ color: 0xa29e95, roughness: 0.92 });
+  // Stadium seating green (Sher-e-Bangla's stands).
+  const seatGreen = new THREE.MeshStandardMaterial({ color: 0x347a3e, roughness: 0.78 });
+  // Star Mosque: the blue-starred white tile of its domes reads as a cool
+  // blue-white from the air, and its star pool is bright turquoise tile.
+  const starTile = new THREE.MeshStandardMaterial({ color: 0xc9d6ec, roughness: 0.5 });
+  const poolTurquoise = new THREE.MeshStandardMaterial({ color: 0x45a9c0, roughness: 0.75 });
+  const starBlue = new THREE.MeshStandardMaterial({ color: 0x34589e, roughness: 0.45 });
+  // Kamalapur's pale yellow platform-canopy concrete.
+  const stationCream = new THREE.MeshStandardMaterial({ color: 0xe3d8a8, roughness: 0.86 });
+  // The white nodes and struts of a geodesic glass dome, drawn as the
+  // triangle edges of the dome's own mesh (Military Museum).
+  const geodesicFrame = new THREE.MeshStandardMaterial({ color: 0xeef1f1, roughness: 0.5, metalness: 0.3, wireframe: true });
   const unitBox = new THREE.BoxGeometry(1, 1, 1);
   const treeCrownGeo = new THREE.IcosahedronGeometry(1, 1);
 
@@ -4173,6 +4788,199 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
     addFinial(parent, [x, y + size * 1.62, z], size * 0.16);
   };
 
+  // A solid slab shaped as a ring sector: amphitheatre tiers, curved benches,
+  // colonnade beams, retaining walls. Angles are measured from local +Z toward
+  // +X (the same sense as a Lathe or Cylinder theta), so a sector centred on
+  // `thetaStart + thetaLength / 2 = 0` opens toward +Z. Rise is from `y` up by
+  // `height`; every face is closed, so stacked tiers never show back faces.
+  const addArcSlab = (
+    parent: THREE.Object3D,
+    innerRadius: number,
+    outerRadius: number,
+    thetaStart: number,
+    thetaLength: number,
+    y: number,
+    height: number,
+    material: THREE.Material,
+    segments = 24,
+  ) => {
+    const shape = new THREE.Shape();
+    // Shape XY maps to local (x, -z) once the extrusion is turned to stand up.
+    const at = (radius: number, theta: number) => [radius * Math.sin(theta), -radius * Math.cos(theta)] as const;
+    shape.moveTo(...at(outerRadius, thetaStart));
+    for (let step = 1; step <= segments; step++) shape.lineTo(...at(outerRadius, thetaStart + (thetaLength * step) / segments));
+    for (let step = segments; step >= 0; step--) shape.lineTo(...at(innerRadius, thetaStart + (thetaLength * step) / segments));
+    const geometry = new THREE.ExtrudeGeometry(shape, { depth: height, bevelEnabled: false, curveSegments: 1 });
+    geometry.rotateX(-Math.PI / 2);
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.position.y = y;
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    parent.add(mesh);
+    return mesh;
+  };
+
+  // A straight box beam from point `a` to point `b` in the parent's frame:
+  // arch ribs, struts, hangers, space-frame members. `width` is across, `depth`
+  // is the second section side, `overrun` lengthens it so chained beams meet.
+  const beamAxis = new THREE.Vector3(0, 0, 1);
+  const addBeam = (
+    parent: THREE.Object3D,
+    a: [number, number, number],
+    b: [number, number, number],
+    width: number,
+    depth: number,
+    material: THREE.Material,
+    overrun = 0,
+  ) => {
+    const direction = new THREE.Vector3(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+    const length = direction.length();
+    const beam = new THREE.Mesh(unitBox, material);
+    beam.scale.set(width, depth, length + overrun);
+    beam.position.set((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2);
+    if (length > 1e-6) beam.quaternion.setFromUnitVectors(beamAxis, direction.divideScalar(length));
+    beam.castShadow = true;
+    beam.receiveShadow = true;
+    parent.add(beam);
+    return beam;
+  };
+
+  // Hand-built quads (a deck swept along a curve, a stadium terrace ring) as
+  // one mesh. Each quad names the way it must face, and its winding is fixed
+  // to match, so single-sided materials always show the outside. The uv
+  // attribute is there only so bakeGroup can merge it with built-in shapes.
+  type QuadPoint = [number, number, number];
+  const addQuads = (parent: THREE.Object3D, quads: Array<[QuadPoint, QuadPoint, QuadPoint, QuadPoint, QuadPoint]>, material: THREE.Material) => {
+    const positions: number[] = [];
+    for (const [a, b, c, d, out] of quads) {
+      const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
+      const vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
+      const facing = (uy * vz - uz * vy) * out[0] + (uz * vx - ux * vz) * out[1] + (ux * vy - uy * vx) * out[2];
+      const ring = facing >= 0 ? [a, b, c, d] : [a, d, c, b];
+      positions.push(...ring[0], ...ring[1], ...ring[2], ...ring[0], ...ring[2], ...ring[3]);
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("uv", new THREE.Float32BufferAttribute(new Array((positions.length / 3) * 2).fill(0), 2));
+    geometry.computeVertexNormals();
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    parent.add(mesh);
+    return mesh;
+  };
+  // A box-section ribbon swept along a polyline of [x, topY, z] points: deck
+  // slabs, flyover ramps, kerbs and parapets. Each cross-section is square to
+  // the path's plan direction (mitred at the bends), so consecutive segments
+  // share their edges instead of overlapping as chained beams would. `offset`
+  // slides the ribbon sideways (+ is to the right of the direction of travel);
+  // `floor`, when given, drops the underside to at least that height, so a
+  // deck can close the gap down to a road drawn beneath it.
+  const addSweptBox = (
+    parent: THREE.Object3D,
+    path: QuadPoint[],
+    halfWidth: number,
+    depth: number,
+    material: THREE.Material,
+    offset = 0,
+    floor = Infinity,
+  ) => {
+    if (path.length < 2) return null;
+    const rings = path.map(([x, y, z], index) => {
+      const [ax, , az] = path[Math.max(0, index - 1)];
+      const [bx, , bz] = path[Math.min(path.length - 1, index + 1)];
+      const length = Math.hypot(bx - ax, bz - az) || 1;
+      const rx = -(bz - az) / length;
+      const rz = (bx - ax) / length;
+      const left = offset - halfWidth;
+      const right = offset + halfWidth;
+      return {
+        rx,
+        rz,
+        tl: [x + rx * left, y, z + rz * left] as QuadPoint,
+        tr: [x + rx * right, y, z + rz * right] as QuadPoint,
+        br: [x + rx * right, Math.min(y - depth, floor), z + rz * right] as QuadPoint,
+        bl: [x + rx * left, Math.min(y - depth, floor), z + rz * left] as QuadPoint,
+      };
+    });
+    const quads: Array<[QuadPoint, QuadPoint, QuadPoint, QuadPoint, QuadPoint]> = [];
+    for (let index = 0; index < rings.length - 1; index++) {
+      const p = rings[index];
+      const q = rings[index + 1];
+      quads.push([p.tl, p.tr, q.tr, q.tl, [0, 1, 0]]);
+      quads.push([p.bl, p.br, q.br, q.bl, [0, -1, 0]]);
+      quads.push([p.tr, p.br, q.br, q.tr, [p.rx, 0, p.rz]]);
+      quads.push([p.tl, p.bl, q.bl, q.tl, [-p.rx, 0, -p.rz]]);
+    }
+    const first = rings[0];
+    const last = rings[rings.length - 1];
+    const [sx, , sz] = path[0];
+    const [nx, , nz] = path[1];
+    const [ex, , ez] = path[path.length - 1];
+    const [px, , pz] = path[path.length - 2];
+    quads.push([first.tl, first.tr, first.br, first.bl, [sx - nx, 0, sz - nz]]);
+    quads.push([last.tl, last.tr, last.br, last.bl, [ex - px, 0, ez - pz]]);
+    return addQuads(parent, quads, material);
+  };
+
+  // A triangulated geodesic glass dome standing on the ground: an icosphere
+  // cut flat where it meets y = 0, with a wireframe twin for the struts.
+  // `rise` may exceed `radius` (more than a hemisphere).
+  const addGeodesicDome = (
+    parent: THREE.Object3D,
+    x: number,
+    z: number,
+    radius: number,
+    rise: number,
+    detail: number,
+    glassMaterial: THREE.Material,
+    strutMaterial: THREE.Material,
+  ) => {
+    const centre = rise - radius;
+    const source = new THREE.IcosahedronGeometry(radius, detail);
+    const from = source.getAttribute("position");
+    const kept: number[] = [];
+    for (let index = 0; index < from.count; index += 3) {
+      const ys = [from.getY(index), from.getY(index + 1), from.getY(index + 2)];
+      if (Math.max(...ys) <= -centre + 0.05) continue;
+      for (let corner = 0; corner < 3; corner++) {
+        kept.push(from.getX(index + corner), Math.max(-centre, ys[corner]) + centre, from.getZ(index + corner));
+      }
+    }
+    source.dispose();
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(kept, 3));
+    geometry.computeVertexNormals();
+    const glassMesh = new THREE.Mesh(geometry, glassMaterial);
+    glassMesh.position.set(x, 0, z);
+    glassMesh.castShadow = true;
+    glassMesh.receiveShadow = true;
+    parent.add(glassMesh);
+    const struts = new THREE.Mesh(geometry.clone(), strutMaterial);
+    struts.position.set(x, 0, z);
+    struts.scale.setScalar(1.006);
+    parent.add(struts);
+    return glassMesh;
+  };
+
+  // A coconut or palmyra palm: a slim leaning trunk and a crown of drooping
+  // fronds, far more legible from the air than a round crown on a stick.
+  const addPalm = (parent: THREE.Object3D, x: number, z: number, height = 10, lean = 0.08, turn = 0) => {
+    const palm = new THREE.Group();
+    palm.position.set(x, 0, z);
+    palm.rotation.set(lean, turn, 0, "YXZ");
+    parent.add(palm);
+    addCylinder(palm, 0.2, 0.32, height, [0, height / 2, 0], landmarkBark, 5);
+    for (let frond = 0; frond < 7; frond++) {
+      const holder = new THREE.Group();
+      holder.position.set(0, height, 0);
+      holder.rotation.set(0, (frond / 7) * Math.PI * 2, 0);
+      palm.add(holder);
+      const leaf = addBox(holder, [0.9, 0.1, 3.8], [0, -0.55, 1.75], landmarkLightCanopy);
+      leaf.rotation.x = 0.42;
+    }
+  };
+
   // Collapse a finished detail group to one mesh per material. Landmark detail
   // is static, so hundreds of small parts should not cost hundreds of draw calls.
   const bakeGroup = (group: THREE.Group) => {
@@ -4262,31 +5070,54 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
   const partMaterial = (kind: DhakaLandmark["kind"], part: LandmarkFootprintPart) => {
     if (part.role === "water") return water;
     if (part.role === "ground") {
-      if (kind === "amphitheatre" || kind === "shaheed-minar") return paleConcrete;
+      if (kind === "shaheed-minar") return plazaBrick;
+      if (kind === "amphitheatre") return paleConcrete;
       return lawn;
     }
-    if (kind === "church") return part.role === "tower" ? paleConcrete : whiteStone;
-    if (kind === "bashundhara-city") return part.osmId === 1092674471 ? atriumGlass : silverPanel;
-    if (kind === "police-plaza") return glass;
-    if (kind === "brac") return brick;
-    if (kind === "hotel") return darkGlass;
+    // Holy Rosary: a glazed ground floor, louvred upper tiers, a cream lantern drum.
+    if (kind === "church") return part.role === "tower" ? cream : part.osmId === 717625483 ? ribbonGlass : roofGrey;
+    if (kind === "bashundhara-city") return part.osmId === 1092674471 ? atriumGlass : part.osmId === 1092674472 ? paleConcrete : silverPanel;
+    // Police Plaza's podium is cream panelling; BRAC Centre's dark ribbon
+    // glazing is the wall plane its projecting concrete ledges stand off.
+    if (kind === "police-plaza") return cream;
+    if (kind === "brac") return ribbonGlass;
+    if (kind === "jamuna-future-park") return silverPanel;
+    // TSC: the grey concrete frame of the main block; the auditorium and game room are paler.
+    if (kind === "tsc-raju") return part.osmId === 655714604 ? concrete : paleConcrete;
+    // Doreen Tower is white aluminium panel; its glass is dressed on.
+    if (kind === "hotel") return whiteStone;
+    // The science museum's halls, repainted deep teal.
+    if (kind === "science-museum") return tealArch;
     if (kind === "parliament") return concrete;
-    if (kind === "lalbagh-fort") return part.role === "tomb" || part.role === "museum" ? peach : redBrick;
-    if (kind === "ahsan-manzil") return salmon;
+    if (kind === "lalbagh-fort") return part.role === "tomb" ? salmon : part.role === "museum" ? peach : redBrick;
+    if (kind === "ahsan-manzil") return pink;
+    if (kind === "rose-garden-palace") return marble;
     if (kind === "curzon-hall") return redBrick;
-    if (kind === "baitul-mukarram") return paleConcrete;
+    if (kind === "baitul-mukarram") return cream;
     return whiteStone;
   };
 
   // The OSM snapshot's heights are coarse tags. Where a part's real proportions
   // matter to how the building reads, model it at its true height instead.
   const PART_HEIGHTS: Record<number, number> = {
+    // Holy Rosary Church: the fan's tiers step up toward the lantern tower.
+    717625483: 5.4,
+    983631142: 9,
+    983631141: 12,
+    983631140: 11.6,
+    370071885: 12, // Science museum exhibition halls: two to three storeys
+    498432169: 104, // Doreen Tower: the roof under the sky lounge and prow canopy (112 m overall)
     624025793: 14, // Ahsan Manzil: two storeys on a plinth, the dome carries the height
-    624025792: 11,
-    24448713: 33, // Bashundhara City mall podium
-    1092674471: 37, // atrium rotunda
-    1092674472: 80, // office tower
-    186664126: 13, // Baitul Mukarram's low wings; the prayer-hall cube stands above them
+    624025792: 13.5, // Andarmahal: the same two storeys as the Rangmahal
+    24448713: 35, // Bashundhara City mall podium
+    1092674471: 76, // the full-height blue glass drum at the tower's east end
+    1092674472: 82, // office slab
+    264272612: 13.5, // Curzon Hall: two storeys to the parapet, so the tower and turrets stand out
+    186664126: 15, // Baitul Mukarram's covered prayer deck; the prayer-hall cube stands above it
+    366560370: 20, // Police Plaza Concord: the four-storey podium; its two slab towers are built on it
+    229029081: 78, // BRAC Centre: 21 floors, parapet at 78 m
+    586535435: 34, // Jamuna Future Park: seven retail floors; the corner pavilions rise to 42 m
+    439770540: 12.5, // Rose Garden Palace: two tall storeys under the balustrade; the belvedere carries the height
   };
   const partHeight = (part: LandmarkFootprintPart) => PART_HEIGHTS[part.osmId] ?? part.height;
   const partBounds = new Map<number, { minX: number; maxX: number; minZ: number; maxZ: number; height: number }>();
@@ -4301,19 +5132,62 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
     if (!footprint) {
       const center = coordinatesToWorld(landmark.lat, landmark.lon);
       const defaultExtents: Partial<Record<DhakaLandmark["kind"], [number, number]>> = {
-        airport: [150, 85],
+        // The runway strip only; the terminals carry their own columns.
+        airport: [40, 40],
+        "bangladesh-bank": [23.5, 13.5],
+        "novo-theatre": [42, 34],
+        // Only the outfield centre; the stands carry their own columns.
+        "sher-e-bangla-stadium": [12, 12],
+        // The mausoleum square; the walk and bridge carry their own columns.
+        "zia-udyan": [23, 23],
+        // World half extents (E–W, N–S) of the 1.5× mosque on its plinth.
+        "sat-gambuj-mosque": [15, 20],
+        "dhakeshwari-temple": [7, 7],
+        "aparajeyo-bangla": [8, 6],
+        // The 1.3× mosque only (long side N–S); its courtyard is cleared, not solid.
+        "star-mosque": [8.4, 14.6],
+        // The umbrella-shell headhouse; the platforms carry their own boxes.
+        "kamalapur-station": [42, 42],
         "ramna-park": [42, 42],
-        "suhrawardy-udyan": [18, 18],
-        "rabindra-sarobar": [38, 36],
+        "suhrawardy-udyan": [21, 21],
+        "rabindra-sarobar": [40, 40],
         "baldha-garden": [36, 33],
         "botanical-garden": [54, 48],
         "national-zoo": [60, 54],
-        "national-museum": [54, 46],
-        "liberation-museum": [44, 40],
+        "national-museum": [52, 52],
+        "liberation-museum": [33, 33],
         "military-museum": [54, 40],
-        "science-museum": [42, 36],
+        // World half extents of the roof plate (its 146 m side runs N–S).
+        bcfcc: [65, 74],
         "shishu-park": [44, 40],
-        "shishu-mela": [36, 32],
+        // The fairground carries its own boxes; the extents only centre it.
+        "shishu-mela": [10, 10],
+        // Only the centre of each; the deck and ramps carry their own columns.
+        "hatirjheel-bridge": [12, 12],
+        "kuril-flyover": [12, 12],
+        // World half extents (E–W, N–S) of the prayer hall, its long side N–S.
+        "gulshan-central-mosque": [20, 30],
+        // The bowl and the west grandstand (the long axis runs N–S).
+        "army-stadium": [76, 110],
+        // The blue basin on its island.
+        "doyel-chattar": [9.5, 9.5],
+        // World half extents of the plinth (its 60 m side runs at 167°).
+        "three-leaders-mausoleum": [23, 33],
+        // These sites carry their own collision boxes; the extents only
+        // centre the detail group on the table lat/lon.
+        "hussaini-dalan": [10, 10],
+        "sadarghat-terminal": [10, 10],
+        "supreme-court": [10, 10],
+        "national-stadium": [10, 10],
+        "rayer-bazar-memorial": [10, 10],
+        "air-force-museum": [10, 10],
+        "sonargaon-hotel": [10, 10],
+        // World half extents (E–W, N–S) of the main block, long side N–S.
+        "pm-office": [20, 55],
+        // World half extents of the nave (its long side runs E–W).
+        "armenian-church": [15, 7],
+        // The memorial on its plinth.
+        "bahadur-shah-park": [6.5, 6.5],
       };
       const [halfWidth, halfDepth] = defaultExtents[landmark.kind] ?? [28, 22];
       allBounds.set(landmark.kind, {
@@ -4355,6 +5229,9 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
         maxZ = Math.max(maxZ, partMaxZ);
         top = Math.max(top, height);
       }
+      // Most of the Hatirjheel amphitheatre outline stands over the lake on steel
+      // piers; its detail branch builds the deck, so the lake shows under it.
+      if (part.osmId === 1065574904) continue;
 
       const geometry = new THREE.ExtrudeGeometry(polygonShape(points), {
         depth: height,
@@ -4407,9 +5284,33 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
     "national-museum",
     "liberation-museum",
     "military-museum",
-    "science-museum",
     "shishu-park",
     "shishu-mela",
+    "novo-theatre",
+    "sher-e-bangla-stadium",
+    "zia-udyan",
+    "sat-gambuj-mosque",
+    "dhakeshwari-temple",
+    "aparajeyo-bangla",
+    "star-mosque",
+    "kamalapur-station",
+    "bcfcc",
+    "hatirjheel-bridge",
+    "kuril-flyover",
+    "gulshan-central-mosque",
+    "army-stadium",
+    "doyel-chattar",
+    "three-leaders-mausoleum",
+    "hussaini-dalan",
+    "sadarghat-terminal",
+    "supreme-court",
+    "national-stadium",
+    "rayer-bazar-memorial",
+    "air-force-museum",
+    "sonargaon-hotel",
+    "pm-office",
+    "armenian-church",
+    "bahadur-shah-park",
   ]);
 
   const detailGroup = (landmark: DhakaLandmark) => {
@@ -4547,7 +5448,8 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
   };
 
   for (const landmark of DHAKA_LANDMARKS) {
-    const { group, anchor, walls, slab, frame, dressTower, width, depth, top } = detailGroup(landmark);
+    const colliderStart = colliders.length;
+    const { group, anchor, outline: partOutline, walls, slab, frame, top } = detailGroup(landmark);
     const cosH = Math.cos(group.rotation.y);
     const sinH = Math.sin(group.rotation.y);
     // Tall features that rise above the footprint's own height get their own
@@ -4557,226 +5459,682 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
       const wz = group.position.z - x * sinH + z * cosH;
       colliders.push({ x: wx, z: wz, halfWidth: half, halfDepth: half, top: solidTop + group.position.y });
     };
+    // Open ground that belongs to a landmark (a plaza, lawn, forecourt or bowl)
+    // and must stay free of generic buildings and park trees. It is a collider
+    // the bird can never strike — flight tests `y < top + 5.5`, and this top
+    // keeps that false above ground — but OSM buildings, procedural plots and
+    // park trees all treat it as occupied. Local centre and half extents; the
+    // world box is the axis-aligned bounds of the turned rectangle.
+    const clearSite = (x: number, z: number, halfX: number, halfZ: number) => {
+      const wx = group.position.x + x * cosH + z * sinH;
+      const wz = group.position.z - x * sinH + z * cosH;
+      colliders.push({
+        x: wx,
+        z: wz,
+        halfWidth: Math.abs(cosH) * halfX + Math.abs(sinH) * halfZ,
+        halfDepth: Math.abs(sinH) * halfX + Math.abs(cosH) * halfZ,
+        top: LANDMARK_CLEARING_TOP,
+      });
+    };
+    // A solid box the bird strikes, in local coordinates (world AABB of the
+    // turned rectangle), for low wide masses that a square `solid()` fits badly.
+    const solidBox = (x: number, z: number, halfX: number, halfZ: number, boxTop: number) => {
+      colliders.push({
+        x: group.position.x + x * cosH + z * sinH,
+        z: group.position.z - x * sinH + z * cosH,
+        halfWidth: Math.abs(cosH) * halfX + Math.abs(sinH) * halfZ,
+        halfDepth: Math.abs(sinH) * halfX + Math.abs(cosH) * halfZ,
+        top: boxTop + group.position.y,
+      });
+    };
+    // A big turned rectangle (local x0…x1, z0…z1) as a tiling of small
+    // solid boxes, so the over-cover of each world AABB stays a few metres
+    // instead of the huge empty corners one turned box would leave.
+    const solidTiles = (x0: number, x1: number, z0: number, z1: number, boxTop: number, cell = 30) => {
+      const columns = Math.max(1, Math.ceil((x1 - x0) / cell));
+      const rows = Math.max(1, Math.ceil((z1 - z0) / cell));
+      const halfX = (x1 - x0) / columns / 2;
+      const halfZ = (z1 - z0) / rows / 2;
+      for (let column = 0; column < columns; column++) {
+        for (let row = 0; row < rows; row++) {
+          solidBox(x0 + (column * 2 + 1) * halfX, z0 + (row * 2 + 1) * halfZ, halfX, halfZ, boxTop);
+        }
+      }
+    };
+    // Clear an oval bowl or ground (local centre, local semi-axes along X and
+    // Z, plus a pad) with world-axis strips, so a turned ellipse does not leave
+    // the empty corners one big turned rectangle would.
+    const clearOval = (x: number, z: number, radiusX: number, radiusZ: number, pad = 0) => {
+      const rim: Array<[number, number]> = [];
+      for (let step = 0; step < 72; step++) {
+        const angle = (step / 72) * Math.PI * 2;
+        const lx = x + Math.sin(angle) * (radiusX + pad);
+        const lz = z + Math.cos(angle) * (radiusZ + pad);
+        rim.push([group.position.x + lx * cosH + lz * sinH, group.position.z - lx * sinH + lz * cosH]);
+      }
+      const minZ = Math.min(...rim.map(([, rz]) => rz));
+      const maxZ = Math.max(...rim.map(([, rz]) => rz));
+      const STRIP = 16;
+      for (let z0 = minZ; z0 < maxZ; z0 += STRIP) {
+        const z1 = Math.min(maxZ, z0 + STRIP);
+        // The oval's x extent over this strip: rim points inside it, plus the
+        // crossings of every rim edge with the strip's two edges.
+        const xs: number[] = [];
+        rim.forEach(([ax, az], index) => {
+          const [bx, bz] = rim[(index + 1) % rim.length];
+          if (az >= z0 && az <= z1) xs.push(ax);
+          for (const edgeZ of [z0, z1]) {
+            if ((az - edgeZ) * (bz - edgeZ) < 0) xs.push(ax + ((edgeZ - az) / (bz - az)) * (bx - ax));
+          }
+        });
+        if (!xs.length) continue;
+        const left = Math.min(...xs);
+        const right = Math.max(...xs);
+        colliders.push({ x: (left + right) / 2, z: (z0 + z1) / 2, halfWidth: (right - left) / 2, halfDepth: (z1 - z0) / 2, top: LANDMARK_CLEARING_TOP });
+      }
+    };
+    // A real-world point in this detail group's local frame (heading applied).
+    const toLocal = (lat: number, lon: number): [number, number] => {
+      const point = coordinatesToWorld(lat, lon);
+      const dx = point.x - group.position.x;
+      const dz = point.y - group.position.z;
+      return [dx * cosH - dz * sinH, dx * sinH + dz * cosH];
+    };
     let colliderTop = top;
     let perchTarget: [number, number] = [0, 0];
+    // Odd-shaped sites whose bounding box would swallow open ground (a
+    // forecourt, the neighbours inside an L) turn this off and cover their own
+    // masses with `solid()`/`solidBox()` columns instead.
+    let boundsCollider = true;
 
     if (landmark.kind === "church") {
-      const NAVE = 717625483;
-      const nave = anchor(NAVE);
-      if (nave) {
-        const lancet = pointedArch(1.7, 5.2);
-        addBays(group, walls(NAVE), {
-          bay: 5.2, minEdge: 5, storeys: [{ y: 3.2, opening: lancet, surround: pointedArch(2.3, 5.9) }],
-          opening: archDark, surround: paleConcrete,
-          pier: { width: 0.8, depth: 0.7, bottom: 0, top: nave.height, material: paleConcrete },
-        });
-        slab(NAVE, 0, 1.2, 1.012, paleConcrete);
-        slab(NAVE, nave.height - 0.4, 0.9, 1.02, paleConcrete);
-        slab(NAVE, nave.height + 0.5, 0.08, 0.95, tileRoof);
+      // Holy Rosary Church, Tejgaon: a modern quarter-fan hall whose three
+      // tiers of shallow red clay-tile roof step up toward the apex, each tier
+      // lifted on a ribbon of grey louvred clerestory under a cream fascia
+      // with a pink edge line. The glazed ground floor sits behind a ring of
+      // pink columns. At the apex stands the arched "tombstone" lantern tower:
+      // a cream frame round a full-height panel of grey louvres, crossed in red.
+      const HALL = 717625483;
+      const MIDDLE = 983631142;
+      const INNER = 983631141;
+      const TOWER = 983631140;
+      const hall = anchor(HALL);
+      const tower = anchor(TOWER);
+      // A tier's wall line in this group's coordinates.
+      const ring = (osmId: number) => {
+        const seat = anchor(osmId);
+        const local = partOutline(osmId);
+        return seat && local ? local.map(([x, z]) => [x + seat.x, z + seat.z] as MapPoint) : null;
+      };
+      if (hall && tower) {
+        const apexX = tower.x;
+        const apexZ = tower.z;
+        // The fan opens away from the tower, toward the forecourt (NW).
+        let faceX = hall.x - apexX;
+        let faceZ = hall.z - apexZ;
+        const faceLength = Math.hypot(faceX, faceZ) || 1;
+        faceX /= faceLength;
+        faceZ /= faceLength;
+        // A shallow tile roof rising from a tier's eave line to the apex. The
+        // part of it inside the next tier up is buried in that tier's mass.
+        const tierRoof = (osmId: number, eaveY: number, rise: number, overhang: number) => {
+          const points = ring(osmId);
+          if (!points) return;
+          const eave = offsetPolygon(points, overhang);
+          const quads: Array<[QuadPoint, QuadPoint, QuadPoint, QuadPoint, QuadPoint]> = [];
+          const apex: QuadPoint = [apexX, eaveY + rise, apexZ];
+          eave.forEach(([ax, az], index) => {
+            const [bx, bz] = eave[(index + 1) % eave.length];
+            quads.push([[ax, eaveY, az], [bx, eaveY, bz], apex, apex, [0, 1, 0]]);
+          });
+          addQuads(group, quads, tileRoof);
+          // Cream fascia with its pink edge line, closing the eave underneath.
+          slab(osmId, eaveY - 0.6, 0.6, 1 + overhang / 4, cream);
+          slab(osmId, eaveY - 0.78, 0.18, 1 + overhang / 4, salmon);
+        };
+        // Glazed ground floor, proud of every wall the tiers share with it.
+        slab(HALL, 0, 5.4, 1.01, ribbonGlass);
+        // Louvred clerestories: the middle and inner tiers above the roof below.
+        slab(MIDDLE, 5.6, 3.2, 1.02, roofGrey);
+        slab(INNER, 8.8, 3.0, 1.02, roofGrey);
+        tierRoof(HALL, 5.4, 1.3, 1.6);
+        tierRoof(MIDDLE, 9.0, 1.3, 0.9);
+        tierRoof(INNER, 12.0, 1.2, 0.9);
+        // Pink columns carrying the lowest eave, just inside its fascia.
+        const hallRing = ring(HALL);
+        if (hallRing) {
+          for (const edge of wallEdges(offsetPolygon(hallRing, 1.0))) {
+            if (edge.length < 3) continue;
+            const count = Math.max(1, Math.round(edge.length / 4.2));
+            for (let index = 0; index < count; index++) {
+              const along = (index + 0.5) * (edge.length / count);
+              addCylinder(group, 0.32, 0.32, 4.7, [edge.ax + edge.dx * along, 2.35, edge.az + edge.dz * along], salmon, 7);
+            }
+          }
+        }
+        // The arched lantern tower, its louvred faces turned down the fan.
+        const lantern = new THREE.Group();
+        lantern.position.set(apexX, 11.8, apexZ);
+        lantern.rotation.y = Math.atan2(faceX, faceZ);
+        group.add(lantern);
+        const LANTERN_W = 10;
+        const LANTERN_H = 14.2;
+        const LANTERN_D = 6;
+        const archShape = new THREE.Shape();
+        archShape.moveTo(-LANTERN_W / 2, 0);
+        archShape.lineTo(LANTERN_W / 2, 0);
+        archShape.lineTo(LANTERN_W / 2, LANTERN_H - LANTERN_W / 2);
+        archShape.absarc(0, LANTERN_H - LANTERN_W / 2, LANTERN_W / 2, 0, Math.PI, false);
+        archShape.lineTo(-LANTERN_W / 2, 0);
+        const lanternGeometry = new THREE.ExtrudeGeometry(archShape, { depth: LANTERN_D, bevelEnabled: false, curveSegments: 10 });
+        lanternGeometry.translate(0, 0, -LANTERN_D / 2);
+        const frameMesh = new THREE.Mesh(lanternGeometry, cream);
+        frameMesh.castShadow = true;
+        frameMesh.receiveShadow = true;
+        lantern.add(frameMesh);
+        for (const side of [1, -1]) {
+          const louvre = new THREE.Mesh(roundArch(7.6, 12.2), roofGrey);
+          louvre.position.set(0, 1.1, side * (LANTERN_D / 2 + 0.06));
+          louvre.rotation.y = side > 0 ? 0 : Math.PI;
+          lantern.add(louvre);
+          // Slats across the louvre panel.
+          for (let y = 2.2; y < 12.4; y += 1.15) {
+            const half = y > 8.4 ? Math.sqrt(Math.max(0, 3.8 * 3.8 - (y - 9.5) ** 2)) : 3.8;
+            if (half < 0.8) continue;
+            addBox(lantern, [half * 2 - 0.3, 0.16, 0.14], [0, y, side * (LANTERN_D / 2 + 0.12)], ribbonGlass);
+          }
+        }
+        const plaque = new THREE.Mesh(trianglePane(3.6, 2.6), whiteStone);
+        plaque.position.set(0, 0.5, LANTERN_D / 2 + 0.22);
+        lantern.add(plaque);
+        addBox(lantern, [0.55, 4.2, 0.55], [0, LANTERN_H + 2.1, 0], monumentRed);
+        addBox(lantern, [2.6, 0.55, 0.55], [0, LANTERN_H + 2.8, 0], monumentRed);
+        solid(apexX, apexZ, 5, 11.8 + LANTERN_H);
+        // Perch on the crown of the arch, beside the cross.
+        perchTarget = [apexX + faceZ * 1.6, apexZ - faceX * 1.6];
+        // Herringbone brick forecourt with the blue basin and the Marian statue.
+        const courtX = apexX + faceX * 56;
+        const courtZ = apexZ + faceZ * 56;
+        const court = addBox(group, [30, 0.24, 22], [courtX, 0.12, courtZ], plazaBrick);
+        court.rotation.y = Math.atan2(faceX, faceZ) + Math.PI / 2;
+        const basinX = apexX + faceX * 50;
+        const basinZ = apexZ + faceZ * 50;
+        addCylinder(group, 4.6, 4.6, 0.55, [basinX, 0.28, basinZ], whiteStone, 18);
+        addCylinder(group, 4.0, 4.0, 0.2, [basinX, 0.5, basinZ], carnivalBlue, 18);
+        const statueX = apexX + faceX * 57;
+        const statueZ = apexZ + faceZ * 57;
+        addBox(group, [1.8, 1.6, 1.8], [statueX, 0.8, statueZ], whiteStone);
+        addCylinder(group, 0.45, 0.7, 2.4, [statueX, 2.8, statueZ], carnivalBlue, 7);
+        addCylinder(group, 0.3, 0.3, 0.55, [statueX, 4.2, statueZ], whiteStone, 6);
+        clearSite(courtX, courtZ, 18, 18);
+        for (const [along, across] of [[62, 14], [62, -14], [44, 22], [44, -22]] as const) {
+          addLandmarkTree(group, apexX + faceX * along + faceZ * across, apexZ + faceZ * along - faceX * across, 3.6, 7.5);
+        }
       }
-      for (const osmId of [983631141, 983631142]) {
-        const upper = anchor(osmId);
-        if (!upper) continue;
-        addBays(group, walls(osmId), { bay: 4.4, minEdge: 4, storeys: [{ y: 14.4, opening: pointedArch(1.3, 3.4) }], opening: archDark });
-        slab(osmId, upper.height - 0.3, 0.7, 1.03, paleConcrete);
-        addCone(group, Math.min(upper.width, upper.depth) * 0.5, 6.5, [upper.x, upper.height + 3.6, upper.z], tileRoof, 8);
-      }
-      const tower = anchor(983631140);
-      if (tower) {
-        const radius = Math.min(tower.width, tower.depth) * 0.5;
-        slab(983631140, 12, 0.6, 1.05, paleConcrete);
-        slab(983631140, tower.height - 0.4, 0.9, 1.08, paleConcrete);
-        addBays(group, walls(983631140), { bay: 3.6, minEdge: 1.4, margin: 0.2, storeys: [{ y: 14.5, opening: pointedArch(1, 4.2) }], opening: archDark });
-        addCone(group, radius * 1.02, 15, [tower.x, tower.height + 8, tower.z], tileRoof, 8);
-        addBox(group, [0.5, 5.4, 0.5], [tower.x, tower.height + 17.6, tower.z], accent);
-        addBox(group, [3, 0.5, 0.5], [tower.x, tower.height + 18.6, tower.z], accent);
-        solid(tower.x, tower.z, radius, tower.height + 14);
-      }
+      colliderTop = 13;
     } else if (landmark.kind === "bashundhara-city") {
-      // Three volumes the OSM outline already separates: the silver-panelled
-      // mall podium, the round glass atrium with its ribbed dome, and the
-      // office tower with a curved curtain-wall bay.
+      // Bashundhara City, Panthapath: a champagne-silver panelled mall podium
+      // broken by deep staggered cut-outs, a polished steel drum standing on
+      // its roof, the cinema level's curved roof trimmed in red at the west
+      // end, and the low spoked glass dome of the central atrium. At the SE
+      // corner a cream office slab with punched windows, capped at its east
+      // end by a full-height blue glass drum rising from a white wave canopy.
       const MALL = 24448713;
       const ROTUNDA = 1092674471;
       const TOWER = 1092674472;
-      const FLOOR = 3.7;
       const mall = anchor(MALL);
       if (mall) {
-        // Glazed shopfront under a canopy, then a ribbon window to every floor.
         slab(MALL, 0, 4.4, 1.004, ribbonGlass);
         slab(MALL, 4.4, 0.6, 1.022, paleConcrete);
-        for (let y = 7; y < mall.height - 2; y += FLOOR) slab(MALL, y, 1.5, 1.003, ribbonGlass);
+        // Lighter panel bands, not window ribbons: the mall is mostly blind.
+        for (const y of [12, 19.5, 27]) slab(MALL, y, 0.7, 1.003, paleConcrete);
         slab(MALL, mall.height, 1.3, 1.006, silverPanel);
-        slab(MALL, mall.height + 1.3, 0.08, 0.965, roofGrey);
+        slab(MALL, mall.height + 1.3, 0.08, 0.965, plantGrey);
+        // Deep rectangular cut-outs, stacked in a staggered checker.
+        walls(MALL).forEach((edge, edgeIndex) => {
+          if (edge.length < 16) return;
+          const slots = edge.length > 60 ? 4 : edge.length > 34 ? 3 : 2;
+          for (let slot = 0; slot < slots; slot++) {
+            const along = edge.length * (slot + 0.5) / slots;
+            for (const tier of [0, 1]) {
+              const level = (edgeIndex + slot + tier * 2) % 3;
+              const height = level === 1 ? 7 : 4.5;
+              addOnWall(group, edge, along, 7 + level * 3 + tier * 13, rectPane(Math.min(13, edge.length / slots - 3), height), archDark, 0.2);
+            }
+          }
+        });
         const deck = frame(MALL, [0, 1]);
         if (deck) {
           const roofY = mall.height + 1.38;
-          // Rooftop plant, lift overruns and skylights: the roof is the face a
-          // bird sees most, so it should not be a blank slab.
-          const plant: Array<[number, number, number, number, number]> = [
-            [-0.42, -0.5, 16, 5, 11], [-0.1, -0.56, 11, 3.6, 8], [0.36, -0.44, 13, 6, 13],
-            [-0.5, 0.1, 9, 4, 20], [0.44, 0.3, 12, 4.5, 16], [-0.3, 0.52, 18, 3.4, 9],
-          ];
-          for (const [fx, fz, w, h, d] of plant) {
+          for (const [fx, fz, w, h, d] of [
+            [0.36, -0.44, 13, 5, 13], [-0.42, -0.5, 14, 4.5, 10], [0.44, 0.3, 12, 4.5, 14], [0.05, -0.6, 10, 3.6, 8],
+          ] as const) {
             addBox(deck.g, [w, h, d], [fx * deck.hx, roofY + h / 2, fz * deck.hz], plantGrey);
-            addBox(deck.g, [w * 0.86, 0.5, d * 0.86], [fx * deck.hx, roofY + h + 0.25, fz * deck.hz], roofGrey);
           }
-          for (const [fx, fz] of [[0.02, 0.1], [0.02, 0.34], [-0.2, 0.22]] as const) {
-            addBox(deck.g, [15, 1.6, 7], [fx * deck.hx, roofY + 0.8, fz * deck.hz], atriumGlass);
+          // The polished steel drum on the roof, a third of the way along the
+          // Panthapath frontage from the west.
+          const drumAt: [number, number] = [-deck.hx * 0.33, deck.hz * 0.62];
+          addCylinder(deck.g, 4, 4, 11, [drumAt[0], roofY + 5.5, drumAt[1]], silverPanel, 16);
+          addCylinder(deck.g, 4.3, 4.3, 0.6, [drumAt[0], roofY + 11.2, drumAt[1]], plantGrey, 16);
+          const cos = Math.cos(deck.g.rotation.y);
+          const sin = Math.sin(deck.g.rotation.y);
+          const drumX = deck.g.position.x + drumAt[0] * cos + drumAt[1] * sin;
+          const drumZ = deck.g.position.z - drumAt[0] * sin + drumAt[1] * cos;
+          solid(drumX, drumZ, 4, roofY + 11.5);
+          perchTarget = [drumX, drumZ];
+          // The cinema level at the west end: a curved roof edged in red.
+          const cinemaX = -deck.hx + 12;
+          const cinemaDepth = deck.hz * 1.3;
+          addBox(deck.g, [22, 5, cinemaDepth], [cinemaX, roofY + 2.5, -deck.hz * 0.12], silverPanel);
+          addBox(deck.g, [22.6, 1.5, cinemaDepth + 0.6], [cinemaX, roofY + 4.55, -deck.hz * 0.12], monumentRed);
+          const curve = new THREE.Mesh(new THREE.CylinderGeometry(cinemaDepth / 2, cinemaDepth / 2, 22, 16, 1, false, -Math.PI / 2, Math.PI), silverPanel);
+          curve.geometry.rotateZ(Math.PI / 2);
+          curve.geometry.rotateX(-Math.PI / 2);
+          curve.scale.set(1, 0.1, 1);
+          curve.position.set(cinemaX, roofY + 5.3, -deck.hz * 0.12);
+          deck.g.add(curve);
+          // The central atrium's low spoked glass dome, 26 m across.
+          const radius = 13;
+          const rise = 5;
+          const profile: Array<[number, number]> = [];
+          for (let step = 0; step <= 6; step++) {
+            const angle = (step / 6) * Math.PI / 2;
+            profile.push([Math.max(0.001, radius * Math.cos(angle)), rise * Math.sin(angle)]);
           }
-          for (const [fx, fz] of [[0.26, -0.08], [0.34, -0.08], [0.26, 0.04], [0.34, 0.04]] as const) {
-            addCylinder(deck.g, 2.1, 2.4, 3.2, [fx * deck.hx, roofY + 1.6, fz * deck.hz], plantGrey, 12);
+          addCylinder(deck.g, radius + 0.6, radius + 0.6, 1.2, [0, roofY + 0.6, 0], silverPanel, 24);
+          addLathe(deck.g, profile, 24, [0, roofY + 1.2, 0], atriumGlass);
+          const rib = new THREE.TorusGeometry(radius * 0.99, 0.18, 3, 8, Math.PI / 2);
+          for (let index = 0; index < 12; index++) {
+            const mesh = new THREE.Mesh(rib, silverPanel);
+            mesh.scale.y = rise / radius;
+            mesh.rotation.y = (index / 12) * Math.PI * 2;
+            mesh.position.set(0, roofY + 1.2, 0);
+            deck.g.add(mesh);
           }
+          addCylinder(deck.g, 2.2, 2.4, 0.8, [0, roofY + 1.2 + rise, 0], silverPanel, 12);
         }
+        colliderTop = mall.height + 2;
       }
       const rotunda = anchor(ROTUNDA);
       if (rotunda) {
         const radius = Math.min(rotunda.width, rotunda.depth) / 2;
-        for (let y = 4.4; y < rotunda.height; y += FLOOR) slab(ROTUNDA, y, 0.5, 1.012, silverPanel);
-        slab(ROTUNDA, rotunda.height, 1.2, 1.03, silverPanel);
-        const rise = radius * 0.62;
-        const domeY = rotunda.height + 1.2;
-        const profile: Array<[number, number]> = [];
-        for (let step = 0; step <= 8; step++) {
-          const angle = (step / 8) * Math.PI / 2;
-          profile.push([Math.max(0.001, radius * 0.97 * Math.cos(angle)), rise * Math.sin(angle)]);
+        for (let y = 40; y < rotunda.height - 4; y += 11) slab(ROTUNDA, y, 0.35, 1.01, silverPanel);
+        slab(ROTUNDA, rotunda.height, 1.0, 1.025, silverPanel);
+        slab(ROTUNDA, rotunda.height + 1.0, 0.08, 0.94, plantGrey);
+        // The white wave canopy that sweeps out from the drum's foot at 34 m.
+        const waveY = (mall?.height ?? 35) + 1.5;
+        for (const [start, length, y] of [[-0.4, 2.2, waveY], [1.8, 1.6, waveY + 1.2]] as const) {
+          const wave = addArcSlab(group, radius - 0.6, radius + 4.4, start, length, y, 0.9, whiteStone, 16);
+          wave.position.x = rotunda.x;
+          wave.position.z = rotunda.z;
         }
-        addLathe(group, profile, 24, [rotunda.x, domeY, rotunda.z], atriumGlass);
-        // Radial glazing ribs and two ring purlins over the glass.
-        const ribGeometry = new THREE.TorusGeometry(radius * 0.975, 0.2, 4, 10, Math.PI / 2);
-        for (let rib = 0; rib < 16; rib++) {
-          const mesh = new THREE.Mesh(ribGeometry, silverPanel);
-          mesh.scale.y = rise / radius;
-          mesh.rotation.y = (rib / 16) * Math.PI * 2;
-          mesh.position.set(rotunda.x, domeY, rotunda.z);
-          group.add(mesh);
-        }
-        for (const t of [0.34, 0.68]) {
-          const angle = t * Math.PI / 2;
-          const ring = new THREE.Mesh(new THREE.TorusGeometry(radius * 0.975 * Math.cos(angle), 0.18, 4, 32), silverPanel);
-          ring.rotation.x = Math.PI / 2;
-          ring.position.set(rotunda.x, domeY + rise * Math.sin(angle), rotunda.z);
-          group.add(ring);
-        }
-        addCylinder(group, 1.5, 1.9, 0.9, [rotunda.x, domeY + rise + 0.2, rotunda.z], accent, 12);
-        solid(rotunda.x, rotunda.z, radius, domeY + rise);
+        solid(rotunda.x, rotunda.z, radius, rotunda.height + 1);
       }
       const tower = anchor(TOWER);
       if (tower && mall) {
-        const base = mall.height;
-        for (let y = base + 2.4; y < tower.height - 2; y += FLOOR) slab(TOWER, y, 1.6, 1.004, ribbonGlass);
-        slab(TOWER, tower.height, 1.4, 1.01, silverPanel);
-        slab(TOWER, tower.height + 1.4, 0.08, 0.93, roofGrey);
-        // Face the curved bay away from the mall, toward the street.
-        const shaft = frame(TOWER, [tower.x - mall.x, tower.z - mall.z]);
-        if (shaft) {
-          const bayRadius = shaft.hx * 0.6;
-          const bayHeight = tower.height - base + 3;
-          const bay = new THREE.Mesh(
-            new THREE.CylinderGeometry(bayRadius, bayRadius, bayHeight, 28, 1, false, -Math.PI / 2, Math.PI),
-            atriumGlass,
-          );
-          bay.position.set(0, base + bayHeight / 2, shaft.hz - bayRadius * 0.45);
-          bay.castShadow = true;
-          shaft.g.add(bay);
-          for (let y = base + FLOOR; y < base + bayHeight; y += FLOOR) {
-            const mullion = new THREE.Mesh(new THREE.TorusGeometry(bayRadius + 0.05, 0.12, 4, 20, Math.PI), silverPanel);
-            mullion.rotation.x = Math.PI / 2;
-            mullion.rotation.z = Math.PI;
-            mullion.position.set(0, y, shaft.hz - bayRadius * 0.45);
-            shaft.g.add(mullion);
+        // Cream panels with small punched windows in groups of four.
+        const punched = rectPane(1, 1.6);
+        for (const edge of walls(TOWER)) {
+          const groups = Math.max(1, Math.round(edge.length / 9));
+          for (let g = 0; g < groups; g++) {
+            const centre = edge.length * (g + 0.5) / groups;
+            for (let y = mall.height + 2; y < tower.height - 3; y += 3.7) {
+              for (const offset of [-2.1, -0.7, 0.7, 2.1]) addOnWall(group, edge, centre + offset, y, punched, archDark, 0.16);
+            }
           }
-          addCylinder(shaft.g, bayRadius + 0.5, bayRadius + 0.5, 0.7, [0, base + bayHeight + 0.35, shaft.hz - bayRadius * 0.45], silverPanel, 28);
-          // Recessed service slots down the two end walls.
-          for (const side of [-1, 1]) {
-            addBox(shaft.g, [0.5, tower.height - base - 8, shaft.hz * 0.5], [side * (shaft.hx + 0.1), base + (tower.height - base) / 2, -shaft.hz * 0.2], ribbonGlass);
-          }
-          addBox(shaft.g, [shaft.hx * 1.1, 4.5, shaft.hz * 1.0], [0, tower.height + 3, -shaft.hz * 0.1], plantGrey);
-          addBox(shaft.g, [shaft.hx * 0.5, 2.6, shaft.hz * 0.6], [-shaft.hx * 0.2, tower.height + 6.5, -shaft.hz * 0.1], roofGrey);
-          addCylinder(shaft.g, 0.35, 0.5, 13, [shaft.hx * 0.3, tower.height + 11.5, -shaft.hz * 0.1], accent, 8);
         }
-        solid(tower.x, tower.z, Math.max(tower.width, tower.depth) / 2, tower.height + 6);
-        colliderTop = mall.height + 2;
+        slab(TOWER, tower.height, 1.4, 1.01, paleConcrete);
+        slab(TOWER, tower.height + 1.4, 0.08, 0.93, plantGrey);
+        addBox(group, [tower.width * 0.3, 3.2, tower.depth * 0.3], [tower.x, tower.height + 3, tower.z], plantGrey);
+        solid(tower.x, tower.z, Math.max(tower.width, tower.depth) / 2, tower.height + 4.6);
       }
     } else if (landmark.kind === "amphitheatre") {
-      // A stepped half-bowl of seating round a lakeside stage. Each tier is a
-      // half-drum a little taller and wider than the one inside it.
-      const bowl = anchor(1065574904);
-      const reach = (bowl ? Math.min(bowl.width, bowl.depth) : Math.min(width, depth)) * 0.4;
-      const TIERS = 9;
-      for (let tier = 0; tier < TIERS; tier++) {
-        const radius = reach * (0.42 + (tier / (TIERS - 1)) * 0.58);
-        const height = 0.9 + tier * 0.95;
-        const seating = new THREE.Mesh(
-          new THREE.CylinderGeometry(radius, radius, height, 48, 1, false, Math.PI / 2, Math.PI),
-          tier % 2 ? lawn : paleConcrete,
-        );
-        seating.position.set(0, 1.2 + height / 2, -reach * 0.1);
-        seating.castShadow = true;
-        seating.receiveShadow = true;
-        group.add(seating);
-      }
-      // Aisles cut through the tiers, the stage, and its shell canopy.
-      for (const angle of [-0.9, -0.3, 0.3, 0.9]) {
-        const aisle = addBox(group, [1.6, 0.2, reach * 0.56], [Math.sin(angle) * reach * 0.72, 1.2 + (TIERS - 1) * 0.95 + 1, -reach * 0.1 - Math.cos(angle) * reach * 0.72], whiteStone);
-        aisle.rotation.y = angle;
-        aisle.rotation.x = -0.18;
-      }
-      addCylinder(group, reach * 0.4, reach * 0.42, 1.4, [0, 1.9, -reach * 0.1], whiteStone, 40);
-      addBox(group, [reach * 0.9, 1.6, reach * 0.3], [0, 2, reach * 0.12], whiteStone);
-      const canopy = new THREE.Mesh(new THREE.SphereGeometry(reach * 0.36, 28, 10, 0, Math.PI, 0, Math.PI / 2), marble);
-      canopy.scale.set(1.3, 0.62, 0.8);
-      canopy.position.set(0, 2.8, reach * 0.2);
-      canopy.castShadow = true;
-      group.add(canopy);
-      addBox(group, [reach * 1.1, 0.5, 1.2], [0, 3, reach * 0.2], accent);
-    } else if (landmark.kind === "police-plaza") {
-      // Blue curtain-wall tower on a shopping podium.
-      const TOWER = 366560370;
-      const mass = dressTower(TOWER, { floor: 3.8, band: silverPanel, bandHeight: 0.5, crown: silverPanel, start: 12 });
-      if (mass) {
-        slab(TOWER, 0, 9, 1.035, paleConcrete);
-        slab(TOWER, 9, 0.8, 1.06, silverPanel);
-        slab(TOWER, 2, 5, 1.04, ribbonGlass);
-        for (const edge of walls(TOWER)) {
-          if (edge.length < 12) continue;
-          for (let along = 4; along < edge.length - 2; along += 8) {
-            const fin = addBox(group, [0.5, mass.height - 11, 0.9], [edge.ax + edge.dx * along + edge.nx * 0.4, 10 + (mass.height - 11) / 2, edge.az + edge.dz * along + edge.nz * 0.4], silverPanel);
-            fin.rotation.y = edge.rotationY;
+      // Hatirjheel Amphitheatre: an open red stage disk at the lake tip, three
+      // separate raked fans of maroon seats on steel V-piers over the water, a
+      // big fan of pink paved terraces on the shore side, and a covered ramp up
+      // from the plaza. Local +Z points east (the audience faces the stage and
+      // the open lake), local +X points north. Water is at local y ≈ -0.4.
+      const DECK = 3;
+      colliderTop = DECK + 0.6;
+      perchTarget = [-6, 18];
+      // Everything radiates from the stage centre (the round lobe of OSM 1065574904).
+      const bowl = new THREE.Group();
+      bowl.position.set(-6, 0, 18);
+      group.add(bowl);
+      // Stage: coral-red disk on a black plinth band, a pale concrete apron, a
+      // black parapet on the water side.
+      addCylinder(bowl, 9.6, 9.6, 1.1, [0, DECK - 0.05, 0], recess, 36);
+      addCylinder(bowl, 9.5, 9.5, 0.12, [0, DECK + 0.54, 0], monumentRed, 36);
+      addArcSlab(bowl, 9.6, 13, 0, Math.PI * 2, DECK - 0.6, 0.6, paleConcrete, 36);
+      addArcSlab(bowl, 12.6, 13, -1.75, 3.5, DECK, 1.1, recess, 20);
+      // A seat fan: rows of maroon benches rising away from the stage, each row
+      // a stepped slab with its own underside (so water shows below), a light
+      // grey stair aisle down the middle, and steel V-piers to the lake bed.
+      const fan = (start: number, length: number, inner: number, outer: number, rise: number, overWater: boolean) => {
+        const rows = Math.round((outer - inner) / 2.2);
+        const depth = (outer - inner) / rows;
+        const step = rise / rows;
+        for (let row = 0; row < rows; row++) {
+          const rowTop = DECK + step * (row + 1);
+          const r = inner + row * depth;
+          addArcSlab(bowl, r, r + depth, start, length, rowTop - step - 0.7, step + 0.7, plazaBrick, 10);
+          addArcSlab(bowl, r, r + depth, start + length / 2 - 0.03, 0.06, rowTop - 0.3, 0.36, paleConcrete, 1);
+        }
+        // Back rail and side cheeks.
+        addArcSlab(bowl, outer, outer + 0.5, start, length, DECK + rise - 0.6, 1.7, recess, 10);
+        if (!overWater) return;
+        for (const theta of [start + 0.05, start + length / 2, start + length - 0.05]) {
+          for (const along of [0.3, 0.65, 0.95]) {
+            const r = inner + (outer - inner) * along;
+            const underside = DECK + rise * along - 0.9;
+            for (const lean of [-0.32, 0.32]) {
+              const strut = addBox(bowl, [0.45, underside + 0.6, 0.45], [Math.sin(theta) * r, (underside - 0.6) / 2, Math.cos(theta) * r], roofGrey);
+              strut.rotation.set(0, theta, lean, "YXZ");
+            }
           }
         }
+      };
+      fan(3.7, 0.92, 13, 37, 9.5, true); // the steep separate fan to the south
+      fan(2.76, 0.86, 13, 35, 8.6, true); // the main centre fan, facing east
+      fan(0.95, 0.9, 13, 30, 4.4, true); // the low fan wrapping the north side
+      // Pink paved terraces stepping up from the stage to the shore road.
+      for (let terrace = 0; terrace < 8; terrace++) {
+        const r = 13 + terrace * 5.2;
+        const terraceTop = DECK + 0.5 * (terrace + 1);
+        addArcSlab(bowl, r, r + 5.2, 1.93, 0.75, terraceTop - 1.2, 1.2, salmon, 10);
+        addArcSlab(bowl, r, r + 0.35, 1.93, 0.75, terraceTop, 0.06, paleConcrete, 10);
       }
-    } else if (landmark.kind === "brac") {
-      // Brick-red office tower with deep ribbon windows.
-      const TOWER = 229029081;
-      const mass = dressTower(TOWER, { floor: 3.6, band: ribbonGlass, bandHeight: 1.7, crown: brickTrim, start: 6.5, grow: 1.004 });
-      if (mass) {
-        slab(TOWER, 0, 4.6, 1.02, ribbonGlass);
-        slab(TOWER, 4.6, 0.7, 1.05, paleConcrete);
-        const shaft = frame(TOWER, [1, 0]);
-        if (shaft) {
-          // Glazed lift core standing proud of the brick on the entrance face.
-          addBox(shaft.g, [shaft.hx * 0.34, mass.height + 4, 1.6], [0, (mass.height + 4) / 2, shaft.hz + 0.6], darkGlass);
-          for (const side of [-1, 1]) addBox(shaft.g, [0.7, mass.height + 4.6, 2], [side * shaft.hx * 0.19, (mass.height + 4.6) / 2, shaft.hz + 0.6], paleConcrete);
+      // Plaza on the shore behind the fans, and the shore piers under the stage.
+      addArcSlab(bowl, 38, 60, 2.05, 1.0, -0.9, 1.05, salmon, 12);
+      for (let pier = 0; pier < 8; pier++) {
+        const theta = (pier / 8) * Math.PI * 2;
+        for (const lean of [-0.3, 0.3]) {
+          const strut = addBox(bowl, [0.5, DECK + 0.5, 0.5], [Math.sin(theta) * 8, (DECK - 0.8) / 2, Math.cos(theta) * 8], roofGrey);
+          strut.rotation.set(0, theta, lean, "YXZ");
         }
       }
+      // Covered ramp sweeping along the shore from the plaza up to the top of the
+      // terraces: a stepped walkway under a run of pale roof panels on posts.
+      for (let segment = 0; segment < 10; segment++) {
+        const start = 2.2 + segment * 0.11;
+        const walkTop = DECK + 4.6 - segment * 0.75;
+        addArcSlab(bowl, 50, 54, start, 0.11, walkTop - 0.6, 0.6, paleConcrete, 2);
+        addArcSlab(bowl, 49.4, 54.6, start + 0.01, 0.09, walkTop + 3.4, 0.25, silverPanel, 2);
+        const post = start + 0.055;
+        addCylinder(bowl, 0.18, 0.18, walkTop + 3.5, [Math.sin(post) * 54.3, (walkTop + 3.5) / 2 - 0.4, Math.cos(post) * 54.3], roofGrey, 5);
+      }
+      solid(-27, 5, 10, DECK + 9.5);
+      solid(-8, -7, 11, DECK + 8.6);
+      solid(16, 22, 8, DECK + 4.4);
+      clearSite(-3, -14, 42, 46);
+    } else if (landmark.kind === "police-plaza") {
+      // Police Plaza Concord, Gulshan Avenue: a four-storey shopping podium
+      // over the whole lakeside site, banded in chocolate brown with a cream
+      // diamond-lattice frieze and a glass shopfront, carrying two cream slab
+      // towers. Brown piers run up every bay and corner, green glass strips
+      // fill the tower corners, and the top two floors are a glazed crown
+      // band. The main slab (40 × 24 m, long side N–S) stands toward the
+      // avenue; the narrower one is set back behind it on the west. The OSM
+      // extrusion is the podium; the frame's +Z faces the avenue (east).
+      const TOWER = 366560370;
+      const podium = anchor(TOWER);
+      const site = frame(TOWER, [1, 0]);
+      if (podium && site) {
+        const PODIUM = podium.height;
+        slab(TOWER, 0.4, 4.2, 1.006, ribbonGlass);
+        for (const [y, h] of [[4.6, 0.6], [9.4, 0.5], [15.6, 0.5]] as const) slab(TOWER, y, h, 1.01, landmarkBark);
+        slab(TOWER, PODIUM - 0.5, 0.9, 1.016, landmarkBark);
+        slab(TOWER, PODIUM + 0.4, 0.1, 0.97, roofGrey);
+        // The diamond lattice frieze between the two upper bands.
+        for (const edge of walls(TOWER)) {
+          if (edge.length < 6) continue;
+          const count = Math.floor(edge.length / 4.4);
+          for (let index = 0; index < count; index++) {
+            const along = (edge.length / count) * (index + 0.5);
+            for (const tilt of [-0.72, 0.72]) {
+              const bar = addBox(group, [0.24, 6.6, 0.16], [edge.ax + edge.dx * along + edge.nx * 0.3, 12.65, edge.az + edge.dz * along + edge.nz * 0.3], landmarkBark);
+              bar.rotation.set(0, edge.rotationY, tilt);
+            }
+          }
+        }
+        const turn = site.g.rotation.y;
+        const toGroup = (x: number, z: number): [number, number] => [
+          site.g.position.x + x * Math.cos(turn) + z * Math.sin(turn),
+          site.g.position.z - x * Math.sin(turn) + z * Math.cos(turn),
+        ];
+        const pane = rectPane(2.4, 1.8);
+        const slabTower = (x0: number, x1: number, z0: number, z1: number, roof: number) => {
+          const w = x1 - x0;
+          const d = z1 - z0;
+          const cx = (x0 + x1) / 2;
+          const cz = (z0 + z1) / 2;
+          const rise = roof - PODIUM;
+          addBox(site.g, [w, rise, d], [cx, PODIUM + rise / 2, cz], cream);
+          // Glazed crown band over the top two floors, then a cream parapet.
+          addBox(site.g, [w + 0.3, 6.4, d + 0.3], [cx, roof - 3.6, cz], glass);
+          addBox(site.g, [w + 0.7, 1.2, d + 0.7], [cx, roof + 0.2, cz], cream);
+          addBox(site.g, [w - 0.6, 0.12, d - 0.6], [cx, roof + 0.86, cz], roofGrey);
+          const faces = [
+            { length: w, nx: 0, nz: 1, at: (u: number): [number, number] => [x0 + u, z1], turnY: 0 },
+            { length: w, nx: 0, nz: -1, at: (u: number): [number, number] => [x1 - u, z0], turnY: Math.PI },
+            { length: d, nx: 1, nz: 0, at: (u: number): [number, number] => [x1, z1 - u], turnY: Math.PI / 2 },
+            { length: d, nx: -1, nz: 0, at: (u: number): [number, number] => [x0, z0 + u], turnY: -Math.PI / 2 },
+          ];
+          for (const face of faces) {
+            const bays = Math.max(2, Math.round(face.length / 4));
+            const bay = face.length / bays;
+            // Brown piers at every bay line, full height, standing proud.
+            for (let index = 0; index <= bays; index++) {
+              const [px, pz] = face.at(index * bay);
+              const corner = index === 0 || index === bays;
+              const pier = addBox(site.g, [corner ? 1.3 : 0.8, rise + 0.8, corner ? 1.3 : 0.5], [px + face.nx * 0.2, PODIUM + (rise + 0.8) / 2, pz + face.nz * 0.2], landmarkBark);
+              pier.rotation.y = face.turnY;
+            }
+            for (let index = 0; index < bays; index++) {
+              const [bx, bz] = face.at((index + 0.5) * bay);
+              // Green glass fills one corner bay of each face full height (so
+              // every corner carries one glass strip); the rest are punched.
+              if (index === bays - 1) {
+                addBox(site.g, face.nx ? [0.2, rise - 7.2, bay - 1] : [bay - 1, rise - 7.2, 0.2], [bx + face.nx * 0.08, PODIUM + (rise - 7.2) / 2, bz + face.nz * 0.08], glass);
+                continue;
+              }
+              for (let y = PODIUM + 1.2; y < roof - 8; y += 3.3) {
+                const opening = new THREE.Mesh(pane, darkGlass);
+                opening.position.set(bx + face.nx * 0.08, y, bz + face.nz * 0.08);
+                opening.rotation.y = face.turnY;
+                site.g.add(opening);
+              }
+            }
+          }
+          const [gx, gz] = toGroup(cx, cz);
+          const c = Math.abs(Math.cos(turn));
+          const s = Math.abs(Math.sin(turn));
+          solidBox(gx, gz, c * w / 2 + s * d / 2, s * w / 2 + c * d / 2, roof + 0.8);
+        };
+        const MAIN_TOP = 72;
+        slabTower(-24, 16, 2, 26, MAIN_TOP);
+        slabTower(-10, 12, -20, 3, 70);
+        // The lit sign frame and the plant house on the main roof.
+        const deck = MAIN_TOP + 0.92;
+        for (const x of [-7, 7]) addBox(site.g, [0.4, 5.4, 0.4], [x - 4, deck + 2.7, 8], silverPanel);
+        for (const y of [1.6, 5.2]) addBox(site.g, [14.4, 0.3, 0.3], [-4, deck + y, 8], silverPanel);
+        for (let index = 0; index < 4; index++) {
+          const strut = addBox(site.g, [0.2, 4.6, 0.2], [-9.25 + index * 3.5, deck + 3.4, 8], silverPanel);
+          strut.rotation.z = index % 2 ? 0.66 : -0.66;
+        }
+        addBox(site.g, [9, 3.4, 6], [-4, deck + 1.7, 18], plantGrey);
+        colliderTop = PODIUM + 0.6;
+        perchTarget = toGroup(12, 22);
+      }
+    } else if (landmark.kind === "brac") {
+      // BRAC Centre, Mohakhali (21 floors, 81 m): board-marked grey fair-faced
+      // concrete, not brick. Every floor is a deep projecting concrete ledge
+      // over a recessed dark ribbon window, so the tower reads as strong
+      // grey and black strata, held between plain concrete corner piers. A
+      // dark glazed stair slot runs full height in the re-entrant corner of
+      // the north entrance notch, where a coffered canopy on round pilotis
+      // shelters the drop-off under rain trees and krishnachura.
+      const TOWER = 229029081;
+      const mass = anchor(TOWER);
+      const ring = partOutlines.get(TOWER);
+      if (mass && ring) {
+        const H = mass.height;
+        const FLOOR = 3.7;
+        slab(TOWER, 0, 7.8, 1.012, boardConcrete);
+        for (let y = 8.6; y < H - 2; y += FLOOR) slab(TOWER, y, 1.15, 1.065, boardConcrete);
+        slab(TOWER, H - 0.6, 2, 1.075, boardConcrete);
+        slab(TOWER, H + 1.4, 0.1, 0.93, roofGrey);
+        addBox(group, [8, 3.2, 6], [mass.x - 3, H + 3, mass.z + 4], boardConcrete);
+        addBox(group, [4, 2.2, 3], [mass.x + 6, H + 2.5, mass.z - 3], plantGrey);
+        // Corner piers on the convex corners; the stair slot in the notch.
+        const points = ring.map(([x, z]) => [x - group.position.x, z - group.position.z] as MapPoint);
+        let area = 0;
+        points.forEach(([ax, az], index) => {
+          const [bx, bz] = points[(index + 1) % points.length];
+          area += ax * bz - bx * az;
+        });
+        const edges = wallEdges(points);
+        points.forEach(([px, pz], index) => {
+          const [ax, az] = points[(index - 1 + points.length) % points.length];
+          const [bx, bz] = points[(index + 1) % points.length];
+          const cross = (px - ax) * (bz - pz) - (pz - az) * (bx - px);
+          const outgoing = edges.find((edge) => Math.abs(edge.ax - px) < 0.01 && Math.abs(edge.az - pz) < 0.01) ?? edges[0];
+          const incoming = edges.find((edge) => Math.abs(edge.ax - ax) < 0.01 && Math.abs(edge.az - az) < 0.01) ?? edges[0];
+          if (cross * area > 0) {
+            const pier = addBox(group, [2.6, H + 1.6, 2.6], [px, (H + 1.6) / 2, pz], boardConcrete);
+            pier.rotation.y = outgoing.rotationY;
+            return;
+          }
+          // Re-entrant corner: a dark glazed slot standing out past the
+          // ledges, between two concrete fins along the notch walls.
+          let nx = outgoing.nx + incoming.nx;
+          let nz = outgoing.nz + incoming.nz;
+          const length = Math.hypot(nx, nz) || 1;
+          nx /= length;
+          nz /= length;
+          const slot = addBox(group, [3.6, H - 8.2, 0.6], [px + nx * 1.5, 8.2 + (H - 8.2) / 2, pz + nz * 1.5], darkGlass);
+          slot.rotation.y = Math.atan2(nx, nz);
+          for (const edge of [outgoing, incoming]) {
+            const along = edge === outgoing ? 2.4 : edge.length - 2.4;
+            const fin = addBox(group, [0.8, H - 8, 2.4], [edge.ax + edge.dx * along + edge.nx * 1.1, 8 + (H - 8) / 2, edge.az + edge.dz * along + edge.nz * 1.1], boardConcrete);
+            fin.rotation.y = edge.rotationY;
+          }
+        });
+        // The coffered drop-off canopy on round pilotis in the north notch.
+        const canopyX = mass.x + 8.5;
+        const canopyZ = mass.z - 15.5;
+        addBox(group, [14, 1, 10.5], [canopyX, 7.4, canopyZ], boardConcrete);
+        for (const offset of [-4.2, 0, 4.2]) addBox(group, [0.5, 0.9, 10.3], [canopyX + offset, 6.5, canopyZ], plantGrey);
+        for (const [ox, oz] of [[-5.5, -4.6], [0, -4.6], [5.5, -4.6], [5.5, 2.5]] as const) {
+          addCylinder(group, 0.45, 0.45, 6.9, [canopyX + ox, 3.45, canopyZ + oz], boardConcrete, 8);
+        }
+        for (const [tx, tz, radius, canopy] of [
+          [-9, -30, 6.2, landmarkCanopy],
+          [5, -32, 5.6, landmarkKrishnachura],
+          [19, -27, 6, landmarkCanopy],
+          [-22, -24, 5.2, landmarkKrishnachura],
+        ] as const) {
+          addLandmarkTree(group, mass.x + tx, mass.z + tz, radius, 7.5, canopy);
+        }
+        clearSite(mass.x, mass.z - 30, 28, 11);
+        colliderTop = H + 1.6;
+        perchTarget = [mass.x + 12, mass.z - 4];
+      }
     } else if (landmark.kind === "hotel") {
-      // Slim dark-glass hotel tower with a lit crown.
+      // Four Points by Sheraton (Doreen Tower), Gulshan 2: a slim white
+      // panelled wedge with a ledge at every floor, a green glass sail that
+      // sweeps up its curved NE face and widens toward the top, a glazed sky
+      // lounge under a cantilevered, upswept prow canopy reaching toward
+      // Gulshan Avenue, and a gold perforated screen on the podium's NE corner.
       const TOWER = 498432169;
-      const mass = dressTower(TOWER, { floor: 3.5, band: silverPanel, bandHeight: 0.4, crown: silverPanel, start: 14 });
-      if (mass) {
-        slab(TOWER, 0, 10, 1.05, paleConcrete);
-        slab(TOWER, 2, 6, 1.056, ribbonGlass);
-        slab(TOWER, 10, 0.8, 1.1, silverPanel);
-        slab(TOWER, mass.height - 7, 5, 1.012, atriumGlass);
-        addCylinder(group, 0.3, 0.45, 12, [mass.x, mass.height + 9, mass.z], accent, 8);
+      const mass = anchor(TOWER);
+      const local = partOutline(TOWER);
+      if (mass && local) {
+        const ring = local.map(([x, z]) => [x + mass.x, z + mass.z] as MapPoint);
+        const NE_X = Math.SQRT1_2;
+        const NE_Z = -Math.SQRT1_2;
+        const ROOF = mass.height;
+        // Podium: grey glass all round, the gold screen on the NE corner.
+        slab(TOWER, 0, 14, 1.03, ribbonGlass);
+        slab(TOWER, 14, 0.6, 1.06, whiteStone);
+        for (const edge of wallEdges(offsetPolygon(ring, 0.7))) {
+          if (edge.nx * NE_X + edge.nz * NE_Z < 0.25) continue;
+          addOnWall(group, edge, edge.length / 2, 1.2, rectPane(edge.length + 0.05, 12.4), accent, 0.02);
+        }
+        // A projecting white ledge at every floor.
+        for (let y = 17.6; y < ROOF - 1; y += 3.6) slab(TOWER, y, 0.32, 1.05, whiteStone);
+        // The glass sail: a band across the NE face, narrow over the podium
+        // and opening out toward the top, standing proud of the ledges.
+        const sailEdges = wallEdges(offsetPolygon(ring, 0.75)).filter((edge) => edge.nx * NE_X + edge.nz * NE_Z > 0.45);
+        const sailLength = sailEdges.reduce((sum, edge) => sum + edge.length, 0);
+        const sailQuads: Array<[QuadPoint, QuadPoint, QuadPoint, QuadPoint, QuadPoint]> = [];
+        for (let y = 14.6; y < ROOF; y += 3.6) {
+          const top = Math.min(ROOF, y + 3.6);
+          // One edge runs straight up by the E corner; the other swings out
+          // toward the N corner in a concave curve as the sail climbs.
+          const rise = clamp((y - 14) / 70, 0, 1);
+          const to = sailLength - 1.6;
+          const from = Math.max(1.4, to - (3.2 + (sailLength - 6.5) * Math.sqrt(rise)));
+          let start = 0;
+          for (const edge of sailEdges) {
+            const a = Math.max(from, start) - start;
+            const b = Math.min(to, start + edge.length) - start;
+            if (b > a + 0.05) {
+              const p0: [number, number] = [edge.ax + edge.dx * a, edge.az + edge.dz * a];
+              const p1: [number, number] = [edge.ax + edge.dx * b, edge.az + edge.dz * b];
+              sailQuads.push([[p0[0], y, p0[1]], [p1[0], y, p1[1]], [p1[0], top, p1[1]], [p0[0], top, p0[1]], [edge.nx, 0, edge.nz]]);
+            }
+            start += edge.length;
+          }
+        }
+        addQuads(group, sailQuads, glass);
+        // The narrow glass strip up the N corner, and the column of punched
+        // windows on the plain SW face.
+        for (const edge of wallEdges(ring)) {
+          const facing = edge.nx * NE_X + edge.nz * NE_Z;
+          if (edge.nz < -0.8 && facing < 0.6) {
+            addOnWall(group, edge, edge.length * 0.78, 15, rectPane(4, ROOF - 16), glass, 0.75);
+          } else if (edge.length > 18 && facing < -0.6) {
+            for (let y = 16.2; y < ROOF - 3; y += 3.6) {
+              for (const along of [0.42, 0.58]) addOnWall(group, edge, edge.length * along, y, rectPane(1.4, 1.9), ribbonGlass, 0.36);
+            }
+          }
+        }
+        // Sky lounge, then the cantilevered prow canopy sweeping up to the NE.
+        slab(TOWER, ROOF, 4.2, 0.96, atriumGlass);
+        let plate = offsetPolygon(ring, 1.2);
+        plate = plate.map(([x, z]) => {
+          const reach = (x - mass.x) * NE_X + (z - mass.z) * NE_Z;
+          const push = reach > 0 ? 5 * Math.min(1, reach / 10) : 0;
+          return [x + NE_X * push, z + NE_Z * push] as MapPoint;
+        });
+        const plateGeometry = new THREE.ExtrudeGeometry(polygonShape(plate), { depth: 1.1, bevelEnabled: false, curveSegments: 1 });
+        plateGeometry.rotateX(-Math.PI / 2);
+        const platePositions = plateGeometry.getAttribute("position");
+        let prowReach = -Infinity;
+        for (let index = 0; index < platePositions.count; index++) {
+          const reach = (platePositions.getX(index) - mass.x) * NE_X + (platePositions.getZ(index) - mass.z) * NE_Z;
+          prowReach = Math.max(prowReach, reach);
+          platePositions.setY(index, platePositions.getY(index) + (Math.max(0, reach) / 10) ** 2 * 1.6);
+        }
+        plateGeometry.computeVertexNormals();
+        const canopy = new THREE.Mesh(plateGeometry, glass);
+        canopy.position.y = ROOF + 4.2;
+        canopy.castShadow = true;
+        canopy.receiveShadow = true;
+        group.add(canopy);
+        const prowX = mass.x + NE_X * (prowReach - 2.5);
+        const prowZ = mass.z + NE_Z * (prowReach - 2.5);
+        solid(prowX, prowZ, 3, ROOF + 7.5);
+        perchTarget = [prowX, prowZ];
+        colliderTop = ROOF + 5.3;
       }
     } else if (landmark.kind === "parliament") {
       // Kahn's citadel is three concentric rings the OSM outlines already carry:
       // a 34 m ring of office blocks, a 42 m star of light wells, and the 46 m
       // octagonal assembly chamber. What makes it read from the air is the
       // finish: marble pour lines on grey concrete, giant geometric openings in
-      // the outer walls, terracotta roof terraces, and the two plazas it stands
+      // the outer walls, grey roof terraces, and the two plazas it stands
       // between: red brick to the south, white marble to the north.
       const CITADEL = 24448328;
       const STAR = 443036732;
@@ -4788,13 +6146,14 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
       for (const [osmId, wallTop] of [[CITADEL, 34], [STAR, 42], [CHAMBER, 46]] as const) {
         for (let y = 3.2; y < wallTop - 1; y += 3.2) slab(osmId, y, 0.26, 1.003, marble);
       }
-      // Terracotta terraces inside a concrete parapet.
-      slab(CITADEL, 34, 1.2, 1.004, concrete);
-      slab(CITADEL, 35.2, 0.08, 0.962, terracotta);
-      slab(STAR, 42, 1.0, 1.004, concrete);
-      slab(STAR, 43, 0.08, 0.95, terracotta);
-      slab(CHAMBER, 46, 1.0, 1.004, concrete);
-      slab(CHAMBER, 47, 0.08, 0.94, terracotta);
+      // From the air the roofscape is grey board-marked concrete inside white
+      // marble parapet bands; only the South Plaza is red brick.
+      slab(CITADEL, 34, 1.2, 1.004, marble);
+      slab(CITADEL, 35.2, 0.08, 0.962, boardConcrete);
+      slab(STAR, 42, 1.0, 1.004, marble);
+      slab(STAR, 43, 0.08, 0.95, boardConcrete);
+      slab(CHAMBER, 46, 1.0, 1.004, marble);
+      slab(CHAMBER, 47, 0.08, 0.94, boardConcrete);
 
       // The giant openings. One to each flat wall of the outer blocks, sized to
       // the wall: circles on the long entrance and lounge faces, and circles
@@ -4832,10 +6191,9 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
 
       if (chamber) {
         const radius = Math.min(chamber.width, chamber.depth) * 0.5;
-        // The chamber roof barely breaks the skyline: a low clerestory ring and
-        // the white folded umbrella that lights the hall below.
-        addCylinder(group, radius * 0.6, radius * 0.62, 2.6, [chamber.x, 47 + 1.3, chamber.z], concrete, 8);
-        addLathe(group, [[radius * 0.6, 0], [radius * 0.34, 2.3], [radius * 0.1, 3.3], [0.001, 3.5]], 16, [chamber.x, 49.6, chamber.z], marble, true);
+        // There is no dome: the chamber roof is a white umbrella disc that
+        // barely breaks the parapet line (top ≈ 1 m above it).
+        addCylinder(group, radius * 0.62, radius * 0.64, 0.9, [chamber.x, 47.55, chamber.z], marble, 16);
         for (let slotIndex = 0; slotIndex < 8; slotIndex++) {
           const angle = (slotIndex / 8) * Math.PI * 2 + Math.PI / 8;
           const court = addBox(group, [5.4, 0.3, 2.6], [chamber.x + Math.cos(angle) * radius * 0.8, 47.1, chamber.z + Math.sin(angle) * radius * 0.8], recess);
@@ -4846,22 +6204,51 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
       if (citadel) {
         const southEdge = citadel.z + citadel.depth / 2;
         const northEdge = citadel.z - citadel.depth / 2;
-        // South Plaza: two brick tiers across the lake, reached by a brick causeway.
-        const plazaZ = southEdge + 26 + 50;
-        addBox(group, [232, 1.2, 108], [citadel.x, 0.6, plazaZ], plazaBrick);
-        addBox(group, [220, 1, 98], [citadel.x, 1.7, plazaZ - 1], terracotta);
-        addBox(group, [20, 2.4, 40], [citadel.x, 1.2, southEdge + 14], plazaBrick);
-        for (const offset of [-73, 0, 73]) addBox(group, [0.6, 0.12, 98], [citadel.x + offset, 2.26, plazaZ - 1], marble);
-        for (const offset of [-16, 16]) addBox(group, [220, 0.12, 0.6], [citadel.x, 2.3, plazaZ - 1 + offset], marble);
-        for (const side of [-1, 1]) addBox(group, [3.4, 3, 98], [citadel.x + side * 112, 1.5, plazaZ - 1], plazaBrick);
-        // Presidential Plaza: white marble steps on the north side.
-        addBox(group, [118, 1.2, 64], [citadel.x, 0.6, northEdge - 24], marble);
-        addBox(group, [96, 1.1, 46], [citadel.x, 1.75, northEdge - 18], whiteStone);
-        addBox(group, [60, 0.2, 26], [citadel.x, 2.4, northEdge - 20], lawn);
+        const cx = citadel.x;
+        // South Plaza: a bright red-brick deck ≈ 170 × 120 m, 20 m south of the
+        // building across the moat. The north 40 % is a raised upper deck with a
+        // white grid and rows of skylight boxes; the south 60 % is a lower deck
+        // of three big flat red planes, with darker ramps down both sides.
+        const plazaNorth = southEdge + 20;
+        const UPPER = 48;
+        const LOWER = 72;
+        const upperZ = plazaNorth + UPPER / 2;
+        const lowerZ = plazaNorth + UPPER + LOWER / 2;
+        addBox(group, [170, 2.6, UPPER], [cx, 1.3, upperZ], plazaRed);
+        addBox(group, [146, 1.3, LOWER], [cx, 0.65, lowerZ], plazaRed);
+        for (const side of [-1, 1]) {
+          // Side ramps falling from the upper deck to the street.
+          const ramp = addBox(group, [12, 0.8, Math.hypot(LOWER, 2.2)], [cx + side * 79, 1.1, lowerZ], plazaBrick);
+          ramp.rotation.x = Math.atan2(2.2, LOWER);
+          addBox(group, [1, 1.6, LOWER + UPPER], [cx + side * 85.5, 0.8, plazaNorth + (UPPER + LOWER) / 2], plazaBrick);
+        }
+        // Upper deck grid and skylights; lower deck split into three planes.
+        for (const offset of [-56, 0, 56]) addBox(group, [0.7, 0.1, UPPER - 2], [cx + offset, 2.65, upperZ], marble);
+        addBox(group, [168, 0.1, 0.7], [cx, 2.65, upperZ], marble);
+        for (const offset of [-24, 24]) addBox(group, [0.7, 0.1, LOWER - 2], [cx + offset, 1.35, lowerZ], marble);
+        for (let row = 0; row < 2; row++) {
+          for (let column = 0; column < 9; column++) {
+            addBox(group, [2.6, 1.4, 2.6], [cx - 72 + column * 18, 3.3, plazaNorth + 12 + row * 24], marble);
+          }
+        }
+        // A single narrow brick causeway across the moat to the south towers.
+        addBox(group, [8, 2.4, 26], [cx, 1.2, southEdge + 7], plazaBrick);
+        // Tree lines along the avenues that flank the plaza.
+        for (const side of [-1, 1]) {
+          for (let index = 0; index < 8; index++) addLandmarkTree(group, cx + side * 102, plazaNorth + 6 + index * 16, 4.4, 5.6, landmarkCanopy);
+        }
+        // Presidential Plaza to the north: white marble round a red-brick centre.
+        addBox(group, [96, 1.2, 70], [cx, 0.6, northEdge - 36], marble);
+        addBox(group, [52, 0.2, 40], [cx, 1.3, northEdge - 38], plazaRed);
+        // Keep both plazas free of generic blocks and park trees; the lawns
+        // round them are DHAKA_PARKS ellipses, the moat is map water.
+        clearSite(cx, plazaNorth + (UPPER + LOWER) / 2, 92, (UPPER + LOWER) / 2 + 6);
+        clearSite(cx, northEdge - 36, 52, 40);
       }
     } else if (landmark.kind === "lalbagh-fort") {
       // An unfinished Mughal fort: a walled garden holding the Diwan-i-Aam, the
-      // tomb of Pari Bibi and the three-domed mosque on one east-west axis.
+      // tomb of Pari Bibi and the three-domed mosque on one east-west axis,
+      // laid out on a grid of brick paths with a big square tank to the east.
       const GROUNDS = 624024881;
       const TOMB = 624024857;
       const MOSQUE = 624024874;
@@ -4883,35 +6270,85 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
           addLathe(group, domeProfile(3.2, 2.8, 0.1, 7), 12, [next.ax, 8.2, next.az], whiteStone);
         }
       });
-      const mughalArch = pointedArch(2.6, 5.2);
-      const mughalArchTrim = pointedArch(3.5, 6.2);
+      // The garden from the air: a grid of red-brick paths over the lawn,
+      // paved squares round the tomb and the hall, a square fountain tank
+      // between them, and round half-bastions every ~65 m along the south wall.
+      // Laid out in the grounds' own frame (+Z south) from the satellite plan.
+      const garden = frame(GROUNDS, [0, 1]);
+      if (garden) {
+        const { g, hz } = garden;
+        for (const x of [-141, -78, -18, 35, 84]) addBox(g, [4.5, 0.2, 192], [x, 0.6, -4], brick);
+        for (const z of [-92, -42, 37]) addBox(g, [258, 0.2, 4.5], [-45, 0.62, z], brick);
+        addBox(g, [258, 0.2, 6], [-45, 0.62, 4], brick);
+        addBox(g, [10, 0.3, 10], [-18, 0.75, 4], whiteStone);
+        addBox(g, [7.4, 0.3, 7.4], [-18, 0.8, 4], water);
+        // Clipped hedges along the cross paths that miss the monuments.
+        for (const z of [-92, -42, 37]) {
+          for (const side of [-1, 1]) addBox(g, [252, 0.9, 0.8], [-45, 0.95, z + side * 3.2], landmarkCanopy);
+        }
+        for (const x of [-163, -98, -26, 40, 113]) {
+          addCylinder(g, 4, 4.4, 7, [x, 3.5, hz - 0.2], redBrick, 10);
+          addCylinder(g, 4.5, 4.5, 0.5, [x, 7.2, hz - 0.2], brickTrim, 10);
+        }
+      }
       const tomb = anchor(TOMB);
       if (tomb) {
-        // Pari Bibi's tomb: a square of peach-washed stone, three arched
-        // doors to each face, a bronze dome on an octagonal drum, four turrets.
-        addBays(group, walls(TOMB), {
-          bay: 6.4, minEdge: 6, storeys: [{ y: 2.2, opening: mughalArch, surround: mughalArchTrim }],
-          opening: archDark, surround: cream,
-          pier: { width: 0.9, depth: 0.6, bottom: 0, top: tomb.height, material: cream },
-        });
-        slab(TOMB, 0, 1.6, 1.07, cream);
-        slab(TOMB, tomb.height - 0.6, 1, 1.03, cream);
-        slab(TOMB, tomb.height + 0.4, 1, 1.004, peach);
-        const half = Math.min(tomb.width, tomb.depth) / 2;
-        const domeRadius = half * 0.56;
-        addCylinder(group, domeRadius * 1.05, domeRadius * 1.12, 3.4, [tomb.x, tomb.height + 3.1, tomb.z], peach, 8);
-        addCylinder(group, domeRadius * 1.14, domeRadius * 1.14, 0.5, [tomb.x, tomb.height + 5, tomb.z], cream, 8);
-        addLathe(group, domeProfile(domeRadius, domeRadius * 1.3, 0.12, 14), 28, [tomb.x, tomb.height + 5.2, tomb.z], bronze);
-        addFinial(group, [tomb.x, tomb.height + 5.2 + domeRadius * 1.3, tomb.z], 0.9);
-        for (const sideX of [-1, 1]) {
-          for (const sideZ of [-1, 1]) {
-            const tx = tomb.x + sideX * (tomb.width / 2 - 0.4);
-            const tz = tomb.z + sideZ * (tomb.depth / 2 - 0.4);
-            addCylinder(group, 1.3, 1.5, tomb.height + 2.4, [tx, (tomb.height + 2.4) / 2, tz], peach, 8);
-            addChhatri(group, [tx, tomb.height + 2.4, tz], 3, peach, bronze);
+        // Pari Bibi's tomb: salmon-pink plaster, a tall white pointed-arch
+        // iwan in the middle of every face between two small white-framed
+        // doors, octagonal corner towers with ribbed melon domes, and a dark
+        // green-black copper dome on an octagonal drum (peak ≈ 21 m).
+        const H = tomb.height;
+        const iwan = pointedArch(5, 8.2);
+        const iwanDoor = roundArch(2.2, 3.4);
+        const sideFrame = pointedArch(2.4, 4.2);
+        const sideDoor = roundArch(1.3, 2.3);
+        for (const edge of walls(TOMB)) {
+          if (edge.length < 12) continue;
+          const middle = edge.length / 2;
+          addOnWall(group, edge, middle, 1.6, iwan, whiteStone, 0.14);
+          addOnWall(group, edge, middle, 1.6, iwanDoor, archDark, 0.26);
+          for (const offset of [-1, 1]) {
+            const along = middle + offset * (edge.length / 2 - 5);
+            addOnWall(group, edge, along, 1.6, sideFrame, whiteStone, 0.14);
+            addOnWall(group, edge, along, 1.6, sideDoor, archDark, 0.26);
           }
         }
-        solid(tomb.x, tomb.z, domeRadius * 1.2, tomb.height + 5.2 + domeRadius * 1.3);
+        slab(TOMB, 0, 1.6, 1.07, salmon);
+        slab(TOMB, H - 0.6, 1, 1.03, peach);
+        slab(TOMB, H + 0.4, 1, 1.004, salmon);
+        const half = Math.min(tomb.width, tomb.depth) / 2;
+        addCylinder(group, 4.6, 4.8, 2.6, [tomb.x, H + 2.7, tomb.z], salmon, 8).rotation.y = Math.PI / 8;
+        addCylinder(group, 4.9, 4.9, 0.4, [tomb.x, H + 4.2, tomb.z], peach, 8).rotation.y = Math.PI / 8;
+        addLathe(group, domeProfile(4.1, 4.3, 0.12, 10), 16, [tomb.x, H + 4.4, tomb.z], copperDark);
+        addFinial(group, [tomb.x, H + 4.4 + 4.2, tomb.z], 0.6, whiteStone);
+        for (const sideX of [-1, 1]) {
+          for (const sideZ of [-1, 1]) {
+            const tx = tomb.x + sideX * (tomb.width / 2 - 0.5);
+            const tz = tomb.z + sideZ * (tomb.depth / 2 - 0.5);
+            addCylinder(group, 1.5, 1.6, H + 4, [tx, (H + 4) / 2, tz], salmon, 8);
+            addCylinder(group, 1.9, 1.9, 0.4, [tx, H + 4.2, tz], peach, 8);
+            addLathe(group, domeProfile(1.6, 2.3, 0.22, 8), 12, [tx, H + 4.4, tz], peach, true);
+            addFinial(group, [tx, H + 6.6, tz], 0.4, whiteStone);
+          }
+          // Small domed kiosks inboard of the corner towers on the long faces.
+          for (const sideZ of [-1, 1]) {
+            const kx = tomb.x + sideX * (tomb.width / 2 - 4.6);
+            const kz = tomb.z + sideZ * (tomb.depth / 2 - 1.2);
+            addCylinder(group, 0.9, 1, 1.4, [kx, H + 1.4 + 0.7, kz], salmon, 8);
+            addLathe(group, domeProfile(1, 1.4, 0.2, 6), 8, [kx, H + 2.8, kz], peach, true);
+          }
+        }
+        // Tiled reflecting pool on the axis east of the tomb, with a row of
+        // lotus-bud fountain heads down its middle.
+        const poolX = tomb.x + half + 15;
+        addBox(group, [22, 0.36, 6], [poolX, 0.8, tomb.z], whiteStone);
+        addBox(group, [21, 0.36, 5], [poolX, 0.86, tomb.z], water);
+        for (let jet = 0; jet < 5; jet++) addLathe(group, domeProfile(0.35, 0.7, 0.1, 4), 6, [poolX - 8 + jet * 4, 1.04, tomb.z], salmon);
+        // Paved square round the tomb.
+        addBox(group, [42, 0.2, 38], [tomb.x, 0.66, tomb.z], brick);
+        solid(tomb.x, tomb.z, 4.6, H + 8);
+        // The perch is the tomb's dome, not the open lawn at the grounds' centre.
+        perchTarget = [tomb.x, tomb.z];
       }
       const mosque = anchor(MOSQUE);
       if (mosque) {
@@ -4953,7 +6390,7 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
         slab(HALL, 5.7, 0.6, 1.03, cream);
         slab(HALL, audience.height - 0.4, 0.8, 1.05, cream);
         slab(HALL, audience.height + 0.4, 0.9, 1.006, peach);
-        slab(HALL, audience.height + 1.3, 0.08, 0.92, terracotta);
+        slab(HALL, audience.height + 1.3, 0.08, 0.92, brick);
       }
       const gate = anchor(GATE);
       if (gate) {
@@ -4982,20 +6419,16 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
           addChhatri(g, [4.5, 17.4, 0], 3.4, redBrick, whiteStone);
         }
       }
-      // The garden axis that ties the three monuments together.
-      const axis = [audience, tomb, mosque].filter((stop): stop is NonNullable<typeof stop> => Boolean(stop));
-      for (let index = 0; index + 1 < axis.length; index++) {
-        const from = axis[index];
-        const to = axis[index + 1];
-        const length = Math.hypot(to.x - from.x, to.z - from.z);
-        const path = addBox(group, [length, 0.2, 5], [(from.x + to.x) / 2, 0.66 + index * 0.02, (from.z + to.z) / 2], paleConcrete);
-        path.rotation.y = Math.atan2(-(to.z - from.z), to.x - from.x);
-        const channel = addBox(group, [length * 0.6, 0.22, 1.4], [(from.x + to.x) / 2, 0.78 + index * 0.02, (from.z + to.z) / 2], water);
-        channel.rotation.y = path.rotation.y;
-      }
+      // Paved square round the Diwan-i-Aam, and the whole walled garden kept
+      // free of generic blocks.
+      if (audience) addBox(group, [audience.width + 10, 0.2, audience.depth + 12], [audience.x, 0.66, audience.z], brick);
+      const fortGrounds = anchor(GROUNDS);
+      if (fortGrounds) clearSite(fortGrounds.x, fortGrounds.z, fortGrounds.width / 2, fortGrounds.depth / 2);
     } else if (landmark.kind === "ahsan-manzil") {
-      // The Pink Palace: two arcaded storeys on a plinth, corner pavilions, the
-      // grand river stair up to the first floor, and the domed tower over it.
+      // Ahsan Manzil, the Pink Palace: two arcaded storeys on a 1 m plinth,
+      // corner pavilions rising above a balustraded roof, the grand stair from
+      // the river lawn to the first floor, and the domed tower over the
+      // entrance bay (finial at 27.1 m). Faces south to the Buriganga.
       const PALACE = 624025793;
       const ANDARMAHAL = 624025792;
       const archLow = roundArch(2.3, 3.5);
@@ -5008,14 +6441,14 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
           minEdge: 3.6,
           storeys,
           opening: archDark,
-          surround: salmonTrim,
-          pier: { width: 0.7, depth: 0.5, bottom: 0, top: height, material: salmonTrim },
+          surround: pinkTrim,
+          pier: { width: 0.7, depth: 0.5, bottom: 0, top: height, material: pinkTrim },
         });
-        slab(osmId, 0, 1.1, 1.014, salmonTrim);
-        slab(osmId, height * 0.46, 0.55, 1.014, salmonTrim);
-        slab(osmId, height - 0.5, 0.7, 1.024, salmonTrim);
-        slab(osmId, height, 1.2, 1.004, salmon);
-        slab(osmId, height + 1.2, 0.22, 1.016, salmonTrim);
+        slab(osmId, 0, 1.1, 1.014, pinkTrim);
+        slab(osmId, height * 0.5, 0.55, 1.014, pinkTrim);
+        slab(osmId, height - 0.5, 0.7, 1.024, pinkTrim);
+        slab(osmId, height, 1.2, 1.004, pink);
+        slab(osmId, height + 1.2, 0.22, 1.016, pinkTrim);
         slab(osmId, height + 1.42, 0.18, 0.95, roofTerrace);
       };
       const palace = anchor(PALACE);
@@ -5023,200 +6456,370 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
         const H = palace.height;
         dress(PALACE, H, [
           { y: 1.7, opening: archLow, surround: archLowTrim },
-          { y: H * 0.46 + 1.2, opening: archHigh, surround: archHighTrim },
+          { y: H * 0.5 + 1.1, opening: archHigh, surround: archHighTrim },
         ]);
         const body = frame(PALACE, [0, 1]);
         if (body) {
           const { g, hx, hz } = body;
-          // Corner pavilions rise an attic above the roof line, each crowned with a
-          // shaped gable and four bud finials.
+          // Corner pavilions: an attic above the roof line with a raised,
+          // shaped centre on each outer face and a bud finial at every corner.
           for (const sideX of [-1, 1]) {
             for (const sideZ of [-1, 1]) {
               const px = sideX * (hx - 4.2);
               const pz = sideZ * (hz - 4.4);
-              addBox(g, [8.6, 2.4, 8.6], [px, H + 1.2 + 1.2, pz], salmon);
-              addBox(g, [9.2, 0.4, 9.2], [px, H + 3.8, pz], salmonTrim);
-              addCone(g, 4.6, 1.6, [px, H + 4.8, pz], roofTerrace, 4).rotation.y = Math.PI / 4;
+              addBox(g, [8.6, 2.4, 8.6], [px, H + 2.4, pz], pink);
+              addBox(g, [9.2, 0.4, 9.2], [px, H + 3.8, pz], pinkTrim);
+              addBox(g, [8.2, 0.08, 8.2], [px, H + 4.04, pz], roofTerrace);
+              addBox(g, [0.6, 1.5, 3.6], [px + sideX * 4.3, H + 4.75, pz], pinkTrim);
+              addBox(g, [3.6, 1.5, 0.6], [px, H + 4.75, pz + sideZ * 4.3], pinkTrim);
+              addLathe(g, domeProfile(0.55, 0.9, 0.2, 5), 6, [px + sideX * 4.3, H + 5.5, pz], pink);
+              addLathe(g, domeProfile(0.55, 0.9, 0.2, 5), 6, [px, H + 5.5, pz + sideZ * 4.3], pink);
               for (const cx of [-1, 1]) {
                 for (const cz of [-1, 1]) {
-                  addCylinder(g, 0.5, 0.6, 2.2, [px + cx * 4, H + 5.1, pz + cz * 4], salmon, 8);
-                  addLathe(g, domeProfile(0.75, 1.3, 0.2, 6), 8, [px + cx * 4, H + 6.2, pz + cz * 4], salmonTrim);
+                  addCylinder(g, 0.5, 0.6, 2.2, [px + cx * 4, H + 5.1, pz + cz * 4], pink, 8);
+                  addLathe(g, domeProfile(0.75, 1.3, 0.2, 6), 8, [px + cx * 4, H + 6.2, pz + cz * 4], pinkTrim);
                 }
               }
             }
           }
-          // Central tower over the entrance: a square stage, an octagonal drum,
-          // then the dome. It stands toward the river front, as built.
-          const tz = hz - 7.5;
+          // Central tower over the entrance: a square base with corner
+          // pinnacles, an arcaded round drum with paired columns, a balustrade,
+          // then the tall ribbed "lotus-bud" dome.
+          const tz = hz - 9;
           const towerBase = H + 1.2;
-          addBox(g, [11, 7.4, 11], [0, towerBase + 3.7, tz], salmon);
-          addBox(g, [12.2, 0.6, 12.2], [0, towerBase + 7.4, tz], salmonTrim);
-          addBox(g, [11.6, 0.4, 11.6], [0, towerBase + 2.2, tz], salmonTrim);
-          const towerArch = roundArch(1.7, 3.6);
-          const towerArchTrim = roundArch(2.3, 4.1);
-          for (let face = 0; face < 4; face++) {
-            const angle = (face / 4) * Math.PI * 2;
-            for (const offset of [-3, 0, 3]) {
-              for (const [geometry, material, proud, lift] of [[towerArchTrim, salmonTrim, 5.64, -0.2], [towerArch, archDark, 5.76, 0]] as const) {
-                const pane = new THREE.Mesh(geometry, material);
-                pane.position.set(Math.sin(angle) * proud + Math.cos(angle) * offset, towerBase + 2.9 + lift, tz + Math.cos(angle) * proud - Math.sin(angle) * offset);
-                pane.rotation.y = angle;
-                g.add(pane);
-              }
+          addBox(g, [12, 1.2, 12], [0, towerBase + 0.6, tz], pink);
+          addBox(g, [12.8, 0.4, 12.8], [0, towerBase + 1.4, tz], pinkTrim);
+          const drumBase = towerBase + 1.6;
+          addCylinder(g, 4.8, 4.8, 3.6, [0, drumBase + 1.8, tz], pink, 16);
+          const drumArch = roundArch(1.5, 2.9);
+          for (let bay = 0; bay < 8; bay++) {
+            const angle = ((bay + 0.5) / 8) * Math.PI * 2;
+            const pane = new THREE.Mesh(drumArch, archDark);
+            pane.position.set(Math.sin(angle) * 4.86, drumBase + 0.35, tz + Math.cos(angle) * 4.86);
+            pane.rotation.y = angle;
+            g.add(pane);
+            for (const pair of [-0.11, 0.11]) {
+              const columnAngle = (bay / 8) * Math.PI * 2 + pair;
+              addCylinder(g, 0.22, 0.24, 3.6, [Math.sin(columnAngle) * 5.2, drumBase + 1.8, tz + Math.cos(columnAngle) * 5.2], pinkTrim, 6);
             }
           }
+          addCylinder(g, 5.7, 5.7, 0.5, [0, drumBase + 3.85, tz], pinkTrim, 16);
+          addCylinder(g, 5.3, 5.3, 0.6, [0, drumBase + 4.4, tz], pink, 16);
+          const domeBase = drumBase + 4.7;
+          const domeShape = domeProfile(5.1, 5, 0.08, 12);
+          addLathe(g, domeShape, 16, [0, domeBase, tz], pink);
+          const ribProfile = domeShape.map(([radius, y]) => new THREE.Vector2(radius * 1.03 + 0.02, y * 1.01));
+          for (let rib = 0; rib < 8; rib++) {
+            const ribMesh = new THREE.Mesh(new THREE.LatheGeometry(ribProfile, 1, (rib / 8) * Math.PI * 2, 0.09), pinkTrim);
+            ribMesh.position.set(0, domeBase, tz);
+            g.add(ribMesh);
+          }
+          addFinial(g, [0, domeBase + 4.9, tz], 0.33);
           for (const cx of [-1, 1]) {
             for (const cz of [-1, 1]) {
-              addCylinder(g, 0.8, 0.9, 9.6, [cx * 5.6, towerBase + 4.8, tz + cz * 5.6], salmonTrim, 8);
-              addLathe(g, domeProfile(1.15, 1.9, 0.22, 6), 8, [cx * 5.6, towerBase + 9.6, tz + cz * 5.6], salmon);
-              addFinial(g, [cx * 5.6, towerBase + 11.4, tz + cz * 5.6], 0.5);
+              addCylinder(g, 0.4, 0.5, 3.2, [cx * 5.6, drumBase + 1.6, tz + cz * 5.6], pinkTrim, 6);
+              addLathe(g, domeProfile(0.6, 1, 0.2, 5), 6, [cx * 5.6, drumBase + 3.2, tz + cz * 5.6], pink);
             }
           }
-          addCylinder(g, 5, 5.3, 2.6, [0, towerBase + 8.9, tz], salmon, 8).rotation.y = Math.PI / 8;
-          addCylinder(g, 5.5, 5.5, 0.5, [0, towerBase + 10.4, tz], salmonTrim, 8).rotation.y = Math.PI / 8;
-          addLathe(g, domeProfile(5, 7.2, 0.07, 14), 24, [0, towerBase + 10.6, tz], salmon);
-          addFinial(g, [0, towerBase + 17.6, tz], 1.1);
           g.updateMatrix();
           const towerSeat = new THREE.Vector3(0, 0, tz).applyMatrix4(g.matrix);
-          solid(towerSeat.x, towerSeat.z, 8, towerBase + 18);
+          solid(towerSeat.x, towerSeat.z, 5.5, domeBase + 3.2);
+          perchTarget = [towerSeat.x, towerSeat.z];
 
-          // Projecting entrance bay with a triple arch at the head of the stair.
-          addBox(g, [13, H + 1.2, 3.2], [0, (H + 1.2) / 2, hz + 1.6], salmon);
-          addBox(g, [13.8, 0.6, 3.8], [0, H * 0.46 + 0.2, hz + 1.7], salmonTrim);
-          addBox(g, [13.8, 0.7, 3.8], [0, H - 0.2, hz + 1.7], salmonTrim);
-          addBox(g, [13.6, 0.24, 3.6], [0, H + 1.3, hz + 1.7], salmonTrim);
+          // Projecting entrance bay with a triple arch at the head of the
+          // stair and a shaped pediment above the roof line.
+          addBox(g, [13, H + 1.2, 3.2], [0, (H + 1.2) / 2, hz + 1.6], pink);
+          addBox(g, [13.8, 0.6, 3.8], [0, H * 0.5 + 0.2, hz + 1.7], pinkTrim);
+          addBox(g, [13.8, 0.7, 3.8], [0, H - 0.2, hz + 1.7], pinkTrim);
+          addBox(g, [13.6, 0.24, 3.6], [0, H + 1.3, hz + 1.7], pinkTrim);
+          addBox(g, [5, 1.8, 0.8], [0, H + 2.3, hz + 2.8], pinkTrim);
+          addLathe(g, domeProfile(0.6, 1, 0.2, 5), 6, [0, H + 3.2, hz + 2.8], pink);
           const doorArch = roundArch(2.6, 5);
           const doorArchTrim = roundArch(3.4, 5.6);
           for (const offset of [-4.1, 0, 4.1]) {
-            for (const [geometry, material, proud, lift] of [[doorArchTrim, salmonTrim, 3.34, -0.2], [doorArch, archDark, 3.46, 0]] as const) {
+            for (const [geometry, material, proud, lift] of [[doorArchTrim, pinkTrim, 3.34, -0.2], [doorArch, archDark, 3.46, 0]] as const) {
               const pane = new THREE.Mesh(geometry, material);
-              pane.position.set(offset, H * 0.46 + 1.1 + lift, hz + proud);
+              pane.position.set(offset, H * 0.5 + 0.9 + lift, hz + proud);
               g.add(pane);
             }
           }
-          for (const offset of [-6.2, -2.05, 2.05, 6.2]) addBox(g, [0.8, H + 1.2, 0.5], [offset, (H + 1.2) / 2, hz + 3.35], salmonTrim);
-          // The grand stair: a single broad flight from the lawn to the first floor.
-          const landing = H * 0.46;
-          const STEPS = 12;
-          const run = 17;
+          for (const offset of [-6.2, -2.05, 2.05, 6.2]) addBox(g, [0.8, H + 1.2, 0.5], [offset, (H + 1.2) / 2, hz + 3.35], pinkTrim);
+          // The grand stair: one broad flight of 26 steps from the lawn to the
+          // first-floor portico, 13 m wide at the top flaring to 18 m, between
+          // black iron balustrades with a gilded top rail.
+          const landing = H * 0.5;
+          const STEPS = 26;
+          const run = 19;
           const stairStart = hz + 3.2;
           for (let step = 0; step < STEPS; step++) {
             const stepHeight = landing * (1 - step / STEPS);
-            addBox(g, [12 + step * 0.34, stepHeight, run / STEPS + 0.05], [0, stepHeight / 2, stairStart + (step + 0.5) * (run / STEPS)], stoneStep);
+            addBox(g, [13 + step * 0.19, stepHeight, run / STEPS + 0.04], [0, stepHeight / 2, stairStart + (step + 0.5) * (run / STEPS)], stoneStep);
           }
+          const railLength = Math.hypot(run, landing, 2.4);
           for (const side of [-1, 1]) {
-            const rail = addBox(g, [0.9, 1.5, Math.hypot(run, landing)], [side * 7.6, landing / 2 + 0.7, stairStart + run / 2], salmon);
-            rail.rotation.x = Math.atan2(landing, run);
-            addBox(g, [1.5, 2.6, 1.5], [side * 8.2, 1.3, stairStart + run + 0.4], salmonTrim);
+            const rail = new THREE.Group();
+            rail.position.set(side * 7.75, landing / 2 + 0.55, stairStart + run / 2);
+            rail.rotation.set(Math.atan2(landing, Math.hypot(run, 2.4)), side * Math.atan2(2.4, run), 0, "YXZ");
+            g.add(rail);
+            addBox(rail, [0.16, 1, railLength], [0, 0, 0], recess);
+            addBox(rail, [0.24, 0.14, railLength], [0, 0.56, 0], accent);
+            addBox(g, [1.2, 1.8, 1.2], [side * 9, 0.9, stairStart + run + 0.3], pinkTrim);
           }
-          // Forecourt walk down to the river gate.
-          addBox(g, [7, 0.18, 46], [0, 0.64, stairStart + run + 23], paleConcrete);
-          addBox(g, [58, 0.18, 4], [0, 0.68, stairStart + run + 3], paleConcrete);
+          // Brick walks: the axis down to the river gate and a cross walk.
+          addBox(g, [7, 0.18, 46], [0, 0.64, stairStart + run + 23], brick);
+          addBox(g, [58, 0.18, 4], [0, 0.68, stairStart + run + 3], brick);
+          // Coconut and palmyra palms on the river lawn and by the stair foot.
+          for (const [px, pz, height, lean] of [
+            [-11, hz + 9, 11, 0.12], [11.5, hz + 8, 10, -0.1], [-15, stairStart + run + 9, 12, 0.08],
+            [15, stairStart + run + 10, 10.5, 0.1], [-24, stairStart + run + 4, 9.5, 0.14], [25, stairStart + run + 5, 11.5, 0.06],
+            [-10, stairStart + run + 24, 12.5, 0.1], [10, stairStart + run + 30, 10, 0.12], [-27, stairStart + run + 22, 11, 0.1],
+          ] as const) {
+            addPalm(g, px, pz, height, lean, px * 0.3);
+          }
+          // Keep the river lawn in front of the stair free of generic blocks;
+          // Old Dhaka is left to press in on the other three sides.
+          g.updateMatrix();
+          const lawnSeat = new THREE.Vector3(0, 0, hz + 40).applyMatrix4(g.matrix);
+          clearSite(lawnSeat.x, lawnSeat.z, 34, 38);
         }
       }
       const andarmahal = anchor(ANDARMAHAL);
       if (andarmahal) {
         dress(ANDARMAHAL, andarmahal.height, [
           { y: 1.5, opening: roundArch(2, 2.9), surround: roundArch(2.6, 3.4) },
-          { y: andarmahal.height * 0.46 + 1.1, opening: roundArch(2, 3.4), surround: roundArch(2.6, 3.9) },
+          { y: andarmahal.height * 0.5 + 1.1, opening: roundArch(2, 3.4), surround: roundArch(2.6, 3.9) },
         ]);
       }
       for (const osmId of [624025788, 624025789, 624025784]) {
         const wing = anchor(osmId);
         if (!wing) continue;
-        slab(osmId, wing.height, 0.6, 1.02, salmonTrim);
+        slab(osmId, wing.height, 0.6, 1.02, pinkTrim);
         slab(osmId, wing.height + 0.6, 0.08, 0.93, roofTerrace);
       }
     } else if (landmark.kind === "shaheed-minar") {
-      // The Language Martyrs' monument: a mother and her fallen sons as five
-      // marble frames on a stepped plinth, her head bowed, the red sun behind.
-      // Base tier clears the 0.5 m OSM ground footprint underneath it.
-      addBox(group, [58, 0.72, 40], [0, 0.36, 5], paleConcrete);
-      addBox(group, [50, 1.1, 30], [0, 1.16, 2], whiteStone);
-      addBox(group, [44, 1, 22], [0, 2.1, 0], marble);
-      for (let step = 0; step < 4; step++) addBox(group, [26 - step * 1.2, 0.5, 1.4], [0, 0.75 + step * 0.5, 17.6 - step * 1.4], whiteStone);
-      const BASE = 2.6;
-      const sun = addCylinder(group, 5.6, 5.6, 0.5, [0, BASE + 8.4, -4.4], monumentRed, 40);
-      sun.rotation.x = Math.PI / 2;
-      const addFrame = (x: number, z: number, frameWidth: number, height: number, bars: number, turn: number, bowed: boolean) => {
+      // Central Shaheed Minar: a bowed "mother" frame and four "son" frames in
+      // white, filled with fine black rods, before a red sun disc, on a maroon
+      // dais at the south apex of a maroon plaza that fans out northward with
+      // white radial lines and alpana circles. Local +Z is north (the front),
+      // +X is west. The monument is drawn 1.3× true size so it reads from the air.
+      const S = 1.3;
+      const TERRACE = 2.1; // stepped terrace top: the plaza (0.5) plus 1.6 m
+      // Raised terrace behind the steps, and the full-width stepped front with
+      // white nosings, centre ramp and white end walls.
+      const TERRACE_FRONT = 13;
+      // Full width in front of the dais, narrowing behind it at the plaza's apex.
+      addBox(group, [40, TERRACE, 9], [-2, TERRACE / 2, TERRACE_FRONT - 4.5], deepBrick);
+      addBox(group, [31, TERRACE, 14], [0, TERRACE / 2, TERRACE_FRONT - 16], deepBrick);
+      for (let step = 0; step < 6; step++) {
+        const top = TERRACE - 0.27 * (step + 1);
+        const z = TERRACE_FRONT + 0.45 + step * 0.9;
+        addBox(group, [48, top, 0.9], [-2, top / 2, z], deepBrick);
+        addBox(group, [48, 0.04, 0.22], [-2, top + 0.02, z + 0.34], whiteStone);
+      }
+      const ramp = addBox(group, [3.2, 0.5, Math.hypot(5.4, TERRACE - 0.5)], [0, (TERRACE + 0.5) / 2 + 0.06, TERRACE_FRONT + 2.7], marble);
+      ramp.rotation.x = Math.atan2(TERRACE - 0.5, 5.4);
+      for (const side of [-1, 1]) addBox(group, [0.8, TERRACE + 0.9, 6.6], [-2 + side * 24.4, (TERRACE + 0.9) / 2, TERRACE_FRONT + 2.6], whiteStone);
+      // Plaza graphics: white radial lines fanning north and alpana circles.
+      for (let line = -3; line <= 3; line++) {
+        const angle = line * 0.17;
+        const start = 19 / Math.cos(angle);
+        const end = 50 / Math.cos(angle);
+        const stripe = addBox(group, [0.45, 0.04, end - start], [Math.sin(angle) * (start + end) / 2, 0.52, Math.cos(angle) * (start + end) / 2], marble);
+        stripe.rotation.y = angle;
+      }
+      const alpanaOuter = new THREE.RingGeometry(2.7, 3.4, 24);
+      const alpanaInner = new THREE.RingGeometry(0.9, 1.7, 16);
+      alpanaOuter.rotateX(-Math.PI / 2);
+      alpanaInner.rotateX(-Math.PI / 2);
+      for (const [ax, az] of [[0, 27], [-13, 31], [13, 31], [-9, 44], [9, 44], [-23, 46]] as const) {
+        for (const ring of [alpanaOuter, alpanaInner]) {
+          const mesh = new THREE.Mesh(ring, marble);
+          mesh.position.set(ax, 0.56, az);
+          group.add(mesh);
+        }
+      }
+      // The monument itself, at true size inside a scaled holder.
+      const monument = new THREE.Group();
+      monument.position.set(0, TERRACE, 0);
+      monument.scale.setScalar(S);
+      group.add(monument);
+      addBox(monument, [23, 0.5, 16], [0, 0.25, 1], deepBrick);
+      const BASE = 0.5;
+      const rods = (parent: THREE.Object3D, fromX: number, toX: number, count: number, bottom: number, length: number) => {
+        for (let rod = 0; rod < count; rod++) {
+          const x = fromX + ((toX - fromX) * (rod + 0.5)) / count;
+          addBox(parent, [0.1, length, 0.1], [x, bottom + length / 2, 0], recess);
+        }
+      };
+      // Mother: three posts and two bays rise 10 m, then the top 4.2 m bows
+      // forward 30° to a cross-beam.
+      const LEAN = 0.52;
+      const BENT = 4.2;
+      const STRAIGHT = 10;
+      const MOTHER_Z = 3;
+      const mother = new THREE.Group();
+      mother.position.set(0, BASE, MOTHER_Z);
+      monument.add(mother);
+      const bowed = new THREE.Group();
+      bowed.position.set(0, STRAIGHT, 0);
+      bowed.rotation.x = LEAN;
+      mother.add(bowed);
+      for (const x of [-3.25, 0, 3.25]) {
+        addBox(mother, [0.7, STRAIGHT + 0.2, 0.7], [x, (STRAIGHT + 0.2) / 2, 0], marble);
+        addBox(bowed, [0.7, BENT, 0.7], [x, BENT / 2, 0], marble);
+      }
+      addBox(bowed, [7.9, 0.7, 0.7], [0, BENT - 0.35, 0], marble);
+      addBox(mother, [7.9, 0.3, 0.9], [0, 0.15, 0], marble);
+      for (const [fromX, toX] of [[-2.9, -0.35], [0.35, 2.9]] as const) {
+        rods(mother, fromX, toX, 5, 0.3, STRAIGHT - 0.2);
+        rods(bowed, fromX, toX, 5, 0, BENT - 0.7);
+      }
+      // Sons: single-bay frames in a shallow arc either side, turned inward.
+      const son = (x: number, z: number, height: number, turn: number) => {
         const holder = new THREE.Group();
         holder.position.set(x, BASE, z);
         holder.rotation.y = turn;
-        group.add(holder);
-        const straight = bowed ? height * 0.68 : height;
-        for (let bar = 0; bar < bars; bar++) {
-          const barX = -frameWidth / 2 + (frameWidth * bar) / (bars - 1);
-          addBox(holder, [0.55, straight, 0.55], [barX, straight / 2, 0], marble);
-          if (bowed) {
-            const lean = 0.5;
-            const upper = height - straight;
-            const bent = addBox(holder, [0.55, upper, 0.55], [barX, straight + Math.cos(lean) * upper / 2, Math.sin(lean) * upper / 2], marble);
-            bent.rotation.x = lean;
-          }
-        }
-        if (bowed) {
-          const lean = 0.5;
-          const upper = height - straight;
-          addBox(holder, [frameWidth + 0.55, 0.6, 0.6], [0, straight + Math.cos(lean) * upper, Math.sin(lean) * upper], marble);
-          addBox(holder, [frameWidth + 0.55, 0.5, 0.6], [0, straight, 0], marble);
-        } else {
-          addBox(holder, [frameWidth + 0.55, 0.6, 0.6], [0, height - 0.3, 0], marble);
-        }
-        addBox(holder, [frameWidth + 1.6, 0.4, 2], [0, 0.2, 0], whiteStone);
+        monument.add(holder);
+        for (const side of [-1, 1]) addBox(holder, [0.65, height, 0.65], [side * 0.975, height / 2, 0], marble);
+        addBox(holder, [2.6, 0.65, 0.65], [0, height - 0.325, 0], marble);
+        addBox(holder, [2.6, 0.3, 0.85], [0, 0.15, 0], marble);
+        rods(holder, -0.65, 0.65, 4, 0.3, height - 0.95);
       };
-      addFrame(0, -1.5, 7.2, 14, 5, 0, true);
-      addFrame(-8.4, -0.4, 4.6, 9.4, 4, 0.2, false);
-      addFrame(8.4, -0.4, 4.6, 9.4, 4, -0.2, false);
-      addFrame(-15, 2, 3.8, 7, 3, 0.42, false);
-      addFrame(15, 2, 3.8, 7, 3, -0.42, false);
+      for (const side of [-1, 1]) {
+        son(side * 6, 2, 8.8, -side * 0.26);
+        son(side * 9.5, 0.5, 6.8, -side * 0.44);
+      }
+      // The red sun, standing behind the mother frame and showing above it.
+      const sun = addCylinder(monument, 4.25, 4.25, 0.5, [0, BASE + 9, -4], monumentRed, 32);
+      sun.rotation.x = Math.PI / 2;
+      // Two slim dark stays hold the disc up from behind.
+      for (const side of [-1, 1]) addBox(monument, [0.25, 9, 0.25], [side * 1.6, BASE + 4.5, -4.45], recess);
+      // Collision: the terrace, then a column for each frame.
+      colliderTop = TERRACE + 0.9;
+      const motherTop = TERRACE + S * (BASE + STRAIGHT + Math.cos(LEAN) * BENT);
+      const motherReach = S * (MOTHER_Z + Math.sin(LEAN) * BENT);
+      solid(0, S * MOTHER_Z, S * 4, motherTop - 0.6);
+      solid(0, -S * 4, S * 4.3, TERRACE + S * (BASE + 13.25));
+      for (const side of [-1, 1]) {
+        solid(side * S * 6, S * 2, S * 1.6, TERRACE + S * (BASE + 8.8));
+        solid(side * S * 9.5, S * 0.5, S * 1.6, TERRACE + S * (BASE + 6.8));
+      }
+      // Perch on the bowed cross-beam, where it is seen against the sky.
+      perchTarget = [0, motherReach - S * 0.2];
+      // Big rain trees on the unpaved ground along the plaza's east side, a
+      // few on the west.
+      for (const [tx, tz, radius] of [[-42, 8, 8], [-35, 27, 7.5], [-48, 36, 8.5], [-44, 56, 8], [40, 22, 7.5], [38, 46, 8], [18, 66, 7]] as const) {
+        addLandmarkTree(group, tx, tz, radius, 7.5, landmarkCanopy);
+      }
+      // OSM plaza 941979151 runs ≈ 15 m south of the monument to ≈ 56 m north,
+      // ≈ 37 m east to 31 m west: keep generic blocks off all of it.
+      clearSite(-3, 20, 38, 38);
     } else if (landmark.kind === "curzon-hall") {
-      // Curzon Hall: deep red brick, cusped arcades on both storeys, and a
-      // roofline of chhatris rather than any single dome.
+      // Curzon Hall (1904): a two-storey deep red brick hall with cusped
+      // two-tier arcades and white balustrades on every wing, a parapet of
+      // small domed finials, and on the north front the tall entrance tower
+      // with its corbelled cornice, a big white-latticed Mughal arch window
+      // and chhatris on top, flanked by octagonal turrets under open
+      // terracotta-domed kiosks at the corners of the centre bay and the end
+      // pavilions. Footprint mode: world axes, the front faces north (-z).
       const HALL = 264272612;
       const mass = anchor(HALL);
-      if (mass) {
+      const points = partOutlines.get(HALL);
+      if (mass && points) {
         const H = mass.height;
+        const local = points.map(([x, z]) => [x - group.position.x, z - group.position.z] as MapPoint);
         addBays(group, walls(HALL), {
-          bay: 4.4, minEdge: 4,
+          bay: 4.3, minEdge: 4,
           storeys: [
-            { y: 1.4, opening: pointedArch(2.4, 5), surround: pointedArch(3.2, 5.8) },
-            { y: H * 0.5 + 1, opening: pointedArch(2.4, 5.4), surround: pointedArch(3.2, 6.2) },
+            { y: 1.0, opening: pointedArch(2.5, 4.4) },
+            { y: 7.1, opening: pointedArch(2.5, 4.2) },
           ],
-          opening: archDark, surround: brickTrim,
-          pier: { width: 0.7, depth: 0.5, bottom: 0, top: H, material: brickTrim },
+          opening: archDark,
+          pier: { width: 0.75, depth: 0.5, bottom: 0, top: H, material: deepBrick },
         });
-        slab(HALL, 0, 1.1, 1.01, brickTrim);
-        slab(HALL, H * 0.5, 0.6, 1.012, brickTrim);
-        slab(HALL, H - 0.6, 0.9, 1.022, brickTrim);
-        slab(HALL, H + 0.3, 1.1, 1.004, deepBrick);
-        slab(HALL, H + 1.4, 0.08, 0.955, terracotta);
-        const hall = frame(HALL, [0, -1]);
-        if (hall) {
-          const { g, hx, hz } = hall;
-          const roofY = H + 1.4;
-          // Corner kiosks, a row along each long parapet, and the larger
-          // pavilions over the projecting centre bays.
-          for (const sideX of [-1, 1]) {
-            for (const sideZ of [-1, 1]) addChhatri(g, [sideX * (hx - 3), roofY, sideZ * (hz * 0.42)], 4.2, deepBrick, brickTrim);
-            for (const t of [0.3, 0.62]) {
-              for (const sideZ of [-1, 1]) addChhatri(g, [sideX * hx * t, roofY, sideZ * (hz * 0.3)], 2.6, deepBrick, brickTrim);
-            }
-          }
-          for (const sideZ of [-1, 1]) {
-            addBox(g, [16, 3.4, 9], [0, roofY + 1.7, sideZ * (hz - 6)], deepBrick);
-            addBox(g, [17, 0.5, 10], [0, roofY + 3.6, sideZ * (hz - 6)], brickTrim);
-            for (const sideX of [-1, 1]) addChhatri(g, [sideX * 6.2, roofY + 3.8, sideZ * (hz - 6)], 4.6, deepBrick, brickTrim);
-            const portal = new THREE.Mesh(pointedArch(5, 8.4), archDark);
-            portal.position.set(0, 1.2, sideZ * (hz + 0.2));
-            if (sideZ < 0) portal.rotation.y = Math.PI;
-            g.add(portal);
+        // White balustrades at the foot of each arcade tier, and the parapet.
+        slab(HALL, 0.9, 0.5, 1.02, whiteStone);
+        slab(HALL, 6.3, 0.75, 1.022, whiteStone);
+        slab(HALL, H - 0.5, 0.5, 1.026, deepBrick);
+        slab(HALL, H, 1.0, 1.012, whiteStone);
+        slab(HALL, H + 1.0, 0.08, 0.955, roofTerrace);
+        // Small domed finials along the parapet, about every 4 m.
+        for (const edge of walls(HALL)) {
+          const count = Math.floor(edge.length / 4);
+          for (let index = 0; index <= count; index++) {
+            const along = count > 0 ? (edge.length * index) / count : edge.length / 2;
+            addCone(group, 0.42, 1.3, [edge.ax + edge.dx * along + edge.nx * 0.3, H + 1.65, edge.az + edge.dz * along + edge.nz * 0.3], terracotta, 5);
           }
         }
+        // The entrance tower on the north tip of the centre bay.
+        const tip = local.reduce((a, b) => (b[1] < a[1] ? b : a));
+        const neighbours = local.filter(([, z]) => z < tip[1] + 0.6);
+        const towerX = neighbours.reduce((sum, [x]) => sum + x, 0) / neighbours.length;
+        const TOWER = 9;
+        const towerZ = tip[1] + TOWER / 2;
+        const front = tip[1] - 0.06;
+        const TOP = 24;
+        addBox(group, [TOWER, TOP, TOWER], [towerX, TOP / 2, towerZ], redBrick);
+        addBox(group, [TOWER + 0.6, 0.5, TOWER + 0.6], [towerX, 6.6, towerZ], whiteStone);
+        addBox(group, [TOWER + 0.5, 0.6, TOWER + 0.5], [towerX, 16, towerZ], whiteStone);
+        addBox(group, [TOWER + 1.6, 1.3, TOWER + 1.6], [towerX, TOP - 1.1, towerZ], deepBrick);
+        addBox(group, [TOWER + 1.2, 1.0, TOWER + 1.2], [towerX, TOP + 0.5, towerZ], whiteStone);
+        addBox(group, [TOWER + 0.8, 0.08, TOWER + 0.8], [towerX, TOP + 1.04, towerZ], roofTerrace);
+        const tall = new THREE.Mesh(pointedArch(3.2, 6.4), archDark);
+        tall.position.set(towerX, 0.3, front);
+        tall.rotation.y = Math.PI;
+        group.add(tall);
+        const jali = new THREE.Mesh(pointedArch(5, 6), whiteStone);
+        jali.position.set(towerX, 8.4, front);
+        jali.rotation.y = Math.PI;
+        group.add(jali);
+        const jaliDark = new THREE.Mesh(pointedArch(3.6, 3.4), archDark);
+        jaliDark.position.set(towerX, 8.9, front - 0.06);
+        jaliDark.rotation.y = Math.PI;
+        group.add(jaliDark);
+        // The row of small pointed arches under the corbelled cornice.
+        for (const [nx, nz] of [[0, -1], [1, 0], [-1, 0]] as const) {
+          for (const t of [-3, -1.5, 0, 1.5, 3]) {
+            const small = new THREE.Mesh(pointedArch(0.8, 1.7), archDark);
+            small.position.set(towerX + nx * (TOWER / 2 + 0.06) + (nz !== 0 ? t : 0), TOP - 3.9, towerZ + nz * (TOWER / 2 + 0.06) + (nx !== 0 ? t : 0));
+            small.rotation.y = Math.atan2(nx, nz);
+            group.add(small);
+          }
+        }
+        // Two corner chhatris on the front of the tower top, three small kiosks between.
+        for (const side of [-1, 1]) {
+          addChhatri(group, [towerX + side * 3.1, TOP + 1.1, towerZ - 2.9], 2.7, deepBrick, terracotta);
+          solid(towerX + side * 3.1, towerZ - 2.9, 1.6, TOP + 5.5);
+        }
+        for (const t of [-1.3, 0, 1.3]) {
+          addCylinder(group, 0.45, 0.45, 1.3, [towerX + t, TOP + 1.7, towerZ - 3.6], deepBrick, 6);
+          addLathe(group, domeProfile(0.55, 0.7, 0.1, 5), 6, [towerX + t, TOP + 2.35, towerZ - 3.6], terracotta);
+        }
+        solid(towerX, towerZ, TOWER / 2 + 0.8, TOP + 1.1);
+        perchTarget = [towerX, towerZ + 1.5];
+        // Octagonal turrets with open kiosks: the centre bay's four corners
+        // and the end pavilions' front corners.
+        const nearest = (x: number, z: number) => local.reduce((a, b) => (Math.hypot(b[0] - x, b[1] - z) < Math.hypot(a[0] - x, a[1] - z) ? b : a));
+        const bayFront = local.filter(([x, z]) => z < -9 && Math.abs(x - towerX) > 8);
+        const corners: Array<[MapPoint, number, number]> = bayFront.map((point) => [point, 17, 2.7]);
+        for (const [x, z] of bayFront) corners.push([nearest(x, z + 8.5), 17, 2.7]);
+        for (const side of [-1, 1]) corners.push([nearest(side * mass.width, -mass.depth), 16, 2.3]);
+        for (const [[x, z], top, size] of corners) {
+          addCylinder(group, 1.25, 1.35, top, [x, top / 2, z], deepBrick, 8);
+          addCylinder(group, 1.6, 1.6, 0.4, [x, top - 0.2, z], whiteStone, 8);
+          addChhatri(group, [x, top, z], size, deepBrick, terracotta);
+          solid(x, z, 1.4, top + size * 1.6);
+        }
+        // The north lawn stays open.
+        addBox(group, [100, 0.1, 56], [towerX, 0.05, tip[1] - 10], lawn).castShadow = false;
+        clearSite(towerX, tip[1] - 22, 50, 21);
       }
     } else if (landmark.kind === "baitul-mukarram") {
-      // The national mosque: a tall white cube after the Kaaba rising out of
-      // low wings of slit windows, entered through a triple-arched portal, with
-      // a single minaret beside it.
+      // The national mosque: a hollow cream cube after the Kaaba (≈ 32 × 37 m,
+      // 35 m tall, three thin black bands near the top, a blue-glass box on its
+      // roof) at the west end of the site, a trapezoidal triple-arched portal on
+      // its east face, and east of it the marble prayer deck, now under a broad
+      // beige steel canopy with rows of dark vents. The minaret stands north.
       const HALL = 186664126;
       const mass = anchor(HALL);
       if (mass) {
@@ -5226,551 +6829,4871 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
           storeys: [{ y: 3.6, opening: roundArch(1, 7.6) }],
           opening: archDark,
         });
-        slab(HALL, 0, 1.6, 1.012, paleConcrete);
-        slab(HALL, H - 1.2, 1.6, 1.01, marble);
-        slab(HALL, H + 0.4, 0.08, 0.97, roofGrey);
+        slab(HALL, 0, 1.6, 1.012, cream);
+        slab(HALL, H - 1.2, 1.6, 1.01, cream);
+        slab(HALL, H + 0.4, 0.12, 0.985, canopyBeige);
+        // Frame axes: local +Z is east (the front), local +X is north.
         const hall = frame(HALL, [1, 0]);
         if (hall) {
-          const { g, hx, hz } = hall;
-          const cube = hz * 0.62;
-          const cubeX = -hx * 0.2;
-          const cubeTop = 35;
-          addBox(g, [cube * 2, cubeTop, cube * 2], [cubeX, cubeTop / 2, 0], whiteStone);
-          // The two dark bands under the cornice are the cube's only ornament.
-          for (const y of [cubeTop - 5.6, cubeTop - 3.6]) addBox(g, [cube * 2 + 0.3, 0.7, cube * 2 + 0.3], [cubeX, y, 0], recess);
-          addBox(g, [cube * 2 + 0.8, 0.9, cube * 2 + 0.8], [cubeX, cubeTop - 0.45, 0], marble);
-          addBox(g, [cube * 2 - 2, 0.1, cube * 2 - 2], [cubeX, cubeTop + 0.05, 0], roofGrey);
-          // Entrance portal on the east front, three pointed arches wide.
-          const portalX = cubeX + cube;
-          addBox(g, [5, H + 6.5, 30], [portalX + 2.5, (H + 6.5) / 2, 0], whiteStone);
-          addBox(g, [5.6, 1, 31], [portalX + 2.5, H + 6.5, 0], marble);
-          for (const [offset, archWidth, archHeight] of [[-9.6, 5.4, 11.5], [0, 7, 14.5], [9.6, 5.4, 11.5]] as const) {
-            const arch = new THREE.Mesh(pointedArch(archWidth, archHeight), archDark);
-            arch.position.set(portalX + 5.18, 1.6, offset);
-            arch.rotation.y = Math.PI / 2;
-            g.add(arch);
+          const { g, hz } = hall;
+          // Canopy vents: four east-west rows of slots over the deck.
+          for (const row of [29.4, 9.2, -8.4, -28]) {
+            for (let slot = 0; slot < 13; slot++) addBox(g, [2.8, 0.12, 0.9], [row, H + 0.58, -18 + slot * 5.6], recess);
           }
-          // Forecourt, reflecting pool and the walk up to the portal.
-          addBox(g, [hx * 0.5, 0.3, 26], [hx + hx * 0.2, 0.2, 0], paleConcrete);
-          addBox(g, [hx * 0.42, 0.3, 9], [hx + hx * 0.2, 0.34, 0], water);
+          // The cube, built as four walls round its open light-well so the
+          // galleried court reads from above.
+          const NS = 37;
+          const EW = 32.6;
+          const CX = 5.5;
+          // West face stands 0.4 m proud of the footprint's west wall.
+          const CZ = -hz + EW / 2 - 0.4;
+          const TOP = 35;
+          const WELL_NS = 21;
+          const WELL_EW = 17;
+          const sideNS = (NS - WELL_NS) / 2;
+          const sideEW = (EW - WELL_EW) / 2;
+          for (const s of [-1, 1]) {
+            addBox(g, [sideNS, TOP, EW], [CX + s * (NS - sideNS) / 2, TOP / 2, CZ], cream);
+            addBox(g, [WELL_NS, TOP, sideEW], [CX, TOP / 2, CZ + s * (EW - sideEW) / 2], cream);
+            addBox(g, [sideNS + 0.3, 0.12, EW + 0.3], [CX + s * (NS - sideNS) / 2, TOP + 0.06, CZ], roofGrey);
+            addBox(g, [WELL_NS - 0.1, 0.12, sideEW + 0.3], [CX, TOP + 0.06, CZ + s * (EW - sideEW) / 2], roofGrey);
+          }
+          // Court floor deep in the well, with its low shallow dome.
+          addBox(g, [WELL_NS, 0.6, WELL_EW], [CX, 22, CZ], cream);
+          addLathe(g, domeProfile(5.5, 2.2, 0, 8), 16, [CX, 22.3, CZ], cream);
+          // Three thin black bands round the outside near the top.
+          for (const y of [26.9, 28.9, 30.7]) {
+            for (const s of [-1, 1]) {
+              addBox(g, [0.3, 0.5, EW + 0.6], [CX + s * (NS / 2 + 0.15), y, CZ], recess);
+              addBox(g, [NS + 0.6, 0.5, 0.3], [CX, y, CZ + s * (EW / 2 + 0.15)], recess);
+            }
+          }
+          // Blue-glass rooftop box on the west rim.
+          addBox(g, [10, 5, 6.6], [CX - 2, TOP + 2.5, CZ - (EW - sideEW) / 2], atriumGlass);
+          // Trapezoidal frontispiece on the east face: three pointed arches with
+          // deep teal interiors, the centre one taller.
+          const portal = new THREE.Group();
+          portal.position.set(CX, 6, CZ + EW / 2);
+          g.add(portal);
+          const front = new THREE.Shape();
+          front.moveTo(-8, 0);
+          front.lineTo(8, 0);
+          front.lineTo(6.5, 14);
+          front.lineTo(-6.5, 14);
+          front.lineTo(-8, 0);
+          const frontMesh = new THREE.Mesh(new THREE.ExtrudeGeometry(front, { depth: 3, bevelEnabled: false, curveSegments: 1 }), cream);
+          portal.add(frontMesh);
+          for (const [offset, archWidth, archHeight] of [[-4.6, 3.6, 8], [0, 5, 11], [4.6, 3.6, 8]] as const) {
+            const arch = new THREE.Mesh(pointedArch(archWidth, archHeight), tealArch);
+            arch.position.set(offset, 0.2, 3.06);
+            portal.add(arch);
+          }
+          for (const offset of [-2.6, 2.6]) addCylinder(portal, 0.3, 0.3, 6.8, [offset, 3.6, 3.4], cream, 8);
+          // Minaret north of the cube: square base, square shaft, an open
+          // balcony box and a small dome.
+          const MX = CX + 32;
+          addBox(g, [8, 9, 8], [MX, 4.5, CZ], cream);
+          addBox(g, [5, 30, 5], [MX, 24, CZ], cream);
+          addBox(g, [6.4, 4, 6.4], [MX, 41, CZ], cream);
+          for (let face = 0; face < 4; face++) {
+            const angle = (face / 4) * Math.PI * 2;
+            const opening = new THREE.Mesh(roundArch(1.4, 2.4), archDark);
+            opening.position.set(MX + Math.sin(angle) * 3.26, 39.8, CZ + Math.cos(angle) * 3.26);
+            opening.rotation.y = angle;
+            g.add(opening);
+          }
+          addBox(g, [7, 0.5, 7], [MX, 43.2, CZ], cream);
+          addLathe(g, domeProfile(2.4, 3.2, 0.12, 8), 12, [MX, 43.45, CZ], cream);
+          addFinial(g, [MX, 46.5, CZ], 0.5, cream);
+          // Pink-domed gate pavilion at the south gate.
+          const GX = CX - 41;
+          addBox(g, [8, 7, 8], [GX, 3.5, CZ], cream);
+          addLathe(g, domeProfile(3.4, 3.6, 0.1, 8), 12, [GX, 7, CZ], pink);
           g.updateMatrix();
-          const cubeSeat = new THREE.Vector3(cubeX, 0, 0).applyMatrix4(g.matrix);
-          solid(cubeSeat.x, cubeSeat.z, cube, cubeTop);
+          const seat = (x: number, z: number) => new THREE.Vector3(x, 0, z).applyMatrix4(g.matrix);
+          const cubeSeat = seat(CX, CZ);
+          solid(cubeSeat.x, cubeSeat.z, NS / 2, TOP);
+          const minaretSeat = seat(MX, CZ);
+          solid(minaretSeat.x, minaretSeat.z, 3.4, 46);
+          const perchSeat = seat(CX + 6, CZ + (EW - sideEW) / 2);
+          perchTarget = [perchSeat.x, perchSeat.z];
         }
-        const minaretX = mass.x + mass.width * 0.56;
-        const minaretZ = mass.z + mass.depth * 0.54;
-        addBox(group, [7.5, 6, 7.5], [minaretX, 3, minaretZ], whiteStone);
-        addCylinder(group, 2.3, 3, 46, [minaretX, 29, minaretZ], whiteStone, 8);
-        for (const y of [22, 38]) addCylinder(group, 3.5, 3.1, 1.2, [minaretX, y, minaretZ], marble, 8);
-        addCylinder(group, 4.3, 3.2, 1.6, [minaretX, 52.6, minaretZ], marble, 8);
-        addCylinder(group, 1.8, 2.1, 8, [minaretX, 57.4, minaretZ], whiteStone, 8);
-        addLathe(group, domeProfile(2.1, 3.4, 0.14, 8), 12, [minaretX, 61.4, minaretZ], marble);
-        addFinial(group, [minaretX, 64.8, minaretZ], 0.8);
-        solid(minaretX, minaretZ, 3.6, 66);
       }
     } else if (landmark.kind === "bangladesh-bank") {
-      // Central bank tower: a concrete podium, a glazed shaft with a spandrel to
-      // every floor, solid end cores, and a stepped crown.
-      addBox(group, [width * 0.96, 9, depth * 0.96], [0, 4.5, 0], concrete);
-      addBox(group, [width * 0.98, 4.6, depth * 0.98], [0, 4.4, 0], ribbonGlass);
-      addBox(group, [width * 1.02, 0.9, depth * 1.02], [0, 9.4, 0], paleConcrete);
-      const shaftHeight = top - 12;
-      addBox(group, [width * 0.72, shaftHeight, depth * 0.66], [0, shaftHeight / 2 + 9.8, 0], darkGlass);
-      for (let y = 13.4; y < top - 5; y += 3.7) addBox(group, [width * 0.735, 0.7, depth * 0.675], [0, y, 0], paleConcrete);
-      for (const side of [-1, 1]) {
-        addBox(group, [width * 0.1, shaftHeight + 3, depth * 0.5], [side * width * 0.39, (shaftHeight + 3) / 2 + 9.8, 0], concrete);
-        for (let offset = -0.26; offset <= 0.261; offset += 0.13) {
-          addBox(group, [0.5, shaftHeight, 0.8], [width * offset, shaftHeight / 2 + 9.8, side * depth * 0.335], paleConcrete);
-        }
+      // Bangladesh Bank Tower (OSM 498175910): a 46 × 26 m slab, 31 storeys.
+      // The long N and S faces are continuous bronze-dark ribbon windows between
+      // buff-olive spandrels, finely checkered by dark mullions; the short E and
+      // W ends are blank sage concrete; a heavy fascia caps the wings. A solid
+      // concrete core spine runs up the middle of the south face and rises two
+      // storeys above the roof, carrying two lattice masts. The four-storey
+      // podium (OSM 297868959) wraps the tower on the N, E and S; its north
+      // front carries a mosaic mural under a deep fascia beam, facing the
+      // forecourt sculpture. Heading 0, so local axes are world axes (+Z south).
+      const WING = 112;
+      const CORE = 118;
+      const PODIUM = 16;
+      colliderTop = WING;
+      perchTarget = [0, 4];
+      addBox(group, [44, WING - 2, 25.2], [0, (WING - 2) / 2, 0], ribbonGlass);
+      for (const side of [-1, 1]) addBox(group, [1.8, WING, 26], [side * 22.3, WING / 2, 0], sageConcrete);
+      for (let y = PODIUM + 1.2; y < WING - 4; y += 3.6) addBox(group, [42.9, 1.65, 26], [0, y, 0], oliveBuff);
+      for (let x = -20.5; x <= 20.6; x += 1.5) {
+        for (const side of [-1, 1]) addBox(group, [0.16, WING - PODIUM - 4, 0.3], [x, (WING + PODIUM - 4) / 2, side * 13.08], ribbonGlass);
       }
-      addBox(group, [width * 0.78, 2.4, depth * 0.72], [0, top - 1.4, 0], paleConcrete);
-      addBox(group, [width * 0.5, 4, depth * 0.44], [0, top + 1.8, 0], plantGrey);
-      addBox(group, [width * 0.3, 2.4, depth * 0.3], [0, top + 5, 0], roofGrey);
-      addCylinder(group, 0.4, 0.6, 12, [0, top + 12, 0], accent, 8);
+      addBox(group, [46.6, 3.4, 26.6], [0, WING - 1.7, 0], concrete);
+      addBox(group, [45, 0.2, 25], [0, WING + 0.05, 0], roofGrey);
+      // The core spine on the south face, with its small punched windows.
+      addBox(group, [12, CORE, 1.4], [0, CORE / 2, 13.6], concrete);
+      addBox(group, [12, CORE - WING, 20], [0, (WING + CORE) / 2, 4], concrete);
+      for (let y = PODIUM + 2; y < CORE - 2; y += 3.6) {
+        for (const x of [-3.2, 0, 3.2]) addBox(group, [1.1, 1.6, 0.12], [x, y, 14.33], ribbonGlass);
+      }
+      for (const [mx, mz, mastHeight] of [[-2.6, 0, 17], [3, 8, 12]] as const) {
+        addCylinder(group, 0.16, 0.3, mastHeight, [mx, CORE + mastHeight / 2, mz], roofGrey, 4);
+        for (let arm = 0; arm < 3; arm++) addBox(group, [2.6, 0.12, 0.12], [mx, CORE + mastHeight * (0.5 + arm * 0.18), mz], roofGrey);
+      }
+      // Podium, re-centred from OSM 297868959 (local x = east, z = south).
+      const podiumShape = new THREE.Shape();
+      const podiumOutline: Array<[number, number]> = [
+        [26.8, 15.9], [15.9, 59.8], [-19.4, 58.7], [-19.1, 51.4], [-17.7, 13.3], [23.4, 13], [23.2, -13.4],
+        [-16.6, -13.2], [-16.3, -23.2], [-2.9, -22.6], [37.7, -20.8],
+      ];
+      podiumOutline.forEach(([x, z], index) => (index ? podiumShape.lineTo(x, -z) : podiumShape.moveTo(x, -z)));
+      const podiumGeometry = new THREE.ExtrudeGeometry(podiumShape, { depth: PODIUM, bevelEnabled: false, curveSegments: 1 });
+      podiumGeometry.rotateX(-Math.PI / 2);
+      const podium = new THREE.Mesh(podiumGeometry, concrete);
+      group.add(podium);
+      // Recessed glazed ground floor, the mural frieze and the fascia beam on
+      // the north front (edge from (-16.3, -23.2) to (37.7, -20.8)).
+      const front = new THREE.Group();
+      front.position.set(10.7, 0, -22);
+      front.rotation.y = -Math.atan2(2.4, 54);
+      group.add(front);
+      addBox(front, [53.6, 4.6, 0.3], [0, 2.3, -0.12], ribbonGlass);
+      addBox(front, [53, 5.4, 0.2], [0, 7.8, -0.08], accent);
+      addBox(front, [55, 3.4, 3.2], [0, PODIUM - 1.7, -1.4], concrete);
+      addBox(group, [30, 0.15, 34], [-1.5, PODIUM + 0.05, 38], roofGrey);
+      // Forecourt sculpture: two raised steel arms round a sphere.
+      for (const side of [-1, 1]) {
+        const arm = addBox(group, [1.4, 9, 1.4], [8 + side * 1.6, 4.5, -36], bronze);
+        arm.rotation.z = side * -0.38;
+      }
+      const orb = new THREE.Mesh(new THREE.SphereGeometry(1.7, 12, 8), bronze);
+      orb.position.set(8, 9.4, -36);
+      group.add(orb);
+      solidBox(0, 4.5, 7, 10.5, CORE);
+      // The podium as boxes that follow podiumOutline (heading 0, so local
+      // boxes are world boxes): the south block, the east arm in two steps
+      // under its slanted edge, and the north front.
+      solidBox(3.7, 36.4, 23.1, 23.4, PODIUM);
+      solidBox(30.45, -12, 7.25, 9, PODIUM);
+      solidBox(27.75, 6.5, 4.55, 9.5, PODIUM);
+      solidBox(10.7, -19.6, 27.6, 6.4, PODIUM);
+      clearSite(10, 16, 36, 46);
     } else if (landmark.kind === "airport") {
-      const runway = addBox(group, [72, 1.2, 3_200], [0, 0.35, 0], recess);
-      runway.receiveShadow = true;
-      addBox(group, [11, 0.4, 3_040], [0, 1.05, 0], paleConcrete);
-      for (let offset = -1_430; offset <= 1_430; offset += 105) {
-        addBox(group, [2.2, 0.45, 42], [0, 1.35, offset], whiteStone);
+      // Hazrat Shahjalal International. Local +Z runs down runway 14/32 (bearing
+      // 144°) and local +X points NE, across the airfield to the terminals; the
+      // numbers come from OSM measured in this frame. The runway (way 13858653)
+      // spans z -1370…1822, with grass infields, parallel taxiways and aprons;
+      // Terminal 1/2 (way 143950720) is the long white Berger-era hall with
+      // arched bays, porthole openings and a flat canopy on slender columns;
+      // Terminal 3 (way 1172183216) is the vast pale roof with a grid of
+      // skylights, piers toward the apron and a deep landside canopy.
+      colliderTop = 1.5;
+      perchTarget = [1170, 1060];
+      const GROUND = -0.9; // world y = 0
+      const RUNWAY_Z = 226;
+      const RUNWAY_LENGTH = 3_192;
+      // Grass infield (above park turf, below map water), shoulders, runway.
+      addBox(group, [1_000, 0.1, 3_380], [40, GROUND + 0.33, 225], lawn).castShadow = false;
+      addBox(group, [64, 0.2, RUNWAY_LENGTH + 60], [2.5, GROUND + 0.5, RUNWAY_Z], paleConcrete).castShadow = false;
+      addBox(group, [45, 0.2, RUNWAY_LENGTH], [2.5, GROUND + 0.65, RUNWAY_Z], recess).castShadow = false;
+      const markTop = GROUND + 0.78;
+      for (let z = RUNWAY_Z - RUNWAY_LENGTH / 2 + 120; z < RUNWAY_Z + RUNWAY_LENGTH / 2 - 120; z += 60) {
+        addBox(group, [0.9, 0.06, 30], [2.5, markTop, z], whiteStone);
       }
-      for (const side of [-1, 1]) {
-        addBox(group, [18, 0.55, 3_100], [side * 94, 0.8, 0], concrete);
-        for (let offset = -1_500; offset <= 1_500; offset += 60) {
-          addCylinder(group, 0.8, 0.8, 0.5, [side * 38, 1.45, offset], side < 0 ? monumentRed : accent, 8);
+      for (const end of [-1, 1]) {
+        const threshold = RUNWAY_Z + end * (RUNWAY_LENGTH / 2 - 14);
+        for (let bar = -7; bar <= 7; bar++) {
+          if (bar === 0) continue;
+          addBox(group, [1.8, 0.06, 30], [2.5 + bar * 2.8, markTop, threshold], whiteStone);
+        }
+        for (const offset of [150, 300, 450]) {
+          for (const side of [-1, 1]) addBox(group, [3, 0.06, 22], [2.5 + side * 9, markTop, RUNWAY_Z + end * (RUNWAY_LENGTH / 2 - offset)], whiteStone);
         }
       }
-      // Terminal: a long glazed concourse under an oversailing roof, with
-      // piers out to the apron stands.
-      addBox(group, [290, 14, 72], [-245, 7, -300], paleConcrete);
-      addBox(group, [292, 6, 73], [-245, 8, -300], ribbonGlass);
-      addBox(group, [304, 1.6, 84], [-245, 15, -300], silverPanel);
-      for (let offset = -120; offset <= 120; offset += 40) addBox(group, [14, 2.4, 60], [-245 + offset, 17, -300], atriumGlass);
-      addBox(group, [230, 8, 126], [-250, 4, -205], concrete);
-      addBox(group, [228, 0.2, 124], [-250, 8.1, -205], roofGrey);
-      // A simple airliner: fuselage, swept wing, tailplane and fin.
+      // Parallel taxiways (east at x 552, west angling at x -430), the link
+      // taxiways, the main apron in front of Terminal 1/2 and the west aprons.
+      const pave = (x0: number, x1: number, z0: number, z1: number, y = GROUND + 0.38) => {
+        const pad = addBox(group, [x1 - x0, 0.16, z1 - z0], [(x0 + x1) / 2, y, (z0 + z1) / 2], paleConcrete);
+        pad.castShadow = false;
+      };
+      pave(541, 564, -1420, 1780);
+      pave(-442, -419, -330, 1790);
+      for (const z of [-1300, -400, 229, 900, 1745]) pave(34, 541, z - 11, z + 11, GROUND + 0.34);
+      for (const z of [-300, 1100, 1760]) pave(-430, -30, z - 11, z + 11, GROUND + 0.34);
+      pave(564, 868, -793, 775, GROUND + 0.42);
+      pave(-472, -380, 97, 1064, GROUND + 0.42);
+      pave(566, 1000, 776, 1440, GROUND + 0.42);
+      // Landside forecourt and car parks between the terminals and Airport Road.
+      pave(992, 1290, -70, 665);
+      addBox(group, [18, 0.12, 735], [1003, GROUND + 0.5, 297], recess).castShadow = false;
+      for (let z = -40; z < 650; z += 46) addBox(group, [236, 0.2, 6], [1158, GROUND + 0.52, z], lawn).castShadow = false;
+      // Terminal 1/2: hall x 900…979, z -62…512, roof 16 m; a lower glazed
+      // concourse and jet bridges airside.
+      const T12 = { x0: 900, x1: 979, z0: -62, z1: 512, roof: 16 };
+      addBox(group, [T12.x1 - T12.x0, T12.roof, T12.z1 - T12.z0], [(T12.x0 + T12.x1) / 2, T12.roof / 2 + GROUND, (T12.z0 + T12.z1) / 2], whiteStone);
+      addBox(group, [T12.x1 - T12.x0 - 4, 0.2, T12.z1 - T12.z0 - 4], [(T12.x0 + T12.x1) / 2, T12.roof + GROUND + 0.1, (T12.z0 + T12.z1) / 2], paleConcrete);
+      addBox(group, [36, 9, T12.z1 - T12.z0 - 30], [882, 4.5 + GROUND, (T12.z0 + T12.z1) / 2], ribbonGlass);
+      addBox(group, [38, 0.8, T12.z1 - T12.z0 - 28], [882, 9.4 + GROUND, (T12.z0 + T12.z1) / 2], whiteStone);
+      for (const z of [-45, 27, 103, 174, 246, 319, 393, 466]) {
+        addBox(group, [36, 3.2, 3.6], [846, 5.5 + GROUND, z], silverPanel);
+        addBox(group, [3, 4, 3], [830, 2 + GROUND, z], silverPanel);
+      }
+      // Landside arcade: shallow arch bays with porthole openings in the upper
+      // storey, a glazed ground floor, and the deep flat canopy whose slender
+      // white columns flare out at the top.
+      const arch = roundArch(9.4, 7.2);
+      const porthole = discPane(2.3, 16);
+      addBox(group, [0.3, 4.4, T12.z1 - T12.z0 - 2], [T12.x1 + 0.1, 2.2 + GROUND, (T12.z0 + T12.z1) / 2], ribbonGlass);
+      for (let z = T12.z0 + 7; z < T12.z1 - 4; z += 12) {
+        const bay = new THREE.Mesh(arch, ribbonGlass);
+        bay.position.set(T12.x1 + 0.08, 6 + GROUND, z);
+        bay.rotation.y = Math.PI / 2;
+        group.add(bay);
+        const ring = new THREE.Mesh(porthole, whiteStone);
+        ring.position.set(T12.x1 + 0.16, 7.6 + GROUND, z);
+        ring.rotation.y = Math.PI / 2;
+        group.add(ring);
+        addCylinder(group, 1.4, 0.4, 3, [T12.x1 + 11, 10.9 + GROUND, z + 6], whiteStone, 8);
+        addCylinder(group, 0.4, 0.4, 9.6, [T12.x1 + 11, 4.8 + GROUND, z + 6], whiteStone, 8);
+      }
+      addBox(group, [13, 1.1, T12.z1 - T12.z0 + 8], [T12.x1 + 6.5, 12.9 + GROUND, (T12.z0 + T12.z1) / 2], whiteStone);
+      // The column heads flare into a continuous row of shallow white arches
+      // under the canopy's outer edge: the terminal's signature from the curb.
+      const canopyArch = new THREE.Shape();
+      canopyArch.moveTo(-6, 0);
+      canopyArch.lineTo(-6, 3.95);
+      canopyArch.lineTo(6, 3.95);
+      canopyArch.lineTo(6, 0);
+      for (let step = 1; step < 10; step++) {
+        const angle = (step / 10) * Math.PI;
+        canopyArch.lineTo(6 * Math.cos(angle), 2.4 * Math.sin(angle));
+      }
+      canopyArch.lineTo(-6, 0);
+      const canopyArchGeometry = new THREE.ExtrudeGeometry(canopyArch, { depth: 0.6, bevelEnabled: false });
+      for (let z = T12.z0 + 19; z < T12.z1; z += 12) {
+        const span = new THREE.Mesh(canopyArchGeometry, whiteStone);
+        span.position.set(T12.x1 + 10.7, 8.6 + GROUND, z);
+        span.rotation.y = Math.PI / 2;
+        group.add(span);
+      }
+      addBox(group, [0.4, 1.4, 120], [T12.x1 + 0.4, T12.roof + 0.7 + GROUND, 300], monumentRed);
+      // Control tower beside the concourse.
+      addCylinder(group, 3.6, 4.6, 46, [866, 23 + GROUND, 47], paleConcrete, 10);
+      addCylinder(group, 9, 5, 5, [866, 48.5 + GROUND, 47], whiteStone, 10);
+      addCylinder(group, 9.6, 9, 5.2, [866, 53.6 + GROUND, 47], ribbonGlass, 10);
+      addCylinder(group, 10.2, 10.2, 1, [866, 56.7 + GROUND, 47], whiteStone, 10);
+      addCylinder(group, 0.4, 0.4, 9, [866, 61.7 + GROUND, 47], silverPanel, 4);
+      // Terminal 3: glazed hall under one pale roof oversailing 5 m all round,
+      // with a skylight grid and gentle ridges across the short axis, three
+      // airside piers and a 15 m landside canopy on tall slim columns.
+      const T3 = { x0: 1062, x1: 1286, z0: 702, z1: 1418, roof: 24 };
+      const t3x = (T3.x0 + T3.x1) / 2;
+      const t3z = (T3.z0 + T3.z1) / 2;
+      addBox(group, [T3.x1 - T3.x0, T3.roof - 2, T3.z1 - T3.z0], [t3x, (T3.roof - 2) / 2 + GROUND, t3z], ribbonGlass);
+      addBox(group, [T3.x1 - T3.x0 + 10, 2, T3.z1 - T3.z0 + 10], [t3x, T3.roof - 1 + GROUND, t3z], silverPanel);
+      for (let z = T3.z0 + 30; z < T3.z1; z += 60) addBox(group, [T3.x1 - T3.x0 + 8, 1, 7], [t3x, T3.roof + 0.4 + GROUND, z], silverPanel);
+      for (let x = T3.x0 + 12; x < T3.x1; x += 25) {
+        for (let z = T3.z0 + 15; z < T3.z1; z += 25) {
+          if ((z - T3.z0 - 30) % 60 > 50) continue;
+          addBox(group, [3.2, 0.3, 3.2], [x, T3.roof + 0.05 + GROUND, z], atriumGlass);
+        }
+      }
+      for (const z of [820, 1060, 1300]) {
+        addBox(group, [62, 12, 30], [1031, 6 + GROUND, z], ribbonGlass);
+        addBox(group, [64, 1.2, 32], [1031, 12.6 + GROUND, z], silverPanel);
+      }
+      addBox(group, [16, 1, T3.z1 - T3.z0 - 40], [T3.x1 + 13, 18.5 + GROUND, t3z], silverPanel);
+      for (let z = T3.z0 + 30; z < T3.z1 - 20; z += 36) addCylinder(group, 0.5, 0.5, 18, [T3.x1 + 19, 9 + GROUND, z], whiteStone, 6);
+      // Airliners at the Terminal 1/2 gates, one on the taxiway, one at T3.
       const addAirliner = (x: number, z: number, heading: number, livery: THREE.Material) => {
         const plane = new THREE.Group();
-        plane.position.set(x, 4.6, z);
+        plane.position.set(x, 3.7 + GROUND, z);
         plane.rotation.y = heading;
         group.add(plane);
-        const fuselage = addCylinder(plane, 2.3, 2.3, 34, [0, 0, 0], whiteStone, 12);
+        const fuselage = addCylinder(plane, 2.2, 2.2, 34, [0, 0, 0], whiteStone, 10);
         fuselage.rotation.x = Math.PI / 2;
-        const nose = addCone(plane, 2.3, 6, [0, 0, 20], whiteStone, 12);
+        const nose = addCone(plane, 2.2, 6, [0, 0, 20], whiteStone, 10);
         nose.rotation.x = Math.PI / 2;
-        const tail = addCone(plane, 2.3, 9, [0, 0.6, -21.5], whiteStone, 12);
+        const tail = addCone(plane, 2.2, 9, [0, 0.6, -21.5], whiteStone, 10);
         tail.rotation.x = -Math.PI / 2;
         for (const side of [-1, 1]) {
           const wing = addBox(plane, [20, 0.5, 5.4], [side * 11, -0.6, -1.5], whiteStone);
           wing.rotation.y = side * 0.42;
-          const engine = addCylinder(plane, 1.1, 1.1, 4.6, [side * 7.4, -1.9, 1.6], plantGrey, 10);
+          const engine = addCylinder(plane, 1.1, 1.1, 4.6, [side * 7.4, -1.9, 1.6], silverPanel, 8);
           engine.rotation.x = Math.PI / 2;
           const stabiliser = addBox(plane, [7.6, 0.4, 3], [side * 4.2, 1, -21.5], whiteStone);
           stabiliser.rotation.y = side * 0.4;
         }
         const fin = addBox(plane, [0.5, 8, 5.6], [0, 4.6, -21.5], livery);
         fin.rotation.x = -0.5;
-        addBox(plane, [4.7, 0.5, 30], [0, -0.3, 0], livery);
       };
-      for (const [index, gate] of [-120, -40, 40, 120].entries()) {
-        addBox(group, [5, 4, 44], [-202 + gate, 6, -122], silverPanel);
-        addBox(group, [5.4, 2, 44.2], [-202 + gate, 6.4, -122], ribbonGlass);
-        addAirliner(-202 + gate + 16, -86, Math.PI, index % 2 ? accent : monumentRed);
-      }
-      addAirliner(-70, 420, 0, monumentRed);
-      // Control tower with a glazed cab.
-      addCylinder(group, 6, 8, 48, [-390, 24, -245], concrete, 12);
-      addCylinder(group, 12, 7, 6, [-390, 51, -245], paleConcrete, 12);
-      addCylinder(group, 13, 12, 5.5, [-390, 56.7, -245], ribbonGlass, 12);
-      addCylinder(group, 13.6, 13.6, 1, [-390, 60, -245], silverPanel, 12);
-      addCylinder(group, 1, 1, 12, [-390, 66.5, -245], accent, 8);
-      // Runway numbers end: threshold bars at both ends.
-      for (const end of [-1, 1]) {
-        for (let bar = -3; bar <= 3; bar++) addBox(group, [3, 0.45, 44], [bar * 8, 1.36, end * 1_500], whiteStone);
-      }
+      for (const [index, z] of [-45, 103, 246, 393].entries()) addAirliner(800, z, Math.PI / 2, index % 2 ? ribbonGlass : monumentRed);
+      addAirliner(552, 620, 0, monumentRed);
+      addAirliner(972, 1060, Math.PI / 2, ribbonGlass);
+      // The terminals, the T1/T2 concourse and canopy, and the T3 piers and
+      // oversailing roof, tiled in their own turned frame.
+      solidTiles(T12.x0, T12.x1, T12.z0, T12.z1, T12.roof + GROUND, 26);
+      solidTiles(T12.x1, T12.x1 + 13, T12.z0 - 4, T12.z1 + 4, 13.5 + GROUND, 26);
+      solidTiles(864, 900, T12.z0 + 15, T12.z1 - 15, 9.8 + GROUND, 26);
+      solidTiles(T3.x0 - 5, T3.x1 + 5, T3.z0 - 5, T3.z1 + 5, T3.roof + GROUND, 40);
+      solidTiles(T3.x1 + 5, T3.x1 + 21, T3.z0 + 20, T3.z1 - 20, 19 + GROUND, 30);
+      for (const z of [820, 1060, 1300]) solidBox(1031, z, 32, 16, 13.2 + GROUND);
+      solid(866, 47, 8, 57 + GROUND);
     } else if (landmark.kind === "ramna-park") {
-      // Ramna Park: Ramna Batamul (sacred Pohela Boishakh banyan stage), lakeside
-      // octagonal pavilion, red-brick arched bridge, and shaded heritage canopy.
-      colliderTop = 3.5;
-      addCylinder(group, 22, 23, 0.9, [0, 0.45, 0], terracotta, 28);
-      addCylinder(group, 15, 16, 1.4, [0, 1.4, 0], paleConcrete, 24);
-      // Giant sacred Batamul banyan tree at the heart of the stage
-      addCylinder(group, 1.8, 2.8, 9.5, [0, 6.2, 0], landmarkBark, 10);
-      for (const [bx, by, bz, r, mat] of [
-        [0, 13.5, 0, 9.2, landmarkCanopy],
-        [-6.5, 11.4, 4.2, 6.4, landmarkLightCanopy],
-        [6.8, 11.2, -3.8, 6.2, landmarkCanopy],
-        [3.2, 11.8, 6.2, 5.8, landmarkLightCanopy],
-        [-4.5, 11.5, -5.8, 5.6, landmarkCanopy],
+      // Ramna Park: Ramna Batamul, the huge old fig on the peninsula at the
+      // inner corner of Ramna Lake where Pohela Boishakh is greeted, with one
+      // long low limb sweeping out over its brick planter; the worn festival
+      // lawn ESE of it; and the timber boardwalk along the lake shore with a
+      // long flat footbridge across the west arm. The lake itself is map water.
+      // Local +Z faces ESE (120°) toward the lawn.
+      boundsCollider = false;
+      addCylinder(group, 5, 5.2, 0.6, [0, 0.3, 0], plazaBrick, 14);
+      addCylinder(group, 0.9, 1.4, 8.5, [0, 4.6, 0], landmarkBark, 8);
+      for (const angle of [0.4, 1.9, 3.3, 4.8]) {
+        addBeam(group, [Math.sin(angle) * 1.8, 0.6, Math.cos(angle) * 1.8], [Math.sin(angle) * 0.4, 3.2, Math.cos(angle) * 0.4], 0.7, 0.9, landmarkBark);
+      }
+      // Main limbs up into the crown, and the long near-horizontal limb.
+      for (const [lx, ly, lz] of [[-5, 11, 4], [6, 11.5, -3], [3, 12, 6], [-4, 12, -5]] as const) {
+        addBeam(group, [0, 7.5, 0], [lx, ly, lz], 0.6, 0.6, landmarkBark);
+      }
+      addBeam(group, [0.6, 3.6, 0.6], [6.5, 3.4, 5.2], 0.75, 0.75, landmarkBark);
+      addBeam(group, [6.5, 3.4, 5.2], [11.4, 2.6, 8.6], 0.55, 0.55, landmarkBark);
+      // A broad spreading dome of a crown, about 30 m across and 19 m tall —
+      // twice the spread of any park tree round it — drooping low at the rim.
+      for (const [bx, by, bz, r, sy, mat] of [
+        [0, 13.2, 0, 13, 0.42, landmarkCanopy],
+        [-6.4, 11.6, 4.6, 7.6, 0.6, landmarkLightCanopy],
+        [7.2, 11.8, -3.8, 7.4, 0.6, landmarkCanopy],
+        [3.4, 12.4, 6.6, 6.6, 0.62, landmarkLightCanopy],
+        [-5.2, 12.2, -6.4, 6.8, 0.6, landmarkCanopy],
+        [1.5, 15.5, -1, 6.2, 0.58, landmarkLightCanopy],
+        [-9.6, 9.6, -1.2, 5.4, 0.58, landmarkLightCanopy],
+        [0.6, 9.8, -10.2, 5.2, 0.58, landmarkLightCanopy],
+        [10.8, 6.4, 8.2, 3.8, 0.62, landmarkLightCanopy],
+        // The drooping skirt that carries the crown out to its full spread.
+        [8.8, 9.2, -1.8, 5.0, 0.55, landmarkCanopy],
+        [-8.7, 9.4, 1.7, 5.0, 0.55, landmarkCanopy],
+        [-2.4, 9.0, 8.7, 5.0, 0.55, landmarkCanopy],
+        [3.3, 9.2, -8.5, 5.0, 0.55, landmarkCanopy],
+        [-6.7, 9.0, -6.4, 4.6, 0.55, landmarkLightCanopy],
+        [6.4, 9.2, 6.7, 4.6, 0.55, landmarkLightCanopy],
       ] as const) {
         const crown = new THREE.Mesh(treeCrownGeo, mat);
-        crown.position.set(bx, by, bz);
-        crown.scale.set(r, r * 0.62, r);
+        crown.position.set(bx * 1.12, by * 1.04, bz * 1.12);
+        crown.scale.set(r * 1.12, r * sy * 1.08, r * 1.12);
         crown.castShadow = true;
         crown.receiveShadow = true;
         group.add(crown);
       }
-      solid(0, 0, 9, 19.2);
-      // Octagonal lakeside pavilion & red-brick garden promenade
-      addCylinder(group, 9.5, 10.2, 1.2, [28, 0.8, 18], brickTrim, 8);
-      for (let i = 0; i < 8; i++) {
-        const a = (i / 8) * Math.PI * 2;
-        addCylinder(group, 0.45, 0.5, 5.6, [28 + Math.cos(a) * 8.2, 4.2, 18 + Math.sin(a) * 8.2], whiteStone, 6);
-      }
-      addCone(group, 11.2, 4.4, [28, 9.2, 18], terracotta, 8);
-      solid(28, 18, 10, 11.5);
-      // Ornamental arched terracotta garden bridge over a landscaped dry channel
-      addBox(group, [30, 0.4, 4.6], [-22, 0.4, 10], plazaBrick);
-      addBox(group, [16, 2.0, 5.0], [-22, 2.0, 10], redBrick);
-      for (const side of [-2.3, 2.3]) addBox(group, [16, 1.0, 0.5], [-22, 3.5, 10 + side], cream);
-      // Ring of Ramna Park mature rain trees & Krishnachura accents
+      solid(0, 0, 14, 19.8);
+      perchTarget = [0.01, 0];
+      // The worn festival lawn, framed by the park's big rain trees.
+      addBox(group, [35, 0.08, 30], [0, 0.04, 21], packedEarth).castShadow = false;
       for (const [tx, tz, r, h, mat] of [
-        [-28, -22, 6.2, 7.8, landmarkCanopy],
-        [24, -26, 6.6, 8.2, landmarkKrishnachura],
-        [-28, 26, 5.8, 7.2, landmarkLightCanopy],
-        [14, -32, 5.6, 7.4, landmarkCanopy],
-        [-16, -30, 5.4, 7.0, landmarkKrishnachura],
-        [34, -4, 5.8, 7.4, landmarkLightCanopy],
+        [-30, 24, 5.4, 6.8, landmarkCanopy],
+        [30, 22, 5.2, 6.6, landmarkLightCanopy],
+        [-22, 46, 5.0, 6.4, landmarkKrishnachura],
+        [22, 46, 5.2, 6.6, landmarkCanopy],
       ] as const) {
         addLandmarkTree(group, tx, tz, r, h, mat);
       }
-    } else if (landmark.kind === "suhrawardy-udyan") {
-      // Suhrawardy Udyan: Swadhinata Stambha (50 m glowing stacked-glass Light
-      // Tower) rising cleanly on its compact plinth inside the real OSM reflecting
-      // lake, leaving the surrounding water intact.
-      colliderTop = 3.0;
-      addBox(group, [20, 1.4, 20], [0, 0.7, 0], paleConcrete);
-      addBox(group, [14, 2.0, 14], [0, 2.0, 0], recess);
-      // Iconic 50 m stacked-glass Independence Tower (glows at night)
-      addBox(group, [5.6, 50, 5.6], [0, 27.6, 0], beaconGlass);
-      for (let y = 6; y <= 50; y += 4.5) {
-        addBox(group, [6.2, 0.36, 6.2], [0, y, 0], silverPanel);
-      }
-      addBox(group, [4.6, 1.2, 4.6], [0, 53.2, 0], silverPanel);
-      solid(0, 0, 5, 53.8);
-      // Shikha Chirantan (Eternal Flame) pedestal on the south plinth corner
-      addCylinder(group, 3.2, 4.2, 1.8, [0, 2.3, 12], bronze, 12);
-      addCone(group, 1.4, 3.2, [0, 4.6, 12], monumentRed, 8);
-    } else if (landmark.kind === "rabindra-sarobar") {
-      // Dhanmondi Lake & Rabindra Sarobar: stepped open-air cultural amphitheatre
-      // facing the lake, iconic red hanging pedestrian footbridge, and lakeside trees.
-      colliderTop = 3.2;
-      perchTarget = [-6, 9];
-      addBox(group, [60, 0.7, 48], [0, 0.35, 0], paleConcrete);
-      // Stepped semicircular waterfront amphitheatre tiers
-      for (let tier = 0; tier < 6; tier++) {
-        const radius = 10 + tier * 3.0;
-        const height = 0.8 + tier * 0.72;
-        const step = new THREE.Mesh(
-          new THREE.CylinderGeometry(radius, radius, height, 28, 1, false, Math.PI * 0.55, Math.PI * 0.9),
-          tier % 2 === 0 ? terracotta : paleConcrete,
-        );
-        step.position.set(-6, 0.7 + height / 2, -2);
-        step.castShadow = true;
-        step.receiveShadow = true;
-        group.add(step);
-      }
-      // Circular waterfront performance stage & lightweight cultural canopy (10.5 m)
-      addCylinder(group, 8.8, 9.2, 1.4, [-6, 1.4, 4], whiteStone, 24);
-      addBox(group, [15, 0.7, 8], [-6, 9.8, 9], terracotta);
-      for (const sx of [-12, 0]) addCylinder(group, 0.45, 0.5, 8.4, [sx, 5.6, 9], whiteStone, 8);
-      solid(-6, 9, 8.5, 10.2);
-      // Iconic Dhanmondi Lake red arched pedestrian footbridge beside the cove
-      addBox(group, [30, 1.2, 4.2], [16, 3.2, -14], paleConcrete);
-      for (const side of [-2.0, 2.0]) {
-        for (const px of [7, 25]) {
-          addCylinder(group, 0.5, 0.65, 9.5, [px, 5.2, -14 + side], monumentRed, 8);
+      clearSite(0, 12, 22, 36);
+      // Park trees keep clear of the crown so it stands alone.
+      clearSite(0, -4, 21, 20);
+      // The shore boardwalk and the footbridge, in world axes (east +x, south
+      // +z) about the tree: OSM 31664577's shoreline offset 1.4 m inland.
+      const shore = new THREE.Group();
+      shore.rotation.y = -landmark.heading;
+      group.add(shore);
+      const walk = (points: Array<[number, number]>, deckY: number, width: number) => {
+        for (let index = 1; index < points.length; index++) {
+          const [ax, az] = points[index - 1];
+          const [bx, bz] = points[index];
+          const length = Math.hypot(bx - ax, bz - az);
+          const [nx, nz] = [-(bz - az) / length, (bx - ax) / length];
+          addBeam(shore, [ax, deckY, az], [bx, deckY, bz], width, 0.3, brick, 1.2);
+          for (const side of [-1, 1]) {
+            const ox = nx * side * (width / 2 - 0.05);
+            const oz = nz * side * (width / 2 - 0.05);
+            addBeam(shore, [ax + ox, deckY + 0.6, az + oz], [bx + ox, deckY + 0.6, bz + oz], 0.1, 1.0, landmarkBark, 0.2);
+          }
         }
-        addBox(group, [20, 0.7, 0.6], [16, 9.6, -14 + side], monumentRed);
+      };
+      walk([[66.5, 28.5], [55.3, 5.9], [49.1, -3.8], [43.3, -10.8], [29.9, -21], [9.4, -28.1], [-8.5, -29.5], [-21.3, -27.3],
+        [-31.6, -21.3], [-36.6, -15.6], [-38.4, -9.8], [-38, 1], [-35.1, 19.6], [-32, 33.2]], 0.5, 3);
+      walk([[-92.3, -266.1], [-40.2, -72.5], [-36, -64.2], [-31, -57.3], [-26.6, -54.3], [-17.7, -52.3], [3.3, -53.3], [20.6, -54],
+        [47.8, -52.9], [70.1, -49.3], [98.2, -36.7]], 0.5, 3);
+      // The long low footbridge across the west arm, on concrete piers.
+      walk([[-58, -150], [-136, -150]], 1.4, 2.6);
+      for (let x = -62; x >= -132; x -= 7) addBox(shore, [0.6, 1.3, 2.2], [x, 0.6, -150], paleConcrete);
+      // Mukto Mancha, the small open-air stage north of the lake.
+      addBox(shore, [12.6, 1.5, 11.3], [34.5, 0.75, -95], paleConcrete);
+    } else if (landmark.kind === "suhrawardy-udyan") {
+      // Swadhinata Stambha: a 50 m square glass shaft with its steel lattice
+      // showing through, at the south end of the Museum of Independence's roof
+      // plaza. The plaza is a pale stone deck between the arms of the lake (map
+      // water), with a round pool, rows of skylights, a long relief wall down
+      // its east edge and broad steps down to the park at the north end.
+      // Local +Z runs NNW up the plaza; local -X is east. Shikha Chirantan, the
+      // eternal flame, stands 242 m up the same axis and is not modelled here.
+      const DECK = 2.2;
+      colliderTop = DECK;
+      // Land on the cap frame beside the mast.
+      perchTarget = [2.2, 2.2];
+      // The deck (OSM 259718868): x -20.5…18.5, from 20 m south of the tower to
+      // the head of the steps.
+      addBox(group, [39, DECK + 0.9, 153], [-1, (DECK - 0.9) / 2, 56.5], paleConcrete);
+      for (let step = 0; step < 8; step++) {
+        const stepTop = DECK - ((step + 1) * DECK) / 9;
+        addBox(group, [39, stepTop + 0.9, 1.5], [-1, (stepTop - 0.9) / 2, 133.75 + step * 1.5], paleConcrete);
       }
-      // Lush lakeside trees framing the promenade
-      for (const [tx, tz, mat] of [
-        [-26, -18, landmarkCanopy],
-        [-28, 14, landmarkKrishnachura],
-        [22, 16, landmarkLightCanopy],
-        [8, 20, landmarkCanopy],
-        [-14, -22, landmarkLightCanopy],
-      ] as const) {
-        addLandmarkTree(group, tx, tz, 5.4, 6.8, mat);
+      // Pairs of square skylights over the galleries below.
+      for (let row = 0; row < 9; row++) {
+        const z = 18 + row * 12.5;
+        if (Math.abs(z - 70) < 12) continue;
+        for (const x of [-15, -11.6, -3, 0.4, 9, 12.4]) addBox(group, [2.6, 0.12, 1.6], [x, DECK + 0.02, z], beaconGlass);
       }
-    } else if (landmark.kind === "baldha-garden") {
-      // Baldha Garden (Wari): walled historic botanical sanctuary (Cybele & Psyche),
-      // Shankhanidhi lily pond with stepped ghat, glasshouse conservatory, and rare trees.
+      // The round pool in a stepped rim, on the axis north of the tower.
+      addArcSlab(group, 8.6, 10.2, 0, Math.PI * 2, DECK, 0.1, concrete, 28).position.set(-1, DECK, 70);
+      addCylinder(group, 8.6, 8.6, 0.08, [-1, DECK + 0.02, 70], water, 28);
+      // Relief wall (OSM 947680219): grey board-marked concrete, its plaza face
+      // carrying a terracotta relief with a ragged lower edge.
+      addBox(group, [3, DECK + 6.9, 127], [-22.5, (DECK + 5.1) / 2, 85.5], boardConcrete);
+      for (let panel = 0; panel < 16; panel++) {
+        const bottom = DECK + 1.6 + ((panel * 7) % 5) * 0.45;
+        const relief = addBox(group, [0.2, DECK + 5.6 - bottom, 7.94], [-20.92, (DECK + 5.6 + bottom) / 2, 25.97 + panel * 7.94], terracotta);
+        relief.castShadow = false;
+      }
+      // The stambha: plinth, glass shaft, the steel frame outside the glass
+      // (corner posts, a ring and a cross-brace on every face every 4 m), cap
+      // frame and mast.
+      const SHAFT_BASE = DECK + 1;
+      const SHAFT = 50;
+      addBox(group, [11.4, 1, 10.4], [0, DECK + 0.5, 0], concrete);
+      addBox(group, [7, SHAFT, 7], [0, SHAFT_BASE + SHAFT / 2, 0], beaconGlass);
+      for (const cx of [-1, 1]) {
+        for (const cz of [-1, 1]) addBox(group, [0.42, SHAFT, 0.42], [cx * 3.52, SHAFT_BASE + SHAFT / 2, cz * 3.52], plantGrey);
+      }
+      const PANEL = 4;
+      const brace = Math.hypot(7, PANEL);
+      const braceAngle = Math.atan2(PANEL, 7);
+      for (let y = SHAFT_BASE; y < SHAFT_BASE + SHAFT - 0.1; y += PANEL) {
+        for (let face = 0; face < 4; face++) {
+          const face1 = new THREE.Group();
+          face1.rotation.y = (face * Math.PI) / 2;
+          group.add(face1);
+          addBox(face1, [7.1, 0.22, 0.14], [0, y, 3.56], plantGrey);
+          for (const sign of [-1, 1]) {
+            const bar = addBox(face1, [brace, 0.14, 0.1], [0, y + PANEL / 2, 3.55], plantGrey);
+            bar.rotation.z = sign * braceAngle;
+          }
+        }
+      }
+      addBox(group, [7.4, 0.7, 7.4], [0, SHAFT_BASE + SHAFT + 0.35, 0], plantGrey);
+      addCylinder(group, 0.1, 0.16, 5, [0, SHAFT_BASE + SHAFT + 3.2, 0], plantGrey, 5);
+      solid(0, 0, 4.2, SHAFT_BASE + SHAFT + 0.7);
+      clearSite(-2, 62, 23, 86);
+    } else if (landmark.kind === "rabindra-sarobar") {
+      // Rabindra Sarobar: a sunken open-air amphitheatre on the west shore of
+      // Dhanmondi Lake. Grass-and-step tiers wrap ~215° round a small round
+      // stage; a curved six-column colonnade with a red beam stands between the
+      // stage and the water. Local +Z faces the audience (WNW), the lake is -Z.
       colliderTop = 3.8;
-      perchTarget = [16, -10];
-      // Brick compound perimeter walls (68 × 62 m, clear of surrounding Wari roads)
-      for (const sideZ of [-30.5, 30.5]) addBox(group, [68, 3.4, 1.1], [0, 1.7, sideZ], redBrick);
-      for (const sideX of [-33.5, 33.5]) addBox(group, [1.1, 3.4, 62], [sideX, 1.7, 0], redBrick);
-      addBox(group, [12, 6.6, 3.0], [0, 3.3, 30.5], redBrick);
-      addBox(group, [13.2, 0.6, 3.6], [0, 6.8, 30.5], cream);
-      // Shankhanidhi lily pond & stepped pale stone ghat
-      addBox(group, [26, 0.6, 20], [-14, 0.3, -4], paleConcrete);
-      addBox(group, [22, 0.3, 16], [-14, 0.65, -4], water);
-      // Victorian glasshouse conservatory (orchid & cactus house)
-      addBox(group, [20, 5.6, 13], [16, 2.8, -10], atriumGlass);
-      for (const gx of [8, 12, 16, 20, 24]) addBox(group, [0.45, 6.0, 13.6], [gx, 3.0, -10], whiteStone);
-      const conservatoryRoof = addCylinder(group, 6.5, 6.5, 20, [16, 6.0, -10], atriumGlass, 14);
-      conservatoryRoof.rotation.z = Math.PI / 2;
-      solid(16, -10, 10.5, 12.6);
-      // Historic Joy House heritage garden pavilion
-      addBox(group, [14, 6.4, 11], [15, 3.2, 14], cream);
-      addBox(group, [15.2, 0.8, 12.2], [15, 6.6, 14], terracotta);
-      solid(15, 14, 8, 7.2);
-      // Cross garden footpaths (staggered vertically by 2 cm to prevent coplanar z-fighting)
-      addBox(group, [62, 0.25, 3.0], [0, 0.2, 8], plazaBrick);
-      addBox(group, [3.0, 0.25, 56], [2, 0.22, 0], plazaBrick);
-      for (const [tx, tz, r, mat] of [
-        [-24, -22, 5.4, landmarkCanopy],
-        [-25, 18, 5.4, landmarkKrishnachura],
-        [-8, 21, 5.0, landmarkLightCanopy],
-        [26, -22, 5.2, landmarkCanopy],
-        [26, 22, 5.0, landmarkLightCanopy],
-        [0, -22, 5.6, landmarkCanopy],
-      ] as const) {
-        addLandmarkTree(group, tx, tz, r, 7.0, mat);
+      perchTarget = [0, -7];
+      // OSM seating fan 983581387: bearings 19° → west → 166°, i.e. local
+      // -99° → +114° from +Z, open toward the lake.
+      const FAN_START = -1.73;
+      const FAN_LENGTH = 3.72;
+      const PATH_TOP = 0.2;
+      // Brick ring path round the stage, running on to a parapet at the shore.
+      addCylinder(group, 9.5, 9.5, PATH_TOP, [0, PATH_TOP / 2, 0], redBrick, 32);
+      addBox(group, [22, 0.18, 2.6], [0, 0.09, -10.4], redBrick);
+      addBox(group, [22, 0.8, 0.4], [0, 0.4, -11.7], concrete);
+      // Stage: Ø13.6 m drum 0.9 m up, on one step ring.
+      addCylinder(group, 7.7, 7.7, 0.45, [0, PATH_TOP + 0.225, 0], concrete, 32);
+      addCylinder(group, 6.8, 6.8, 0.9, [0, PATH_TOP + 0.45, 0], marble, 32);
+      // Five tier bands, each two 0.36 m concrete risers and a 2 m grass tread,
+      // with pale radial aisles cutting through them.
+      for (let band = 0; band < 5; band++) {
+        const radius = 9.5 + band * 2.9;
+        const riserTop = PATH_TOP + 0.36 * (band * 2 + 1);
+        const treadTop = PATH_TOP + 0.36 * (band * 2 + 2);
+        addArcSlab(group, radius, radius + 0.45, FAN_START, FAN_LENGTH, 0, riserTop, concrete, 28);
+        addArcSlab(group, radius + 0.45, radius + 2.9, FAN_START, FAN_LENGTH, 0, treadTop, concrete, 28);
+        addArcSlab(group, radius + 0.95, radius + 2.9, FAN_START, FAN_LENGTH, treadTop, 0.05, lawn, 28);
+        for (let aisle = 0; aisle < 5; aisle++) {
+          const theta = FAN_START + (FAN_LENGTH * (aisle + 0.5)) / 5;
+          const mid = radius + 1.45;
+          const step = addBox(group, [1.6, treadTop + 0.07, 2.9], [Math.sin(theta) * mid, (treadTop + 0.07) / 2, Math.cos(theta) * mid], marble);
+          step.rotation.y = theta;
+        }
       }
+      // Grass berm stepping down from the top tier to a brick retaining wall,
+      // then the earth footpath under the trees.
+      for (const [inner, outer, terraceTop] of [[24, 27.5, 3.45], [27.5, 31, 2.7], [31, 34, 1.9]] as const) {
+        addArcSlab(group, inner, outer, FAN_START, FAN_LENGTH, 0, terraceTop, lawn, 28);
+      }
+      addArcSlab(group, 34, 34.6, FAN_START, FAN_LENGTH, 0, 2.15, redBrick, 28);
+      addArcSlab(group, 34.6, 38, FAN_START - 0.05, FAN_LENGTH + 0.1, 0, 0.14, packedEarth, 28);
+      // The signature: six white columns on a curved bench, carrying one
+      // continuous red beam, on the lake side of the stage.
+      const ARC_START = 2.217;
+      const ARC_LENGTH = 1.85;
+      addArcSlab(group, 6.6, 7.4, ARC_START - 0.06, ARC_LENGTH + 0.12, PATH_TOP, 1.05, marble, 12);
+      for (let column = 0; column < 6; column++) {
+        const theta = ARC_START + (ARC_LENGTH * column) / 5;
+        addCylinder(group, 0.28, 0.3, 4.2, [Math.sin(theta) * 7, PATH_TOP + 1.05 + 2.1, Math.cos(theta) * 7], marble, 10);
+      }
+      addArcSlab(group, 6.55, 7.45, ARC_START - 0.04, ARC_LENGTH + 0.08, PATH_TOP + 5.25, 1.05, monumentRed, 12);
+      solid(0, -6, 5, 5.5);
+      // Big rain trees and figs ring the bowl; on the south side (local +X)
+      // their crowns overhang the upper tiers. Coconut palms by the stage.
+      for (let index = 0; index < 12; index++) {
+        const theta = -1.95 + index * 0.37;
+        const radius = 43 + (index % 3) * 2.5;
+        addLandmarkTree(group, Math.sin(theta) * radius, Math.cos(theta) * radius, 7 + (index % 2), 7.4, landmarkCanopy);
+      }
+      for (const [tx, tz, radius] of [[31, 6, 8], [26, -9, 7], [34, 19, 7.5]] as const) addLandmarkTree(group, tx, tz, radius, 8, landmarkCanopy);
+      addPalm(group, 11.5, -8.6, 10.5, 0.1, 0.4);
+      addPalm(group, 14.6, -6.2, 9, 0.14, -0.6);
+      addPalm(group, 8.4, -11, 11.5, 0.08, 2.2);
+    } else if (landmark.kind === "baldha-garden") {
+      // Baldha Garden, Wari: a narrow 229 m walled strip (OSM way 34597180)
+      // running NNE beside Narinda Road, almost wholly under a closed canopy
+      // of tall old trees and palms. The one clear opening is the
+      // whitewashed water-lily tank with its railed walk and a stepped ghat
+      // lined with red flower pots; small whitewashed plant houses stand in
+      // clearings. Local +Z runs NNE along the strip (heading 2.88).
+      boundsCollider = false;
+      const strip = ([
+        [23.717837, 90.4193419], [23.7178026, 90.4195143], [23.7177692, 90.4195339], [23.7174688, 90.4197211],
+        [23.7171683, 90.419791], [23.7167939, 90.419684], [23.7157676, 90.4193711], [23.715782, 90.4191111],
+        [23.7166146, 90.419199], [23.7166261, 90.4190636], [23.7170472, 90.4190596], [23.7171264, 90.4192127],
+        [23.717449, 90.419301],
+      ] as const).map(([lat, lon]) => toLocal(lat, lon));
+      // In the local frame +Z is NNE, so a plan drawn from local (x, z)
+      // mirrors; the shape is built in (x, -z) and turned back by rotateX.
+      const ground = new THREE.Mesh(new THREE.ShapeGeometry(new THREE.Shape(strip.map(([x, z]) => new THREE.Vector2(x, -z)))), lawn);
+      ground.rotation.x = -Math.PI / 2;
+      ground.position.y = 0.12;
+      ground.receiveShadow = true;
+      group.add(ground);
+      // The low whitewashed compound wall.
+      addSweptBox(group, [...strip, strip[0]].map(([x, z]) => [x, 2.1, z] as QuadPoint), 0.2, 2.1, whiteStone);
+      // The lily tank: whitewashed retaining walls, water, railings, and the ghat.
+      const TANK_X = -2;
+      const TANK_Z = -14;
+      for (const side of [-1, 1]) {
+        addBox(group, [27, 0.9, 0.8], [TANK_X, 0.45, TANK_Z + side * 6.6], whiteStone);
+        addBox(group, [0.8, 0.9, 12.4], [TANK_X + side * 13.1, 0.45, TANK_Z], whiteStone);
+        addBox(group, [26.6, 0.08, 0.08], [TANK_X, 1.9, TANK_Z + side * 7.3], whiteStone);
+        addBox(group, [0.08, 0.08, 14.2], [TANK_X + side * 13.8, 1.9, TANK_Z], whiteStone);
+      }
+      addBox(group, [25.4, 0.1, 11.6], [TANK_X, 0.32, TANK_Z], water);
+      addBox(group, [30, 0.06, 18], [TANK_X, 0.14, TANK_Z], paleConcrete);
+      for (let step = 0; step < 4; step++) addBox(group, [6, 0.3, 1], [TANK_X + 4, 0.75 + step * 0.3, TANK_Z + 7.4 + step], paleConcrete);
+      for (let pot = 0; pot < 6; pot++) {
+        addCylinder(group, 0.3, 0.22, 0.5, [TANK_X + 1.2 + (pot % 2) * 5.6, 1.15 + Math.floor(pot / 2) * 0.3, TANK_Z + 7.4 + Math.floor(pot / 2)], monumentRed, 6);
+      }
+      clearSite(TANK_X, TANK_Z, 17, 11);
+      // Whitewashed plant houses (Camellia, Fern, Cactus and Conservatory
+      // houses), each in its own clearing.
+      for (const [hx, hz, w, d] of [[8, 34, 10, 6], [-14, 58, 8, 6], [-12, -60, 12, 7], [2, -92, 8, 5]] as const) {
+        addBox(group, [w, 4, d], [hx, 2, hz], whiteStone);
+        addBox(group, [w + 0.6, 0.35, d + 0.6], [hx, 4.15, hz], roofGrey);
+        clearSite(hx, hz, w / 2 + 3, d / 2 + 3);
+        solidBox(hx, hz, w / 2, d / 2, 4.4);
+      }
+      perchTarget = [-12, -60];
+      // The closed canopy: big old crowns packed wall to wall, and tall palms.
+      const rng = seededRandom(70_918);
+      const canopyMats = [landmarkCanopy, landmarkCanopy, landmarkLightCanopy, landmarkCanopy, landmarkLightCanopy, landmarkCanopy, landmarkCanopy, landmarkLightCanopy, landmarkCanopy, landmarkKrishnachura];
+      const open = (x: number, z: number, r: number) => (
+        (Math.abs(x - TANK_X) < 14 + r * 0.5 && Math.abs(z - TANK_Z) < 8 + r * 0.5)
+        || [[8, 34], [-14, 58], [-12, -60], [2, -92]].some(([hx, hz]) => Math.hypot(x - hx, z - hz) < 6 + r * 0.6)
+      );
+      for (let z = -114; z <= 108; z += 10.5) {
+        for (let x = -30; x <= 42; x += 10.5) {
+          const px = x + (rng() - 0.5) * 6;
+          const pz = z + (rng() - 0.5) * 6;
+          const radius = 5.4 + rng() * 2.6;
+          if (!pointInPolygon(px, pz, strip) || open(px, pz, radius)) continue;
+          addLandmarkTree(group, px, pz, radius, 8 + rng() * 5, canopyMats[Math.floor(rng() * canopyMats.length)]);
+        }
+      }
+      for (const [px, pz, h] of [[10, -4, 19], [-14, -28, 17], [16, 70, 18], [-20, 20, 16]] as const) addPalm(group, px, pz, h, 0.04, px);
+      // The garden is its own woodland: keep the whole strip free of city
+      // blocks and of the generic park trees the DHAKA_PARKS row would add.
+      clearSite(-9, -90, 19, 30);
+      clearSite(1, -30, 29, 30);
+      clearSite(6, 30, 34, 30);
+      clearSite(11, 84, 24, 24);
     } else if (landmark.kind === "botanical-garden") {
-      // National Botanical Garden (Mirpur): grand botanical archway, twin domed
-      // tropical glasshouse conservatories, terraced rose garden, and dense woodland.
-      colliderTop = 4.2;
-      perchTarget = [22, -14];
-      // Formal circular Rose Garden with terracotta/crimson floral rings & fountain
-      addCylinder(group, 22, 22.5, 0.4, [-20, 0.2, 6], plazaBrick, 28);
-      addCylinder(group, 17, 17.2, 0.5, [-20, 0.35, 6], monumentRed, 24);
-      addCylinder(group, 11, 11.2, 0.58, [-20, 0.48, 6], lawn, 24);
-      addCylinder(group, 5.2, 5.6, 0.9, [-20, 0.72, 6], water, 20);
-      addCylinder(group, 1.1, 1.5, 3.2, [-20, 2.0, 6], whiteStone, 10);
-      // Twin domed tropical glasshouses / orchid conservatories
-      for (const [cx, cz, r] of [[22, -14, 13.5], [26, 18, 10.5]] as const) {
-        addCylinder(group, r, r * 1.04, 4.4, [cx, 2.2, cz], whiteStone, 18);
-        addLathe(group, domeProfile(r * 0.96, r * 0.88, 0.05, 10), 18, [cx, 4.4, cz], atriumGlass, false);
-        addFinial(group, [cx, 4.4 + r * 0.88, cz], 0.7, silverPanel);
-        solid(cx, cz, r, 4.4 + r * 0.88);
+      // National Botanical Garden, Mirpur: an 84 ha closed woodland of
+      // mahogany, rain trees and palms round many ponds, which reads from the
+      // air as one lumpy dark green mass. Inside it, the ≈170 m rose-garden
+      // path circle on open lawn, a low dark arched shade-net orchid house, and
+      // a slim concrete watch tower with an open deck above the canopy. At the
+      // south, the cream-pillared gate with its flat salmon-pink cornice.
+      boundsCollider = false;
+      // Canopy masses: broad low domes packed edge to edge over the garden
+      // lawn (DHAKA_PARKS row), kept off the map's ponds (circles that cover
+      // public/dhaka-map.json water, as east/south metres from the table
+      // point) and off the open rose garden.
+      const PONDS: Array<[number, number, number]> = [
+        [99, -315, 51], [315, -51, 33], [45, -345, 33], [-111, 153, 27], [303, -93, 27], [-297, -141, 21], [189, 261, 21],
+        [291, -123, 21], [141, -261, 20], [255, 291, 20], [-291, -117, 20], [9, -273, 16], [231, 273, 16], [-105, 351, 15],
+        [-87, 351, 15], [-123, 123, 15], [159, -237, 15], [213, 267, 15], [279, 303, 15], [-105, 117, 15], [-171, -123, 15],
+        [171, 243, 15], [153, -339, 15], [-123, 351, 11], [333, -15, 11], [213, -75, 9], [-291, -93, 9], [3, -297, 9],
+        [-279, -93, 9], [21, -291, 9], [-273, -183, 9], [-291, -165, 9], [-69, 351, 9], [141, -237, 9], [-135, 345, 9],
+        [297, -15, 9], [-69, 363, 9], [-303, -165, 9], [57, -273, 9], [3, -255, 9],
+      ];
+      const PARK_ANGLE = 0.1;
+      // Mostly deep green, a lighter crown here and there, and the odd
+      // flowering krishnachura.
+      const canopyMats: THREE.Material[] = [];
+      for (let index = 0; index < 18; index++) canopyMats.push(index % 4 === 1 ? landmarkLightCanopy : landmarkCanopy);
+      canopyMats.push(landmarkKrishnachura);
+      const ORCHID: [number, number] = [-96, 40];
+      const TOWER: [number, number] = [94, -42];
+      // The real gate (23.816639, 90.348489) lies ≈170 m south of where this
+      // lawn ends, so it stands on the lawn's south edge on the same line, as
+      // east/south metres from the table point.
+      const GATE: [number, number] = [3, 320];
+      const rng = seededRandom(52_331);
+      const SPACING = 42;
+      for (let dz = -330; dz <= 330; dz += SPACING) {
+        for (let dx = -440; dx <= 440; dx += SPACING) {
+          const wx = dx + (rng() - 0.5) * SPACING * 0.7;
+          const wz = dz + (rng() - 0.5) * SPACING * 0.7;
+          const radius = 18 + rng() * 7;
+          const ex = wx * Math.cos(PARK_ANGLE) + wz * Math.sin(PARK_ANGLE);
+          const ez = -wx * Math.sin(PARK_ANGLE) + wz * Math.cos(PARK_ANGLE);
+          if ((ex / 430) ** 2 + (ez / 322) ** 2 > 1) continue;
+          if (Math.hypot(wx, wz) < 100 + radius * 0.4) continue;
+          if ([ORCHID, TOWER].some(([sx, sz]) => {
+            const [ox, oz] = [sx * cosH + sz * sinH, -sx * sinH + sz * cosH];
+            return Math.hypot(wx - ox, wz - oz) < 18 + radius * 0.7;
+          }) || Math.hypot(wx - GATE[0], wz - GATE[1]) < 30 + radius * 0.7) continue;
+          if (PONDS.some(([px, pz, pr]) => Math.hypot(wx - px, wz - pz) < pr + radius * 0.75)) continue;
+          const [lx, lz] = [wx * cosH - wz * sinH, wx * sinH + wz * cosH];
+          const crown = new THREE.Mesh(treeCrownGeo, canopyMats[Math.floor(rng() * canopyMats.length)]);
+          crown.position.set(lx, radius * 0.36, lz);
+          crown.scale.set(radius, radius * (0.5 + rng() * 0.16), radius * (0.85 + rng() * 0.3));
+          crown.rotation.y = rng() * Math.PI;
+          group.add(crown);
+        }
       }
-      // Connecting glass gallery & arched entry pavilion
-      addBox(group, [8, 4.8, 16], [24, 2.4, 2], atriumGlass);
-      addBox(group, [22, 7.6, 5.5], [-4, 3.8, 40], terracotta);
-      addBox(group, [24, 1.0, 6.8], [-4, 7.9, 40], cream);
-      solid(-4, 40, 12, 8.8);
-      // Broad paved promenades (staggered vertically by 2 cm) & towering specimen groves
-      addBox(group, [92, 0.25, 4.6], [0, 0.16, 6], paleConcrete);
-      addBox(group, [4.6, 0.25, 82], [-4, 0.18, 0], paleConcrete);
-      for (const [tx, tz, r, mat] of [
-        [-42, -32, 7.0, landmarkCanopy],
-        [-14, -34, 6.8, landmarkLightCanopy],
-        [42, -34, 6.6, landmarkKrishnachura],
-        [-44, 30, 6.5, landmarkCanopy],
-        [44, 32, 6.4, landmarkLightCanopy],
-        [6, -32, 6.2, landmarkCanopy],
-        [-42, -4, 6.2, landmarkKrishnachura],
-      ] as const) {
-        addLandmarkTree(group, tx, tz, r, 8.2, mat);
+      // The rose garden: a path circle on open lawn with low rose beds.
+      const roseRing = new THREE.Mesh(new THREE.RingGeometry(82, 86, 64), paleConcrete);
+      roseRing.rotation.x = -Math.PI / 2;
+      roseRing.position.y = 0.16;
+      group.add(roseRing);
+      for (const [ringRadius, beds] of [[24, 8], [44, 12], [64, 16]] as const) {
+        for (let bed = 0; bed < beds; bed++) {
+          const angle = ((bed + 0.5) / beds) * Math.PI * 2;
+          const rose = addBox(group, [6, 0.4, 2], [Math.sin(angle) * ringRadius, 0.2, Math.cos(angle) * ringRadius], bed % 2 ? salmon : monumentRed);
+          rose.rotation.y = angle + Math.PI / 2;
+        }
       }
+      addCylinder(group, 7, 7, 0.5, [0, 0.25, 0], monumentRed, 18);
+      addSweptBox(group, [[-84, 0.2, 0], [84, 0.2, 0]], 1.6, 0.2, paleConcrete);
+      addSweptBox(group, [[0, 0.22, -84], [0, 0.22, 84]], 1.6, 0.2, paleConcrete);
+      clearOval(0, 0, 88, 88);
+      for (const [tx, tz] of [[30, 40], [-36, -30], [44, -48], [-50, 52], [70, 20], [-74, -12]] as const) addPalm(group, tx, tz, 11, 0.05, tx);
+      // The orchid house: a low arched shade-net shed on a brick plinth.
+      addBox(group, [31, 0.8, 11], [ORCHID[0], 0.4, ORCHID[1]], redBrick);
+      const net = addCylinder(group, 5, 5, 30, [ORCHID[0], 0.8, ORCHID[1]], recess, 12);
+      net.rotation.z = Math.PI / 2;
+      net.scale.set(1, 1, 0.8);
+      solidBox(ORCHID[0], ORCHID[1], 15.5, 5.5, 5);
+      // The watch tower: a square shaft, an open deck with rails, a thin roof.
+      addBox(group, [4, 14, 4], [TOWER[0], 7, TOWER[1]], paleConcrete);
+      addBox(group, [7.4, 0.5, 7.4], [TOWER[0], 13.2, TOWER[1]], paleConcrete);
+      for (const side of [-1, 1]) {
+        addBox(group, [7.4, 1.1, 0.12], [TOWER[0], 14.0, TOWER[1] + side * 3.64], paleConcrete);
+        addBox(group, [0.12, 1.1, 7.4], [TOWER[0] + side * 3.64, 14.0, TOWER[1]], paleConcrete);
+      }
+      for (const cx of [-1, 1]) for (const cz of [-1, 1]) addBox(group, [0.25, 2.6, 0.25], [TOWER[0] + cx * 3.4, 14.7, TOWER[1] + cz * 3.4], paleConcrete);
+      addBox(group, [8.2, 0.3, 8.2], [TOWER[0], 16.1, TOWER[1]], paleConcrete);
+      solid(TOWER[0], TOWER[1], 3.8, 16.3);
+      perchTarget = [TOWER[0], TOWER[1]];
+      // The main gate, its front to the south-south-east (≈160°), with the
+      // brick boundary wall either side.
+      const [gateX, gateZ] = [GATE[0] * cosH - GATE[1] * sinH, GATE[0] * sinH + GATE[1] * cosH];
+      const gate = new THREE.Group();
+      gate.position.set(gateX, 0, gateZ);
+      const frontX = Math.sin((160 * Math.PI) / 180);
+      const frontZ = -Math.cos((160 * Math.PI) / 180);
+      gate.rotation.y = Math.atan2(frontX * cosH - frontZ * sinH, frontX * sinH + frontZ * cosH);
+      group.add(gate);
+      for (const side of [-1, 1]) {
+        addBox(gate, [1.4, 9, 1.4], [side * 5.6, 4.5, 0], stationCream);
+        addBox(gate, [1.4, 7, 1.4], [side * 9.2, 3.5, 0], stationCream);
+        addBox(gate, [2.8, 1.1, 2.6], [side * 9.2, 7.4, 0], salmon);
+        addBox(gate, [1.2, 5, 1.2], [side * 12.4, 2.5, 0], stationCream);
+        addBox(gate, [2.4, 0.9, 2.2], [side * 12.4, 5.4, 0], salmon);
+        addBox(gate, [46, 2.5, 0.5], [side * 36, 1.25, 0], redBrick);
+      }
+      addBox(gate, [14.6, 1.6, 2.8], [0, 9.8, 0], salmon);
+      addBox(gate, [13.6, 0.4, 2.2], [0, 8.8, 0], stationCream);
+      addBox(gate, [9.4, 1.4, 0.3], [0, 7.6, 0], paleConcrete);
+      addBox(gate, [9.8, 3, 0.2], [0, 1.5, 0], seatGreen);
+      solidBox(gateX, gateZ, 8, 2, 10.6);
+      clearSite(gateX, gateZ + 8, 30, 12);
     } else if (landmark.kind === "national-zoo") {
-      // Bangladesh National Zoo (Mirpur): iconic entrance archway, large geodesic
-      // aviary dome, moated circular wildlife habitats, visitor plaza, and shade groves.
-      colliderTop = 4.2;
-      perchTarget = [0, -4];
-      // Central paved visitor plaza & main entrance arch
-      addCylinder(group, 17, 17.5, 0.5, [0, 0.25, 32], paleConcrete, 24);
-      addBox(group, [28, 8.6, 6], [0, 4.3, 46], terracotta);
-      addBox(group, [30, 1.2, 7.2], [0, 8.9, 46], cream);
-      addBox(group, [10, 5.4, 6.6], [0, 2.7, 46], archDark);
-      solid(0, 46, 15, 10.0);
-      // Large geodesic Aviary Dome (iconic silhouette from above)
-      addCylinder(group, 15.5, 16, 3.4, [0, 1.7, -4], paleConcrete, 20);
-      addLathe(group, domeProfile(15.2, 13.5, 0.04, 10), 20, [0, 3.4, -4], atriumGlass, true);
-      for (let i = 0; i < 6; i++) {
-        const a = (i / 6) * Math.PI;
-        const rib = addBox(group, [30.8, 0.5, 0.5], [0, 3.5, -4], whiteStone);
-        rib.rotation.y = a;
+      // Bangladesh National Zoo (Mirpur, 186.6 acres): a woodland 1.3 km
+      // long between its North and South lakes (both already map water). The
+      // main gate on the east is four light grey concrete pylons stepping up
+      // from 8 to 13 m, banded blue and terracotta on their edges, with brown
+      // sign panels between them. Inside, a paved loop path runs past rows of
+      // low cage sheds, earth paddocks and the big netted walk-in aviary,
+      // under dense tree canopy. Positions are OSM (relation/ways in zoo
+      // dumps), in metres east (e) and north (n) of this landmark's point,
+      // authored in a world-axis child group so (e, n) map to (x, -z).
+      boundsCollider = false;
+      const site = new THREE.Group();
+      site.rotation.y = -landmark.heading;
+      group.add(site);
+      const plan = (e: number, n: number): [number, number] => [e * cosH + n * sinH, e * sinH - n * cosH];
+      const worldBox = (e0: number, e1: number, n0: number, n1: number, boxTop: number) => {
+        colliders.push({
+          x: group.position.x + (e0 + e1) / 2,
+          z: group.position.z - (n0 + n1) / 2,
+          halfWidth: (e1 - e0) / 2,
+          halfDepth: (n1 - n0) / 2,
+          top: boxTop,
+        });
+      };
+      // Ground-level work sits just above the park turf (world y ≈ 0.25).
+      const GROUND = -0.55;
+      // The main gate (OSM node 1813542591), facing east onto Zoo Road. From
+      // outside the pylons rise left (south) to right (north).
+      const GATE_E = 9;
+      const GATE_N = -116;
+      const pylons: Array<[number, number]> = [[-13.5, 8], [-4.5, 9.7], [4.5, 11.3], [13.5, 13]];
+      pylons.forEach(([offset, height], index) => {
+        const z = -(GATE_N + offset);
+        addBox(site, [2.6, height, 2.2], [GATE_E, height / 2, z], paleConcrete);
+        for (const face of [-1, 1]) {
+          for (let band = 0; band * 1.6 < height - 0.4; band++) {
+            const bandHeight = Math.min(1.6, height - band * 1.6);
+            addBox(site, [0.08, bandHeight, 0.75], [GATE_E + face * 1.33, band * 1.6 + bandHeight / 2, z + 0.72], band % 2 ? terracotta : carnivalBlue);
+          }
+        }
+        solid(...plan(GATE_E, GATE_N + offset), 1.4, height);
+        if (index === pylons.length - 1) return;
+        const [nextOffset] = pylons[index + 1];
+        addBox(site, [0.5, 1.8, nextOffset - offset - 2.2], [GATE_E, height - 1.4, -(GATE_N + (offset + nextOffset) / 2)], landmarkBark);
+      });
+      // Forecourt to the end of Zoo Road, ticket kiosks and brick counters.
+      addBox(site, [34, 0.2, 44], [GATE_E + 17, GROUND, -GATE_N], paleConcrete).castShadow = false;
+      for (const offset of [-19, 19]) addBox(site, [5, 3.2, 4], [GATE_E + 3, 1.6, -(GATE_N + offset)], paleConcrete);
+      addBox(site, [4, 3, 12], [GATE_E + 14, 1.5, -(GATE_N + 30)], terracotta);
+      // The paved paths: the entry walk and the great loop (OSM 39760229, 34228796).
+      const path = (points: Array<[number, number]>, width: number) => {
+        for (let index = 1; index < points.length; index++) {
+          const [e1, n1] = points[index - 1];
+          const [e2, n2] = points[index];
+          const length = Math.hypot(e2 - e1, n2 - n1);
+          if (length < 0.5) continue;
+          const strip = addBox(site, [length + width * 0.6, 0.2, width], [(e1 + e2) / 2, GROUND + 0.02 * (index % 2), -(n1 + n2) / 2], paleConcrete);
+          strip.rotation.y = Math.atan2(n2 - n1, e2 - e1);
+          strip.castShadow = false;
+        }
+      };
+      path([[GATE_E, GATE_N], [-20, -127], [-41, -122], [-68, -114], [-85, -107], [-100, -99], [-107, -90]], 6);
+      path([
+        [-476, -68], [-478, -40], [-475, -22], [-471, -13], [-465, -1], [-452, 13], [-432, 27], [-417, 38], [-397, 45],
+        [-362, 45], [-341, 38], [-317, 31], [-273, 31], [-249, 38], [-228, 51], [-201, 62], [-186, 77], [-175, 103],
+        [-159, 129], [-142, 151], [-133, 170], [-114, 194], [-102, 201], [-82, 207], [-53, 207], [-26, 203], [-11, 192],
+        [5, 175], [7, 159], [5, 140], [2, 105], [-2, 81], [-11, 39], [-21, 12], [-33, -19], [-54, -45], [-79, -68],
+        [-107, -90], [-135, -106], [-170, -127], [-193, -132], [-222, -143], [-242, -152], [-273, -155], [-290, -166],
+        [-304, -184], [-315, -212], [-325, -236], [-330, -256], [-330, -323], [-325, -344], [-317, -370], [-306, -407],
+        [-292, -447], [-289, -474], [-289, -537], [-297, -568], [-312, -589], [-336, -606], [-385, -609], [-417, -596],
+        [-435, -583], [-444, -572], [-457, -546], [-455, -511], [-455, -383], [-450, -353], [-446, -311], [-446, -227],
+        [-448, -195], [-457, -158], [-465, -124], [-476, -68],
+      ], 5);
+      // Enclosures (OSM bounds e0, e1, n0, n1): sheds with dark mesh fronts
+      // under grey roofs, earth paddocks with a low wall and a keeper's shed.
+      const enclosures: Array<[number, number, number, number, "shed" | "paddock"]> = [
+        [-305, -273, -439, -408, "shed"], [-284, -254, -452, -431, "shed"], [-275, -221, 87, 141, "paddock"],
+        [-66, -18, 18, 44, "shed"], [-63, -34, 53, 74, "shed"], [-438, -300, -578, -515, "paddock"],
+        [-487, -461, -131, -60, "paddock"], [-35, 20, 510, 605, "paddock"], [-310, -275, 74, 97, "shed"],
+        [-443, -416, 28, 55, "shed"], [-467, -445, 19, 35, "shed"], [-475, -457, -8, 17, "shed"],
+        [-388, -336, -384, -248, "paddock"], [-468, -335, -243, -207, "paddock"], [5, 71, 65, 213, "paddock"],
+        [-242, -194, 156, 233, "paddock"], [-35, -20, 53, 75, "shed"],
+      ];
+      for (const [e0, e1, n0, n1, type] of enclosures) {
+        const ce = (e0 + e1) / 2;
+        const cn = (n0 + n1) / 2;
+        const w = e1 - e0;
+        const d = n1 - n0;
+        if (type === "shed") {
+          addBox(site, [w - 3, 3.6, d - 3], [ce, 1.8, -cn], recess);
+          addBox(site, [w - 1.6, 0.4, d - 1.6], [ce, 3.8, -cn], roofGrey);
+          continue;
+        }
+        addBox(site, [w, 0.2, d], [ce, GROUND + 0.05, -cn], packedEarth).castShadow = false;
+        for (const [we, wn, ww, wd] of [[ce, n0, w, 0.6], [ce, n1, w, 0.6], [e0, cn, 0.6, d], [e1, cn, 0.6, d]] as const) {
+          addBox(site, [ww, 1.4, wd], [we, 0.15, -wn], roofGrey);
+        }
+        addBox(site, [Math.min(14, w * 0.4), 4, 8], [e0 + Math.min(14, w * 0.4) / 2 + 2, 2, -(n1 - 6)], recess);
+        addBox(site, [Math.min(14, w * 0.4) + 1.2, 0.4, 9.2], [e0 + Math.min(14, w * 0.4) / 2 + 2, 4.2, -(n1 - 6)], roofGrey);
       }
-      solid(0, -4, 15.5, 17.0);
-      // Moated circular wildlife enclosures (Bengal Tiger & Elephant habitats)
-      for (const [ex, ez, r] of [[-36, -16, 17], [36, -14, 16], [-32, 22, 13]] as const) {
-        addCylinder(group, r, r + 0.6, 0.45, [ex, 0.22, ez], water, 24);
-        addCylinder(group, r * 0.72, r * 0.75, 0.85, [ex, 0.55, ez], lawn, 20);
-        addCone(group, r * 0.28, 4.4, [ex - r * 0.16, 3.1, ez - r * 0.1], stoneStep, 7);
-        addBox(group, [7.5, 3.8, 5.5], [ex + r * 0.22, 2.7, ez + r * 0.15], brickTrim);
+      // The netted walk-in aviary (Birds Cage, OSM 207546840): tall posts and
+      // a roof net of dark steel over an 88 × 62 m bay.
+      const AVIARY: [number, number, number, number] = [-408, -320, 24, 86];
+      const AVIARY_TOP = 9.5;
+      for (let e = AVIARY[0]; e <= AVIARY[1] + 0.1; e += 11) {
+        addBox(site, [0.25, 0.25, AVIARY[3] - AVIARY[2]], [e, AVIARY_TOP, -(AVIARY[2] + AVIARY[3]) / 2], recess);
+        for (const n of [AVIARY[2], AVIARY[3]]) addBox(site, [0.5, AVIARY_TOP, 0.5], [e, AVIARY_TOP / 2, -n], recess);
       }
-      // Circular safari walkways (staggered vertically by 2 cm) & shade groves
-      addBox(group, [102, 0.25, 4.8], [0, 0.16, 14], paleConcrete);
-      addBox(group, [4.8, 0.25, 92], [0, 0.18, 0], paleConcrete);
-      for (const [tx, tz, r, mat] of [
-        [-48, -42, 6.8, landmarkCanopy],
-        [0, -42, 6.6, landmarkKrishnachura],
-        [48, -40, 6.8, landmarkLightCanopy],
-        [44, 24, 6.2, landmarkCanopy],
-        [-48, 40, 6.0, landmarkLightCanopy],
-        [42, 40, 5.8, landmarkKrishnachura],
-      ] as const) {
-        addLandmarkTree(group, tx, tz, r, 8.0, mat);
+      for (let n = AVIARY[2]; n <= AVIARY[3] + 0.1; n += 7.75) {
+        addBox(site, [AVIARY[1] - AVIARY[0], 0.25, 0.25], [(AVIARY[0] + AVIARY[1]) / 2, AVIARY_TOP, -n], recess);
+        for (const e of [AVIARY[0], AVIARY[1]]) addBox(site, [0.5, AVIARY_TOP, 0.5], [e, AVIARY_TOP / 2, -n], recess);
       }
+      for (const [e, n] of [[-385, 40], [-352, 70], [-340, 38]] as const) {
+        const crown = new THREE.Mesh(treeCrownGeo, landmarkCanopy);
+        crown.position.set(e, 5.5, -n);
+        crown.scale.set(6, 4, 6);
+        site.add(crown);
+      }
+      worldBox(AVIARY[0], AVIARY[1], AVIARY[2], AVIARY[3], AVIARY_TOP + group.position.y);
+      // Dense canopy: clumps of crowns placed clear of the lakes, the paths
+      // and the enclosures (offline from the OSM lake and path geometry).
+      const clumps: Array<[number, number, number]> = [
+        [-453, -21, 9], [-249, -538, 9], [-170, -152, 14], [-327, -450, 10], [-8, 241, 10], [-257, 273, 10], [-219, -574, 12],
+        [-169, -82, 13], [-37, -284, 11], [-393, -482, 9], [-66, -467, 10], [-259, -197, 13], [37, -442, 10], [-148, 178, 9],
+        [-429, 128, 9], [-403, -500, 11], [-231, -49, 9], [-33, -430, 9], [33, 3, 10], [-60, -231, 10], [-82, -352, 12],
+        [-439, 159, 14], [-59, 265, 11], [-35, -371, 10], [-344, -126, 10], [11, -203, 11], [15, -28, 12], [-391, -61, 13],
+        [-182, -235, 12], [-64, -21, 12], [-151, -23, 12], [-27, -458, 10], [4, -438, 13], [42, -361, 14], [-268, -45, 14],
+        [-204, -220, 10], [-183, -100, 9], [-428, -307, 9], [-60, -301, 10], [-344, -444, 14], [-174, 206, 9], [-139, 326, 9],
+        [-238, -220, 12], [20, -304, 10], [-327, -30, 10], [-296, -599, 10], [24, -495, 13], [-249, -36, 13], [-271, -22, 12],
+        [50, -216, 13], [-100, 130, 11], [45, 26, 10], [41, -255, 11], [-226, -27, 10], [-436, -149, 9], [-473, -261, 10],
+        [-166, 4, 13], [-127, 225, 13], [-273, -235, 14], [-114, -43, 9], [-83, -322, 9], [-216, -169, 11], [-112, 285, 12],
+        [-232, -70, 10], [2, -385, 14], [-408, -2, 14], [-217, -88, 11], [-28, -478, 14], [-164, -194, 11], [-382, -179, 14],
+        [20, -470, 11], [47, -313, 12],
+      ];
+      clumps.forEach(([e, n, spread], index) => {
+        // Spread out past the placement radius so neighbouring crowns knit.
+        const radius = spread * 1.3;
+        const crown = new THREE.Mesh(treeCrownGeo, landmarkCanopy);
+        const lift = 6 + (index % 4) * 1.4;
+        crown.position.set(e, lift + radius * 0.42, -n);
+        crown.scale.set(radius, radius * 0.62, radius * (0.85 + (index % 3) * 0.1));
+        crown.rotation.y = index * 0.7;
+        site.add(crown);
+        addCylinder(site, 0.6, 0.9, lift + 1, [e, (lift + 1) / 2 + GROUND, -n], landmarkBark, 5);
+      });
+      // Keep the gate forecourt clear.
+      colliders.push({
+        x: group.position.x + GATE_E + 18,
+        z: group.position.z - GATE_N,
+        halfWidth: 24,
+        halfDepth: 30,
+        top: LANDMARK_CLEARING_TOP,
+      });
+      perchTarget = plan(GATE_E, GATE_N + 13.5);
     } else if (landmark.kind === "national-museum") {
-      // Bangladesh National Museum (Shahbagh): monumental 4-storey modernist civic
-      // complex around a central courtyard with deep brise-soleil fins & grand portico.
-      colliderTop = 3.5;
-      perchTarget = [0, -1];
-      addBox(group, [94, 0.9, 72], [0, 0.45, 0], paleConcrete);
-      // Four perimeter gallery wings forming an open central museum courtyard
-      addBox(group, [80, 18, 18], [0, 9.9, -22], whiteStone);
-      addBox(group, [80, 18, 18], [0, 9.9, 20], whiteStone);
-      addBox(group, [18, 18, 60], [-31, 9.9, -1], whiteStone);
-      addBox(group, [18, 18, 60], [31, 9.9, -1], whiteStone);
-      // Horizontal floor slabs & terracotta roof parapets
-      for (const y of [5.8, 10.8, 15.8, 19.2]) {
-        addBox(group, [82, 0.7, 62], [0, y, -1], y > 18.5 ? terracotta : paleConcrete);
+      // Bangladesh National Museum (Shahbagh, 1983): a 97 × 95 m ring of
+      // four-storey fawn concrete wings round an open court, each wing roofed
+      // by a row of grey barrel vaults running across it, whose half-round ends
+      // make the scalloped skyline with a dark glazed lunette in each. Slim
+      // pilasters every vault, two slot-window bands, and a recessed ground
+      // colonnade; the pink entrance canopy faces east onto a brick forecourt,
+      // and a lower block with a skylight stands in the court. Local +Z faces
+      // east, +X north.
+      const HALF_X = 47.5;
+      const HALF_Z = 48.5;
+      const WING = 18;
+      const BODY = 20;
+      boundsCollider = false;
+      perchTarget = [3.39, HALF_Z - WING / 2];
+      // East and west wings run the full 95 m; the north and south wings sit between.
+      const wings: Array<{ x: number; z: number; hx: number; hz: number; acrossX: boolean }> = [
+        { x: 0, z: HALF_Z - WING / 2, hx: HALF_X, hz: WING / 2, acrossX: false },
+        { x: 0, z: -HALF_Z + WING / 2, hx: HALF_X, hz: WING / 2, acrossX: false },
+        { x: HALF_X - WING / 2, z: 0, hx: WING / 2, hz: HALF_Z - WING, acrossX: true },
+        { x: -HALF_X + WING / 2, z: 0, hx: WING / 2, hz: HALF_Z - WING, acrossX: true },
+      ];
+      for (const wing of wings) {
+        // Upper floors over a ground storey set back behind the pilasters.
+        addBox(group, [wing.hx * 2, BODY - 4.5, wing.hz * 2], [wing.x, 4.5 + (BODY - 4.5) / 2, wing.z], canopyBeige);
+        addBox(group, [wing.hx * 2 - 4, 4.6, wing.hz * 2 - 4], [wing.x, 2.3, wing.z], canopyBeige);
+        solidBox(wing.x, wing.z, wing.hx, wing.hz, BODY + 3.4);
+        // The vaults run across the wing (along its short side), repeated along it.
+        const length = wing.acrossX ? wing.hz * 2 : wing.hx * 2;
+        const count = Math.round(length / 6.7);
+        const span = length / count;
+        const depth = wing.acrossX ? wing.hx * 2 : wing.hz * 2;
+        const vault = new THREE.CylinderGeometry(span / 2 - 0.08, span / 2 - 0.08, depth + 0.6, 8, 1, false, -Math.PI / 2, Math.PI);
+        vault.rotateX(-Math.PI / 2);
+        const lunette = new THREE.CircleGeometry(span / 2 - 0.9, 8, 0, Math.PI);
+        for (let index = 0; index < count; index++) {
+          const along = -length / 2 + span * (index + 0.5);
+          const mesh = new THREE.Mesh(vault, boardConcrete);
+          mesh.position.set(wing.acrossX ? wing.x : along, BODY, wing.acrossX ? along : wing.z);
+          mesh.rotation.y = wing.acrossX ? Math.PI / 2 : 0;
+          group.add(mesh);
+          // A dark lunette in each vault end on the outer face.
+          const outward = wing.acrossX ? Math.sign(wing.x) : Math.sign(wing.z);
+          const pane = new THREE.Mesh(lunette, archDark);
+          pane.rotation.set(0, wing.acrossX ? (outward > 0 ? Math.PI / 2 : -Math.PI / 2) : (outward > 0 ? 0 : Math.PI), 0);
+          const face = (wing.acrossX ? HALF_X : HALF_Z) + 0.36;
+          pane.position.set(wing.acrossX ? outward * face : along, BODY + 0.15, wing.acrossX ? along : outward * face);
+          group.add(pane);
+        }
       }
-      // Central glass-roofed atrium skylight over the main lobby
-      addBox(group, [34, 14.5, 22], [0, 8.4, -1], whiteStone);
-      addBox(group, [30, 3.2, 18], [0, 17.0, -1], atriumGlass);
-      // Vertical modernist concrete sun-breakers along the grand front facade
-      for (let fx = -36; fx <= 36; fx += 4.5) {
-        addBox(group, [0.7, 16.5, 1.6], [fx, 9.8, 29.8], paleConcrete);
+      // Outer facades: a pilaster under every vault joint, and two slot-window bands.
+      const facades: Array<{ axis: "x" | "z"; sign: number; half: number; length: number }> = [
+        { axis: "z", sign: 1, half: HALF_Z, length: HALF_X * 2 },
+        { axis: "z", sign: -1, half: HALF_Z, length: HALF_X * 2 },
+        { axis: "x", sign: 1, half: HALF_X, length: HALF_Z * 2 },
+        { axis: "x", sign: -1, half: HALF_X, length: HALF_Z * 2 },
+      ];
+      for (const facade of facades) {
+        const pilasters = Math.round(facade.length / 6.7);
+        // The north and south faces leave their corner pilasters to the east and west faces.
+        for (let index = facade.axis === "x" ? 1 : 0; index <= (facade.axis === "x" ? pilasters - 1 : pilasters); index++) {
+          const along = -facade.length / 2 + (facade.length / pilasters) * index;
+          const [x, z] = facade.axis === "z" ? [along, facade.sign * (facade.half + 0.25)] : [facade.sign * (facade.half + 0.25), along];
+          addBox(group, [0.7, BODY, 0.7], [x, BODY / 2, z], canopyBeige);
+        }
+        for (const y of [11, 15]) {
+          const [x, z] = facade.axis === "z" ? [0, facade.sign * (facade.half + 0.04)] : [facade.sign * (facade.half + 0.04), 0];
+          addBox(group, facade.axis === "z" ? [facade.length - 2, 0.9, 0.1] : [0.1, 0.9, facade.length - 2], [x, y, z], archDark);
+        }
       }
-      // Sweeping grand ceremonial entrance portico & reflecting pool
-      addBox(group, [28, 5.2, 10], [0, 3.6, 32], marble);
-      addBox(group, [26, 0.5, 10], [0, 1.2, 38], stoneStep);
-      addBox(group, [34, 0.4, 8], [0, 0.9, 39], water);
-      solid(0, -1, 41, 20.0);
+      // The block in the court: a squat octagon with a flat roof and a skylight.
+      const core = addCylinder(group, 1, 1, 17, [0, 8.5, 0], canopyBeige, 8);
+      core.scale.set(18, 1, 27);
+      const skylight = addCone(group, 13, 3, [0, 18.5, 0], boardConcrete, 4);
+      skylight.rotation.y = Math.PI / 4;
+      solidBox(0, 0, 18, 27, 18.4);
+      // East entrance: the flat pink canopy, the statue and the brick forecourt.
+      addBox(group, [18, 0.7, 5.5], [0, 4.6, HALF_Z + 2.6], pink);
+      addBox(group, [18.4, 1.3, 0.3], [0, 5.4, HALF_Z + 5.3], pink);
+      for (const x of [-8, 8]) addBox(group, [0.6, 4.3, 0.6], [x, 2.15, HALF_Z + 5], canopyBeige);
+      addBox(group, [2.2, 1.6, 2.2], [0, 0.8, HALF_Z + 11], canopyBeige);
+      addCylinder(group, 0.45, 0.55, 3.4, [0, 3.3, HALF_Z + 11], boardConcrete, 6);
+      addBox(group, [44, 0.12, 34], [0, 0.06, HALF_Z + 17], plazaBrick).castShadow = false;
       for (const [tx, tz, mat] of [
-        [-45, 34, landmarkCanopy],
-        [45, 34, landmarkKrishnachura],
-        [-45, -34, landmarkLightCanopy],
-        [45, -34, landmarkCanopy],
+        [-30, HALF_Z + 12, landmarkCanopy],
+        [30, HALF_Z + 12, landmarkLightCanopy],
+        [-30, HALF_Z + 26, landmarkLightCanopy],
+        [30, HALF_Z + 26, landmarkCanopy],
       ] as const) {
-        addLandmarkTree(group, tx, tz, 5.4, 7.0, mat);
+        addLandmarkTree(group, tx, tz, 5.2, 6.4, mat);
       }
+      clearSite(0, 0, HALF_X - WING, HALF_Z - WING);
+      clearSite(0, HALF_Z + 17, 24, 18);
     } else if (landmark.kind === "liberation-museum") {
-      // Liberation War Museum (Agargaon, DWG Architects): bold cantilevered
-      // concrete monolithic gallery volumes framing a circular sunlit water court.
-      colliderTop = 3.5;
-      perchTarget = [10, 6];
-      addBox(group, [82, 0.8, 72], [0, 0.4, 0], paleConcrete);
-      // Ground podium & broad civic amphitheatre steps
-      addBox(group, [70, 6.5, 56], [0, 3.9, -2], concrete);
-      for (let step = 0; step < 4; step++) {
-        addBox(group, [40, 0.6, 2.0], [0, 1.1 + step * 0.6, 28 + (3 - step) * 2.0], stoneStep);
+      // Liberation War Museum (Agargaon): a monolithic board-marked grey
+      // concrete box whose nearly blank upper floors cantilever over a dark,
+      // recessed ground floor. Short dark steel "war-scar" rods stick out of the
+      // main face at angles; red Bengali lettering runs high on it; a long
+      // canopy on round columns shelters the entrance with a fighter jet hung
+      // under it; a row of white flagpoles lines the roof; a glazed bridge with
+      // steel X-trusses projects on the right over a lower wing. Behind a sunken
+      // court stands the bulkier rear block (OSM 499002486). Local +Z is the
+      // front (ENE, unconfirmed), +X is the right-hand side seen from the front.
+      const TOP = 24;
+      colliderTop = TOP;
+      perchTarget = [-4, 6];
+      // Forecourt paving and the main bar (OSM 478326295, 63 × 19 m).
+      addBox(group, [76, 0.3, 18], [4, 0.15, 18], paleConcrete).castShadow = false;
+      addBox(group, [59, 8, 15.6], [0, 4, -1.6], ribbonGlass);
+      addBox(group, [58, 2, 0.2], [0, 2.2, 6.25], atriumGlass);
+      addBox(group, [62.6, TOP - 8, 20.4], [0, 8 + (TOP - 8) / 2, 0.8], boardConcrete);
+      addBox(group, [62.6, 1, 2], [0, TOP - 0.5, 11], boardConcrete);
+      // Board-mark joints: faint horizontal lines every 1.2 m on the front.
+      for (let y = 9.2; y < TOP - 1; y += 2.4) addBox(group, [62.4, 0.08, 0.06], [0, y, 11.02], roofGrey);
+      // The war-scar rods, staggered across the upper face.
+      for (let row = 0; row < 4; row++) {
+        for (let column = 0; column < 6; column++) {
+          const x = -26 + column * 10 + (row % 2) * 5;
+          if (x > 28) continue;
+          const rod = addBox(group, [3, 0.28, 0.5], [x, 11 + row * 3.2, 11.2], recess);
+          rod.rotation.z = ((row + column) % 3 === 0 ? -1 : 1) * 0.55;
+          rod.rotation.y = 0.35;
+        }
       }
-      // Sculptural cantilevered upper gallery blocks (iconic floating concrete mass)
-      addBox(group, [62, 11.5, 24], [-6, 14.0, -14], concrete);
-      addBox(group, [50, 10.5, 22], [10, 21.0, 6], paleConcrete);
-      // Recessed vertical glazed light slots & dark memorial facade cuts
-      addBox(group, [62.6, 3.6, 24.6], [-6, 13.3, -14], ribbonGlass);
-      addBox(group, [50.6, 3.2, 22.6], [10, 20.5, 6], darkGlass);
-      addBox(group, [60, 0.4, 22], [-6, 20.0, -14], roofGrey);
-      addBox(group, [48, 0.4, 20], [10, 26.5, 6], roofGrey);
-      // Central circular memorial plaza with reflecting pool & eternal flame
-      addCylinder(group, 11.0, 11.5, 1.0, [-14, 7.4, 14], recess, 24);
-      addCylinder(group, 9.2, 9.2, 0.5, [-14, 7.9, 14], water, 24);
-      addCone(group, 1.4, 3.8, [-14, 10.0, 14], monumentRed, 8);
-      solid(-6, -14, 31, 20.4);
-      solid(10, 6, 25, 26.8);
-      for (const [tx, tz, mat] of [
-        [-36, 28, landmarkCanopy],
-        [36, 28, landmarkKrishnachura],
-        [-36, -30, landmarkLightCanopy],
-      ] as const) {
-        addLandmarkTree(group, tx, tz, 5.2, 6.8, mat);
+      addBox(group, [17, 2.6, 0.2], [-15, TOP - 3.6, 11.08], monumentRed);
+      // Entrance canopy beam on round columns, red lettering on its fascia, and
+      // the suspended fighter.
+      addBox(group, [42, 1.1, 8], [-6, 8.2, 14.6], boardConcrete);
+      addBox(group, [16, 0.6, 0.12], [-12, 8.2, 18.65], monumentRed);
+      for (let x = -24; x <= 12; x += 9) addCylinder(group, 0.45, 0.45, 7.7, [x, 3.85, 17.4], boardConcrete, 8);
+      const jet = new THREE.Group();
+      jet.position.set(-4, 5.4, 14.4);
+      group.add(jet);
+      addCylinder(jet, 0.55, 0.75, 9, [0, 0, 0], roofGrey, 6).rotation.z = Math.PI / 2;
+      addCone(jet, 0.55, 2.4, [-5.7, 0, 0], roofGrey, 6).rotation.z = Math.PI / 2;
+      const wing = new THREE.Shape();
+      wing.moveTo(-1.5, 0);
+      wing.lineTo(3, 4.4);
+      wing.lineTo(3.6, 4.4);
+      wing.lineTo(3.4, -4.4);
+      wing.lineTo(3, -4.4);
+      wing.lineTo(-1.5, 0);
+      const wingMesh = new THREE.Mesh(new THREE.ShapeGeometry(wing, 1), roofGrey);
+      wingMesh.rotation.x = -Math.PI / 2;
+      jet.add(wingMesh);
+      addBox(jet, [1.6, 2, 0.15], [3.6, 1.1, 0], roofGrey);
+      // Roof flagpoles.
+      for (let x = -27; x <= 27; x += 6) addCylinder(group, 0.1, 0.14, 10, [x, TOP + 5, 9.6], whiteStone, 4);
+      // Right side: the lower wing and the glazed truss bridge above it.
+      addBox(group, [16, 9, 12], [39, 4.5, -6], boardConcrete);
+      addBox(group, [20, 7, 9], [41, 12.5, 3], ribbonGlass);
+      addBox(group, [21, 0.8, 9.6], [41, 16.4, 3], boardConcrete);
+      addBox(group, [21, 0.8, 9.6], [41, 8.6, 3], boardConcrete);
+      for (let bay = 0; bay < 3; bay++) {
+        for (const sign of [-1, 1]) {
+          const truss = addBox(group, [8.4, 0.35, 0.35], [34.3 + bay * 6.7, 12.5, 7.7], roofGrey);
+          truss.rotation.z = sign * 0.78;
+        }
       }
+      // The rear block across the sunken court.
+      addBox(group, [60, 18, 40], [0, 9, -36.5], boardConcrete);
+      addBox(group, [56, 0.2, 36], [0, 18.1, -36.5], roofGrey);
+      addBox(group, [61, 3, 41], [0, 1.5, -36.5], ribbonGlass);
+      solid(-14, -36, 16, 18);
+      solid(14, -36, 16, 18);
+      solid(41, 0, 9, 17);
+      clearSite(4, -18, 38, 46);
     } else if (landmark.kind === "military-museum") {
-      // Bangladesh Military Museum (Bijoy Sarani): futuristic sweeping metallic-and-
-      // glass pavilion (Army/Navy/Air Force wings), Victory Arena plaza, plus the
-      // iconic white Novo Theatre planetarium dome right beside it.
-      colliderTop = 3.5;
-      perchTarget = [-12, -6];
-      addBox(group, [96, 0.8, 74], [0, 0.4, 0], paleConcrete);
-      // Sweeping contemporary glass & metallic main museum hall
-      addBox(group, [62, 15, 34], [-12, 8.2, -6], ribbonGlass);
-      addBox(group, [70, 2.4, 40], [-12, 16.6, -6], silverPanel);
-      addBox(group, [52, 5.6, 26], [-12, 20.2, -6], silverPanel);
-      addBox(group, [53, 2.2, 27], [-12, 20.0, -6], darkGlass);
-      // Sculptural angled metal facade ribs
-      for (let rx = -38; rx <= 14; rx += 8) {
-        addBox(group, [0.9, 16, 38], [rx, 8.6, -6], silverPanel);
+      // Bangabandhu Military Museum (Bijoy Sarani, 2022): a long, almost
+      // windowless hall clad in white stone tiles, its roofline sloping up to
+      // sharp prow corners, with two triangulated geodesic glass domes set
+      // into it: the big one (Ø 24 m) opens north onto a turquoise reflecting
+      // pool with a fountain ring, the small one (Ø 15 m) sits between the
+      // hall and the round west annex. A deep stone canopy shelters the
+      // entrance east of the big dome, with seating steps down to the pool;
+      // an open-air amphitheatre lies south. Plan from OSM 1317835190/91/92/93
+      // (relation 18084981) and pool way 1317835195, in metres east (e) and
+      // north (n) of the hall centroid. Authored in a world-axis child group
+      // so (e, n) map straight to (x, -z). Novo Theatre, 190 m east, is its
+      // own landmark.
+      boundsCollider = false;
+      const site = new THREE.Group();
+      site.rotation.y = -landmark.heading;
+      group.add(site);
+      const plan = (e: number, n: number): [number, number] => [e * cosH + n * sinH, e * sinH - n * cosH];
+      const worldBox = (e0: number, e1: number, n0: number, n1: number, boxTop: number) => {
+        colliders.push({
+          x: group.position.x + (e0 + e1) / 2,
+          z: group.position.z - (n0 + n1) / 2,
+          halfWidth: (e1 - e0) / 2,
+          halfDepth: (n1 - n0) / 2,
+          top: boxTop + group.position.y,
+        });
+      };
+      // Extrude an (e, n) outline and lift its roof by `roof(e, n)`, so the
+      // parapet slopes and the hall reads as tilted stone planes.
+      const stoneMass = (outline: Array<[number, number]>, roof: (e: number, n: number) => number) => {
+        const shape = new THREE.Shape();
+        outline.forEach(([e, n], index) => (index ? shape.lineTo(e, n) : shape.moveTo(e, n)));
+        const geometry = new THREE.ExtrudeGeometry(shape, { depth: 1, bevelEnabled: false, curveSegments: 1 });
+        geometry.rotateX(-Math.PI / 2);
+        const position = geometry.getAttribute("position");
+        for (let index = 0; index < position.count; index++) {
+          if (position.getY(index) > 0.5) position.setY(index, roof(position.getX(index), -position.getZ(index)));
+        }
+        geometry.computeVertexNormals();
+        const mesh = new THREE.Mesh(geometry, whiteStone);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        site.add(mesh);
+      };
+      const ramp = (value: number, from: number, to: number) => clamp((value - from) / (to - from), 0, 1);
+      // The hall, with the big dome's footprint cut out of its north side.
+      stoneMass([
+        [-60.1, 3.3], [-55.5, 9.7], [-57.5, 10.9], [-55.7, 21.1], [-52.7, 20.4], [-53.8, 23.2], [-43.8, 31.8], [-37.7, 25.2],
+        [-40.7, 22.6], [-42.7, 19.3], [-43.6, 15.5], [-43.2, 11.7], [-41.6, 8.1], [-39, 5.2], [-35.6, 3.3], [-31.8, 2.5],
+        [-27.9, 3], [-24.3, 4.7], [-21.5, 7.4], [-19.7, 10.8], [-19, 14.6], [-19.3, 17.6], [-10.4, 17.6], [-2.9, 18.1],
+        [9.5, 18.3], [15.3, 18.5], [22.9, 17.8], [30, 16.7], [36.9, 15.2], [41.8, 14.2], [57, 10.2], [66.5, 5.8], [75.6, 1.5],
+        [70.6, -6.3], [76.2, -15.8], [61.9, -25.1], [57.8, -19], [55, -15.3], [49.8, -11.6], [42.4, -22.5], [40.3, -20.6],
+        [37.4, -19.2], [34.3, -18.8], [28.2, -18.1], [19.6, -18.1], [14.1, -18.6], [7.2, -20.7], [-0.5, -21.5], [-9.7, -22.5],
+        [-18.7, -21.3], [-24.5, -19.7], [-27.4, -17.9], [-29, -17], [-30.1, -14.8], [-31.9, -13], [-33.7, -12.1],
+        [-35.7, -11.8], [-37.6, -11.9], [-40.2, -10], [-49.2, -4.5],
+      ], (e, n) => 15 + 5.5 * ramp(e, 30, 76) + 4 * ramp(-e, 50, 60) * ramp(n, 0, 28) + 1.5 * ramp(-n, 10, 22) * ramp(e, 30, 60)
+        // The walls stoop round the big dome so its glass crown stands clear.
+        - 4 * (1 - ramp(Math.hypot(e + 31.3, n - 14.8), 13, 26)));
+      // The round west annex, cut round the small dome.
+      stoneMass([
+        [-49.9, -7], [-51.1, -10.3], [-50.7, -15.8], [-50.4, -21.8], [-48.5, -27.6], [-46.1, -32.1], [-42.2, -36.4],
+        [-37.5, -40.3], [-34.4, -40.9], [-31.2, -40.7], [-26.9, -39], [-24.4, -36.2], [-23, -32.7], [-21.7, -29.7],
+        [-21.3, -26.3], [-21.8, -23.2], [-22.7, -20.8], [-24.5, -19.7], [-27.4, -17.9], [-29, -17], [-28.7, -19.2],
+        [-29, -21.4], [-30, -23.4], [-31.5, -25], [-33.5, -26.1], [-35.6, -26.6], [-37.9, -26.4], [-40, -25.6],
+        [-41.7, -24.2], [-43, -22.3], [-43.6, -20.2], [-43.5, -18], [-42.8, -15.8], [-41.5, -14], [-40.2, -10], [-49.2, -4.5],
+      ], (_e, n) => 8.5 + 3.5 * ramp(-n, 27, 40));
+      // The two geodesic domes.
+      addGeodesicDome(site, -31.3, -14.8, 12.4, 14, 3, skyGlass, geodesicFrame);
+      addGeodesicDome(site, -36.2, 19.2, 7.6, 10, 2, skyGlass, geodesicFrame);
+      // Entrance: a deep stone canopy over a dark glazed lobby east of the dome.
+      addBox(site, [24, 1.4, 9], [-6, 8.3, -22.2], whiteStone);
+      addBox(site, [22, 7.6, 0.4], [-6, 3.8, -18.4], recess);
+      for (const e of [-15, 3]) addBox(site, [0.8, 7.6, 0.8], [e, 3.8, -26], whiteStone);
+      // The reflecting pool (OSM 1317835195): turquoise water inside a dark
+      // granite rim, a fountain ring in the middle, seating steps to the east.
+      const pool: Array<[number, number]> = [[-40.5, 31.6], [-33.5, 78.8], [7.7, 72], [-2.2, 19.5]];
+      const poolShape = new THREE.Shape();
+      pool.forEach(([e, n], index) => (index ? poolShape.lineTo(e, n) : poolShape.moveTo(e, n)));
+      const poolGeometry = new THREE.ShapeGeometry(poolShape);
+      poolGeometry.rotateX(-Math.PI / 2);
+      const poolMesh = new THREE.Mesh(poolGeometry, poolTurquoise);
+      poolMesh.position.y = 0.45;
+      site.add(poolMesh);
+      pool.forEach(([ae, an], index) => {
+        const [be, bn] = pool[(index + 1) % pool.length];
+        addBeam(site, [ae, 0.45, -an], [be, 0.45, -bn], 1.3, 1, recess, 1.3);
+      });
+      for (let jet = 0; jet < 12; jet++) {
+        const angle = (jet / 12) * Math.PI * 2;
+        const cone = addCone(site, 0.4, 5.5, [-16.5 + Math.sin(angle) * 4.5, 3.2, -49 + Math.cos(angle) * 4.5], whiteStone, 5);
+        cone.rotation.set(Math.cos(angle) * 0.2, 0, -Math.sin(angle) * 0.2);
       }
-      // Outdoor Victory Arena ceremonial display plaza & monument spire
-      addBox(group, [52, 0.5, 20], [-12, 1.1, 24], concrete);
-      addBox(group, [26, 0.4, 9], [-12, 1.4, 24], water);
-      addCone(group, 2.2, 24, [-34, 12.5, 24], silverPanel, 6);
-      solid(-12, -6, 32, 23.2);
-      // Iconic white planetarium dome of neighboring Novo Theatre (Bijoy Sarani)
-      addCylinder(group, 15.5, 16.5, 6.2, [34, 3.8, 10], paleConcrete, 24);
-      addLathe(group, domeProfile(14.8, 14.0, 0.02, 12), 24, [34, 6.9, 10], whiteStone, false);
-      solid(34, 10, 16, 21.0);
-      for (const [tx, tz, mat] of [
-        [-45, -30, landmarkCanopy],
-        [46, -30, landmarkLightCanopy],
-        [-45, 32, landmarkKrishnachura],
-        [46, 32, landmarkCanopy],
+      addCone(site, 0.7, 8.5, [-16.5, 4.7, -49], whiteStone, 6);
+      // Seating steps along the pool's east side, rising away from the water.
+      const stepsRun = Math.hypot(9.9, 52.5);
+      const steps = new THREE.Group();
+      steps.position.set(2.75, 0, -45.75);
+      steps.rotation.y = Math.atan2(52.5, 9.9);
+      site.add(steps);
+      for (let step = 0; step < 5; step++) addBox(steps, [stepsRun - 6, 0.35 * (step + 1), 1.6], [0, 0.175 * (step + 1), 2.2 + step * 1.6], paleConcrete);
+      // Plaza paving between the hall, the pool and Bijoy Sarani.
+      addBox(site, [70, 0.12, 62], [-12, 0.06, -52], paleConcrete).castShadow = false;
+      // The amphitheatre to the south: stone tiers facing a round stage.
+      for (let tier = 0; tier < 5; tier++) {
+        const tierMesh = addArcSlab(site, 9 + tier * 4.4, 13.4 + tier * 4.4, Math.PI - 0.95, 1.9, 0, 0.5 * (tier + 1), paleConcrete, 14);
+        tierMesh.position.set(9, 0, 88);
+      }
+      addCylinder(site, 8, 8, 0.6, [9, 0.3, 88], paleConcrete, 18);
+      // Mature trees of the old museum grounds.
+      for (const [e, n, radius, crown] of [
+        [92, 26, 6.4, landmarkCanopy], [126, -8, 6, landmarkCanopy], [95, -60, 6.6, landmarkCanopy], [130, 34, 5.6, landmarkCanopy],
+        [-72, -30, 6.2, landmarkCanopy], [-76, 12, 5.8, landmarkCanopy], [42, -48, 5.6, landmarkCanopy], [62, -62, 6, landmarkCanopy],
+        [-62, -52, 6.2, landmarkCanopy], [118, -62, 5.8, landmarkCanopy], [36, 38, 5.4, landmarkCanopy], [58, 34, 5.8, landmarkCanopy],
       ] as const) {
-        addLandmarkTree(group, tx, tz, 5.2, 6.8, mat);
+        addLandmarkTree(site, e, -n, radius, 8, crown);
       }
+      worldBox(-60, -43, -10, 32, 18);
+      worldBox(-43, -20, -12, 3, 13);
+      worldBox(-20, 42, -22, 18.5, 17);
+      worldBox(42, 76, -25, 14, 20.5);
+      worldBox(-51, -21, -41, -27, 12);
+      worldBox(-23, 11, 18, 27, 9);
+      solid(...plan(-31.3, 14.8), 9, 14);
+      solid(...plan(-36.2, -19.2), 6, 10);
+      // Keep the pool, the plaza and the amphitheatre free of city blocks.
+      const clearWorld = (e0: number, e1: number, n0: number, n1: number) => colliders.push({
+        x: group.position.x + (e0 + e1) / 2,
+        z: group.position.z - (n0 + n1) / 2,
+        halfWidth: (e1 - e0) / 2,
+        halfDepth: (n1 - n0) / 2,
+        top: LANDMARK_CLEARING_TOP,
+      });
+      clearWorld(-48, 24, 18, 86);
+      clearWorld(-18, 36, -100, -50);
+      colliderTop = 17;
+      perchTarget = plan(-31.3, 14.8);
     } else if (landmark.kind === "science-museum") {
-      // National Museum of Science and Technology (Agargaon): modernist exhibition
-      // blocks crowned by its distinctive white astronomical observatory dome.
-      colliderTop = 3.5;
-      perchTarget = [8, -4];
-      addBox(group, [72, 0.8, 58], [0, 0.4, 0], paleConcrete);
-      // Main tiered exhibition building & glazed science gallery wing
-      addBox(group, [54, 15, 28], [0, 8.2, -4], whiteStone);
-      addBox(group, [55, 3.6, 29], [0, 9.6, -4], ribbonGlass);
-      addBox(group, [32, 11, 20], [-14, 6.2, 16], paleConcrete);
-      addBox(group, [33, 2.8, 21], [-14, 7.6, 16], atriumGlass);
-      // Rooftop astronomical observatory dome
-      addCylinder(group, 9.2, 9.6, 4.2, [8, 17.8, -4], silverPanel, 20);
-      addLathe(group, domeProfile(8.8, 7.8, 0.02, 10), 20, [8, 19.9, -4], whiteStone, false);
-      addBox(group, [1.8, 6.5, 9.2], [8, 23.0, -4], recess);
-      // Outdoor science-park rocket sculpture in the courtyard
-      addCylinder(group, 1.0, 1.8, 11, [20, 6.2, 18], whiteStone, 10);
-      addCone(group, 1.0, 3.4, [20, 13.4, 18], monumentRed, 10);
-      solid(0, -4, 27, 16.0);
-      solid(8, -4, 9.5, 27.8);
-      for (const [tx, tz, mat] of [
-        [-34, -24, landmarkCanopy],
-        [34, -24, landmarkLightCanopy],
-        [34, 24, landmarkKrishnachura],
-      ] as const) {
-        addLandmarkTree(group, tx, tz, 5.0, 6.6, mat);
+      // National Museum of Science and Technology, Agargaon: long, plain
+      // 1980s concrete exhibition halls on OSM's real outline (way 370071885),
+      // repainted deep teal with white aluminium trim, and a taller five-storey
+      // admin block over the flat entrance portico. On the front lawn an F-6
+      // fighter stands on a plinth beside a ring of solar-system planets.
+      const HALLS = 370071885;
+      const halls = anchor(HALLS);
+      const local = partOutline(HALLS);
+      // Local +Z of the frame is the long (114 m) axis, toward the ESE front.
+      const deck = frame(HALLS, [0.259, 0.966]);
+      if (halls && local && deck) {
+        const ring = local.map(([x, z]) => [x + halls.x, z + halls.z] as MapPoint);
+        const g = deck.g;
+        const turn = g.rotation.y;
+        const toGroup = (lx: number, lz: number): [number, number] => [
+          g.position.x + lx * Math.cos(turn) + lz * Math.sin(turn),
+          g.position.z - lx * Math.sin(turn) + lz * Math.cos(turn),
+        ];
+        const HALL_TOP = halls.height;
+        // White trim: a plinth course, a band at the upper floor, the parapet.
+        slab(HALLS, 0, 0.9, 1.01, whiteStone);
+        slab(HALLS, 6.6, 0.5, 1.012, whiteStone);
+        slab(HALLS, HALL_TOP, 1.1, 1.012, whiteStone);
+        slab(HALLS, HALL_TOP + 1.1, 0.08, 0.97, roofGrey);
+        // Narrow punched windows in rows along the long walls.
+        addBays(group, walls(HALLS), {
+          bay: 6.5, minEdge: 9, margin: 2,
+          storeys: [{ y: 2.4, opening: rectPane(1.6, 2.4) }, { y: 8.2, opening: rectPane(1.6, 1.8) }],
+          opening: ribbonGlass,
+        });
+        // The five-storey admin block, teal with white floor bands.
+        const ADMIN_TOP = 21;
+        addBox(g, [21, ADMIN_TOP, 14], [0, ADMIN_TOP / 2, 11], tealArch);
+        addBox(g, [21.8, 1.2, 14.8], [0, ADMIN_TOP + 0.6, 11], whiteStone);
+        for (const y of [HALL_TOP + 4.2, HALL_TOP + 8.4]) addBox(g, [21.4, 0.35, 14.4], [0, y, 11], whiteStone);
+        for (let floor = 0; floor < 3; floor++) {
+          for (const lx of [-7.5, -4.5, -1.5, 1.5, 4.5, 7.5]) {
+            const pane = new THREE.Mesh(rectPane(1.5, 1.6), ribbonGlass);
+            pane.position.set(lx, HALL_TOP + 2 + floor * 3, 18.08);
+            g.add(pane);
+          }
+        }
+        // Amber sign band, then the flat portico canopy on four columns.
+        addBox(g, [14, 1.8, 0.3], [0, HALL_TOP + 0.4, 18.1], terracotta);
+        addBox(g, [14, 0.6, 9], [0, 5.4, 22.5], whiteStone);
+        for (const lx of [-6, 6]) for (const lz of [20, 26]) addCylinder(g, 0.35, 0.35, 5.1, [lx, 2.55, lz], whiteStone, 8);
+        // A small observatory dome on the admin roof.
+        addCylinder(g, 2.6, 2.6, 1.6, [5, ADMIN_TOP + 2, 9], whiteStone, 14);
+        addLathe(g, domeProfile(2.6, 2.4, 0, 6), 14, [5, ADMIN_TOP + 2.8, 9], silverPanel);
+        // F-6 fighter on its plinth.
+        const jet = new THREE.Group();
+        jet.position.set(-20, 0, 73);
+        jet.rotation.y = 0.6;
+        g.add(jet);
+        addBox(jet, [3, 2.2, 3], [0, 1.1, 0], whiteStone);
+        const fuselage = addCylinder(jet, 0.55, 0.8, 12.5, [0, 3.4, 0], silverPanel, 8);
+        fuselage.rotation.x = Math.PI / 2;
+        addCone(jet, 0.55, 1.6, [0, 3.4, 7.05], silverPanel, 8).rotation.x = Math.PI / 2;
+        for (const side of [-1, 1]) {
+          const wing = addBox(jet, [4.4, 0.18, 2.8], [side * 2.6, 3.2, -0.6], silverPanel);
+          wing.rotation.y = side * 0.5;
+          const tailplane = addBox(jet, [1.8, 0.14, 1.3], [side * 1.2, 3.5, -5.5], silverPanel);
+          tailplane.rotation.y = side * 0.45;
+        }
+        const fin = addBox(jet, [0.16, 2.4, 2], [0, 4.8, -5.2], silverPanel);
+        fin.rotation.x = -0.35;
+        // The solar-system garden: the sun and its planets in a ring.
+        addBox(g, [26, 0.12, 26], [16, 0.06, 66], lawn);
+        addCylinder(g, 1.4, 1.4, 0.4, [16, 0.32, 66], whiteStone, 12);
+        const sun = new THREE.Mesh(new THREE.SphereGeometry(1.5, 10, 8), accent);
+        sun.position.set(16, 2.1, 66);
+        g.add(sun);
+        const planetMats = [silverPanel, terracotta, whiteStone, terracotta, accent, silverPanel, whiteStone, tealArch];
+        planetMats.forEach((mat, index) => {
+          const angle = index * 0.8;
+          const radius = 3.6 + index * 1.05;
+          const size = [0.35, 0.55, 0.6, 0.45, 1.1, 0.95, 0.75, 0.7][index];
+          const planet = new THREE.Mesh(new THREE.SphereGeometry(size, 8, 6), mat);
+          planet.position.set(16 + Math.sin(angle) * radius, 0.9 + size, 66 + Math.cos(angle) * radius);
+          g.add(planet);
+        });
+        // Flagpoles along the entrance drive, and palms on the lawn.
+        const flagMats = [terracotta, accent, whiteStone, terracotta, accent, whiteStone];
+        for (let index = 0; index < 6; index++) {
+          addCylinder(g, 0.08, 0.1, 7, [-6 - index * 4.5, 3.5, 44], whiteStone, 5);
+          addBox(g, [0.06, 1.1, 1.6], [-6 - index * 4.5, 6.3, 44.8], flagMats[index]);
+        }
+        for (const [lx, lz] of [[-36, 50], [-28, 58], [34, 52], [38, 74], [-40, 70]] as const) addPalm(g, lx, lz, 9, 0.06, lx);
+        // Collision follows the real outline rather than its diagonal bounds.
+        boundsCollider = false;
+        for (let lx = -deck.hx + 5; lx < deck.hx; lx += 10) {
+          for (let lz = -deck.hz + 5; lz < deck.hz; lz += 10) {
+            const [x, z] = toGroup(lx, lz);
+            if (pointInPolygon(x, z, ring)) solid(x, z, 5.4, HALL_TOP + 1.1);
+          }
+        }
+        const [adminX, adminZ] = toGroup(0, 11);
+        solidBox(adminX, adminZ, 10, 10, ADMIN_TOP + 1.2);
+        perchTarget = [adminX - 3, adminZ + 2];
+        // Keep the front lawn and drive open.
+        const [lawnX, lawnZ] = toGroup(0, 66);
+        clearSite(lawnX, lawnZ, 46, 46);
       }
     } else if (landmark.kind === "shishu-park") {
-      // Shishu Park (Shahbagh): Dhaka's beloved children's park with a bright
-      // Ferris wheel, striped carousel tent, miniature train loop, and festive gates.
-      colliderTop = 3.5;
-      perchTarget = [18, -10];
-      addBox(group, [74, 0.45, 66], [0, 0.22, 0], paleConcrete);
-      // Bright Ferris wheel (landmark silhouette from above)
-      addFerrisWheel(group, -14, -8, 13.5, 16.5);
-      solid(-14, -8, 12.5, 30.0);
-      // Colorful striped Carousel pavilion
-      addCylinder(group, 11.5, 12.2, 1.2, [18, 0.9, -10], whiteStone, 18);
-      for (let i = 0; i < 8; i++) {
-        const a = (i / 8) * Math.PI * 2;
-        addCylinder(group, 0.35, 0.35, 5.2, [18 + Math.cos(a) * 9.8, 3.9, -10 + Math.sin(a) * 9.8], accent, 6);
+      // Shaheed Zia Shishu Park, Shahbag: closed since 2019 and being rebuilt.
+      // Inside green hoarding, a wide pale concrete promenade runs N–S between
+      // bare parterres, sweeping out at its north end in a curved band to two
+      // round plazas, with two more plazas at its south end; the old round
+      // brick plaza survives under the trees to the west, and site sheds line
+      // the east side. Local axes are world axes (heading 0).
+      boundsCollider = false;
+      const SPINE_X = 9;
+      addBox(group, [32, 0.3, 186], [SPINE_X, 0.15, 0], paleConcrete);
+      addBox(group, [10, 0.08, 186], [SPINE_X, 0.34, 0], whiteStone);
+      for (const z of [-60, -20, 20, 60]) addBox(group, [32.4, 0.06, 1], [SPINE_X, 0.33, z], whiteStone);
+      // Bare earth parterres either side of the spine.
+      addBox(group, [26, 0.22, 48], [41, 0.11, -50], packedEarth);
+      addBox(group, [26, 0.22, 62], [41, 0.11, 22], packedEarth);
+      addBox(group, [18, 0.22, 58], [-19, 0.11, 18], packedEarth);
+      // The curved north band and its round plazas, and the two south plazas.
+      addSweptBox(group, [[-54, 0.3, -96], [-40, 0.3, -94], [-22, 0.3, -92], [-4, 0.3, -91], [26, 0.3, -91], [50, 0.3, -90]], 7, 0.3, paleConcrete);
+      addSweptBox(group, [[-8, 0.3, 84], [-8, 0.3, 72]], 6, 0.3, paleConcrete);
+      addSweptBox(group, [[26, 0.3, 84], [44, 0.3, 74], [56, 0.3, 66]], 6, 0.3, paleConcrete);
+      for (const [px, pz] of [[-58, -98], [54, -90], [-8, 62], [56, 60]] as const) {
+        addCylinder(group, 10.5, 10.5, 0.36, [px, 0.18, pz], paleConcrete, 24);
+        addCylinder(group, 8.4, 8.4, 0.1, [px, 0.4, pz], whiteStone, 24);
+        addCylinder(group, 3.2, 3.4, 0.7, [px, 0.5, pz], lawn, 12);
       }
-      addCone(group, 12.6, 6.2, [18, 9.5, -10], monumentRed, 12);
-      addCone(group, 7.6, 4.4, [18, 11.3, -10], accent, 12);
-      solid(18, -10, 12, 13.6);
-      // Miniature toy-train circular ring & play pavilions
-      const trainRing = new THREE.Mesh(new THREE.RingGeometry(13, 16, 28), terracotta);
-      trainRing.rotation.x = -Math.PI / 2;
-      trainRing.position.set(14, 0.56, 17);
-      group.add(trainRing);
-      addBox(group, [6.5, 3.2, 3.0], [14, 2.0, 31.5], carnivalBlue);
-      addBox(group, [16, 4.8, 10], [-18, 2.8, 19], carnivalBlue);
-      addCone(group, 9.5, 4.2, [-18, 7.2, 19], accent, 4).rotation.y = Math.PI / 4;
-      // Festive red-and-gold park entrance arch
-      addBox(group, [18, 7.4, 3.6], [0, 3.7, 34], monumentRed);
-      addBox(group, [19.5, 1.0, 4.4], [0, 7.7, 34], accent);
-      addBox(group, [8, 4.8, 4.2], [0, 2.5, 34], archDark);
-      for (const [tx, tz, mat] of [
-        [-36, -30, landmarkCanopy],
-        [36, -30, landmarkKrishnachura],
-        [-36, 30, landmarkLightCanopy],
-        [36, 30, landmarkCanopy],
-      ] as const) {
-        addLandmarkTree(group, tx, tz, 5.2, 6.6, mat);
+      // The old round brick plaza in the wooded west.
+      addCylinder(group, 14, 14, 0.3, [-54, 0.15, -69], plazaBrick, 24);
+      addCylinder(group, 6, 6, 0.9, [-54, 0.45, -69], carnivalBlue, 16);
+      // Site sheds and the site office along the east side.
+      for (const [sx, sz, len] of [[72, -52, 24], [74, -16, 18], [70, 18, 26]] as const) {
+        addBox(group, [9, 3.6, len], [sx, 1.8, sz], whiteStone);
+        addBox(group, [9.8, 0.3, len + 0.8], [sx, 3.75, sz], carnivalBlue);
+        solidBox(sx, sz, 5, len / 2, 4);
       }
+      addBox(group, [12, 7, 9], [62, 3.5, 44], cream);
+      addBox(group, [12.8, 0.4, 9.8], [62, 7.2, 44], carnivalBlue);
+      solidBox(62, 44, 6.4, 4.9, 7.4);
+      perchTarget = [62, 44];
+      // Green corrugated hoarding round the site, just inside the park lawn
+      // and pulled back from the road along its NE edge.
+      const ROAD_A = [-40, -137] as const;
+      const ROAD_B = [162, -33] as const;
+      const roadLength = Math.hypot(ROAD_B[0] - ROAD_A[0], ROAD_B[1] - ROAD_A[1]);
+      const inX = -(ROAD_B[1] - ROAD_A[1]) / roadLength;
+      const inZ = (ROAD_B[0] - ROAD_A[0]) / roadLength;
+      const hoarding: QuadPoint[] = [];
+      for (let step = 0; step <= 40; step++) {
+        const angle = (step / 40) * Math.PI * 2;
+        let hx = Math.cos(angle) * 170;
+        let hz = Math.sin(angle) * 116;
+        const inside = (hx - ROAD_A[0]) * inX + (hz - ROAD_A[1]) * inZ;
+        if (inside < -6) {
+          hx += inX * (-6 - inside);
+          hz += inZ * (-6 - inside);
+        }
+        hoarding.push([hx, 2.4, hz]);
+      }
+      addSweptBox(group, hoarding, 0.12, 2.4, seatGreen);
+      // Keep the paving and the plazas clear of park trees.
+      clearSite(SPINE_X, 0, 17, 94);
+      clearSite(-4, -94, 66, 14);
+      clearSite(24, 66, 42, 18);
+      clearSite(-54, -69, 15, 15);
+      clearSite(41, -14, 14, 62);
+      clearSite(-19, 18, 10, 30);
+    } else if (landmark.kind === "novo-theatre") {
+      // Bangabandhu Sheikh Mujibur Rahman Novo Theatre (planetarium, Bijoy
+      // Sarani): a 34 m pale sky-blue geodesic glass dome rising from plaza
+      // level behind a grand stair, ringed on its front half by a white steel
+      // space-frame. Two white wings flank it, their deep roof slabs carried on
+      // rows of tall silver columns along the slanted fronts; the east wing's
+      // roof tilts up into a sharp prow. A red-brick forecourt with two long
+      // reflecting pools runs north to the road. Local +Z is north (the front),
+      // local +X is west. Plan from OSM 264634214 (dome-centred metres).
+      const PODIUM = 11;
+      colliderTop = PODIUM;
+      // Podium wings, with the dome's front bulge cut back so the glass shows
+      // down to the stair landing.
+      const outline: Array<[number, number]> = [
+        [-39, 1], [-42, -2], [-43, -4], [-41, -8], [-39, -9], [-38, -31], [-33, -34], [-16, -34], [-32, -50],
+        [-23, -59], [26, -57], [35, -47], [19, -32], [35, -32], [40, -28], [39, -6], [42, -4], [43, 0],
+        [39, 3], [38, 25], [19, 6], [16, 3], [-18, 3], [-21, 5], [-40, 23],
+      ];
+      const podiumShape = new THREE.Shape();
+      outline.forEach(([x, z], index) => (index ? podiumShape.lineTo(x, -z) : podiumShape.moveTo(x, -z)));
+      const podiumGeometry = new THREE.ExtrudeGeometry(podiumShape, { depth: PODIUM, bevelEnabled: false, curveSegments: 1 });
+      podiumGeometry.rotateX(-Math.PI / 2);
+      group.add(new THREE.Mesh(podiumGeometry, whiteStone));
+      // Curtain glass on the slanted wing fronts, set behind the colonnades.
+      for (const side of [-1, 1]) {
+        // Each wing front runs from beside the dome out to the wing's prow
+        // corner; the group's +Z is the outward face, toward the forecourt.
+        const front = new THREE.Group();
+        const length = Math.hypot(19, 19);
+        front.position.set(side * 29, 0, 14.5);
+        front.rotation.y = (-side * Math.PI) / 4;
+        group.add(front);
+        addBox(front, [length - 3, PODIUM - 2.5, 0.3], [0, (PODIUM - 2.5) / 2 + 1.5, 0.2], ribbonGlass);
+        for (let column = 0; column < 7; column++) {
+          const along = -length / 2 + 2 + (column * (length - 4)) / 6;
+          addCylinder(front, 0.8, 0.8, 13.2, [along, 6.6, 5.2], silverPanel, 10);
+        }
+        // Deep roof slab cantilevered past the colonnade. On the east wing
+        // (side -1, outer end toward front-local -X) the outer 16 m tilts up
+        // into the wedge prow.
+        const roof = new THREE.Group();
+        roof.position.set(0, 13.6, -6);
+        front.add(roof);
+        if (side > 0) {
+          addBox(roof, [length + 10, 1.1, 30], [0, 0, 0], whiteStone);
+        } else {
+          const flat = length + 10 - 16;
+          addBox(roof, [flat, 1.1, 30], [(length + 10) / 2 - flat / 2, 0, 0], whiteStone);
+          const wedge = addBox(roof, [16.4, 1.1, 30], [-(length + 10) / 2 + 8, 2.75, 0], whiteStone);
+          wedge.rotation.z = -0.35;
+        }
+      }
+      // The dome: 0.8 of a sphere (r 17, centre 14 m up) faceted like the
+      // geodesic glass, springing from the stair landing.
+      const domeProfileGeo: Array<[number, number]> = [];
+      for (let step = 0; step <= 9; step++) {
+        const angle = -0.63 + (step / 9) * (Math.PI / 2 + 0.63);
+        domeProfileGeo.push([Math.max(0.01, 17 * Math.cos(angle)), 17 * Math.sin(angle)]);
+      }
+      addLathe(group, domeProfileGeo, 18, [0, 14, 0], skyGlass, true);
+      addCylinder(group, 1.2, 1.2, 0.6, [0, 31.2, 0], whiteStone, 8);
+      // White space-frame ring round the front 200°, on slim columns.
+      addArcSlab(group, 18, 22, -1.75, 3.5, 15.4, 1.2, whiteStone, 20);
+      for (let column = 0; column < 7; column++) {
+        const theta = -1.6 + (column * 3.2) / 6;
+        addCylinder(group, 0.5, 0.5, 15.4, [Math.sin(theta) * 20, 7.7, Math.cos(theta) * 20], silverPanel, 6);
+      }
+      // Stair landing under the dome and the grand stair down to the plaza.
+      addBox(group, [42, 4, 14], [0, 2, 10], paleConcrete);
+      for (let step = 0; step < 10; step++) {
+        const stepTop = 4 - (step + 1) * 0.4;
+        addBox(group, [42, stepTop + 0.02, 1.3], [0, (stepTop + 0.02) / 2, 17.65 + step * 1.3], paleConcrete);
+      }
+      // Forecourt: red brick paving, two long pools in brick rims, lawn strips.
+      addBox(group, [96, 0.12, 52], [0, 0.06, 56], plazaBrick).castShadow = false;
+      for (const side of [-1, 1]) {
+        addBox(group, [30, 0.5, 9], [side * 22, 0.25, 46], plazaBrick);
+        addBox(group, [28.6, 0.12, 7.6], [side * 22, 0.48, 46], water);
+        addBox(group, [36, 0.3, 6], [side * 27, 0.15, 74], lawn);
+      }
+      solid(0, 0, 14, 31.5);
+      solid(-14, -46, 14, PODIUM);
+      solid(14, -46, 14, PODIUM);
+      clearSite(0, 12, 58, 72);
+    } else if (landmark.kind === "dhaka-medical") {
+      // Dhaka Medical College Hospital: the long white colonial spine (OSM
+      // 1036301057, bearing 138°) with tall round-arched verandahs on its NE
+      // front, a projecting entrance block crowned by a drum-and-dome, square
+      // end towers (the SE one domed) and a toothed parapet. The NE forecourt
+      // is lawn and trees round two oval drive loops. Footprint mode: local axes
+      // are world axes, so a child group turned to the facade carries the
+      // entrance, dome and towers.
+      const MAIN = 1036301057;
+      const mass = anchor(MAIN);
+      const points = (() => {
+        const ring = partOutlines.get(MAIN);
+        return ring ? ring.map(([x, z]) => [x - group.position.x, z - group.position.z] as MapPoint) : [];
+      })();
+      if (mass && points.length) {
+        const H = mass.height;
+        // Facade frame: +Z faces the NE forecourt (48°), +X runs NW along the spine.
+        const FRONT: [number, number] = [0.743, -0.669];
+        const along: [number, number] = [-0.669, -0.743];
+        const edges = walls(MAIN);
+        const front = edges.filter((edge) => edge.nx * FRONT[0] + edge.nz * FRONT[1] > 0.85);
+        const others = edges.filter((edge) => edge.nx * FRONT[0] + edge.nz * FRONT[1] <= 0.85);
+        // Two storeys of tall round-headed verandah arches on the front wings.
+        addBays(group, front, {
+          bay: 4.5, minEdge: 6,
+          storeys: [
+            { y: 1.3, opening: roundArch(3.1, 6.4) },
+            { y: 9.2, opening: roundArch(3.1, 6.0) },
+          ],
+          opening: archDark,
+          pier: { width: 1.1, depth: 0.7, bottom: 0, top: H - 0.9, material: whiteStone },
+        });
+        // Rows of arched windows round the rest of the block.
+        addBays(group, others, {
+          bay: 4.6, minEdge: 5,
+          storeys: [
+            { y: 2.2, opening: rectPane(1.6, 2.8) },
+            { y: 7.8, opening: rectPane(1.6, 2.8) },
+            { y: 13.2, opening: rectPane(1.6, 2.6) },
+          ],
+          opening: archDark,
+        });
+        slab(MAIN, 0, 1.3, 1.012, paleConcrete);
+        slab(MAIN, 8.2, 0.5, 1.012, paleConcrete);
+        slab(MAIN, H - 0.9, 0.9, 1.024, paleConcrete);
+        slab(MAIN, H, 1.1, 1.006, whiteStone);
+        slab(MAIN, H + 1.1, 0.08, 0.965, roofTerrace);
+        // The toothed parapet: a merlon every 3.4 m on every roof edge.
+        for (const edge of edges) {
+          const count = Math.floor(edge.length / 3.4);
+          for (let index = 0; index < count; index++) {
+            const t = (index + 0.5) * (edge.length / count);
+            const merlon = addBox(group, [0.8, 0.9, 0.45], [
+              edge.ax + edge.dx * t - edge.nx * 0.25,
+              H + 1.55,
+              edge.az + edge.dz * t - edge.nz * 0.25,
+            ], whiteStone);
+            merlon.rotation.y = edge.rotationY;
+          }
+        }
+        const facade = (x: number, z: number) => {
+          const g = new THREE.Group();
+          g.position.set(x, 0, z);
+          g.rotation.y = Math.atan2(FRONT[0], FRONT[1]);
+          group.add(g);
+          return g;
+        };
+        // Entrance block, 24 m wide and 8 m proud of the front at the bend in
+        // the facade, rising to 20 m, with the big arched carriage porch.
+        const [bendX, bendZ] = toLocal(23.7257547, 90.3982249);
+        const entrance = facade(bendX, bendZ);
+        addBox(entrance, [24, 20, 12], [0, 10, 2], whiteStone);
+        addBox(entrance, [24.8, 0.9, 12.8], [0, 19.6, 2], paleConcrete);
+        addBox(entrance, [24.8, 1.2, 12.8], [0, 0.6, 2], paleConcrete);
+        addBox(entrance, [12, 3, 2], [0, 21.2, 7.2], whiteStone);
+        addBox(entrance, [25, 0.6, 0.6], [0, 13.6, 8.3], paleConcrete);
+        for (const x of [-10.5, -7.5, 7.5, 10.5, -3.5, -1.2, 1.2, 3.5]) {
+          for (const z of [7.95]) {
+            const merlon = addBox(entrance, [0.8, 0.9, 0.4], [x, 20.5, z], whiteStone);
+            merlon.castShadow = false;
+          }
+        }
+        const porch = new THREE.Mesh(roundArch(6, 7.4), archDark);
+        porch.position.set(0, 0.6, 8.08);
+        entrance.add(porch);
+        for (const x of [-8.5, -4.5, 4.5, 8.5]) {
+          const pane = new THREE.Mesh(roundArch(1.6, 3), archDark);
+          pane.position.set(x, 14.6, 8.08);
+          entrance.add(pane);
+          const lower = new THREE.Mesh(roundArch(1.8, 3.6), archDark);
+          lower.position.set(x, 3.2, 8.08);
+          entrance.add(lower);
+        }
+        // Drum and dome on the spine behind the entrance (12 m back from the
+        // front wall): a square base, an arcaded octagonal drum, a white dome.
+        const dome = facade(bendX - FRONT[0] * 12, bendZ - FRONT[1] * 12);
+        addBox(dome, [13, 2.4, 13], [0, H + 1.2, 0], whiteStone);
+        addBox(dome, [13.8, 0.5, 13.8], [0, H + 2.6, 0], paleConcrete);
+        addCylinder(dome, 5.2, 5.4, 3.2, [0, H + 4.4, 0], whiteStone, 8).rotation.y = Math.PI / 8;
+        for (let side = 0; side < 8; side++) {
+          const angle = (side / 8) * Math.PI * 2;
+          const opening = new THREE.Mesh(roundArch(1.3, 2.2), archDark);
+          opening.position.set(Math.sin(angle) * 5.05, H + 3.2, Math.cos(angle) * 5.05);
+          opening.rotation.y = angle;
+          dome.add(opening);
+        }
+        addCylinder(dome, 5.8, 5.8, 0.5, [0, H + 6.25, 0], paleConcrete, 16);
+        addLathe(dome, domeProfile(5, 5, 0.04, 8), 16, [0, H + 6.5, 0], whiteStone);
+        addFinial(dome, [0, H + 11.3, 0], 0.7, whiteStone);
+        // Square end towers on the front corners of the spine, 5 m over the
+        // parapet; the SE one carries a small dome.
+        for (const [t, domed] of [[-62, false], [62, true]] as const) {
+          const tower = facade(
+            bendX - FRONT[0] * 6 + along[0] * -t,
+            bendZ - FRONT[1] * 6 + along[1] * -t,
+          );
+          addBox(tower, [9, H + 5, 9], [0, (H + 5) / 2, 0], whiteStone);
+          addBox(tower, [9.8, 0.7, 9.8], [0, H + 4.2, 0], paleConcrete);
+          for (const x of [-3.3, -1.1, 1.1, 3.3]) {
+            for (const [dx, dz, ry] of [[x, 4.7, 0], [x, -4.7, 0], [4.7, x, Math.PI / 2], [-4.7, x, Math.PI / 2]] as const) {
+              addBox(tower, [0.8, 0.9, 0.4], [dx, H + 5.45, dz], whiteStone).rotation.y = ry;
+            }
+          }
+          for (const side of [0, Math.PI / 2, Math.PI, -Math.PI / 2]) {
+            const opening = new THREE.Mesh(roundArch(1.4, 2.6), archDark);
+            opening.position.set(Math.sin(side) * 4.62, H + 0.6, Math.cos(side) * 4.62);
+            opening.rotation.y = side;
+            tower.add(opening);
+          }
+          if (domed) {
+            addCylinder(tower, 3.2, 3.3, 1.6, [0, H + 5.8, 0], whiteStone, 8);
+            addLathe(tower, domeProfile(3.1, 3.2, 0.04, 7), 12, [0, H + 6.6, 0], whiteStone);
+            addFinial(tower, [0, H + 9.7, 0], 0.5, whiteStone);
+          }
+          solid(tower.position.x, tower.position.z, 4.5, H + (domed ? 10 : 5.9));
+        }
+        // NE forecourt: lawn, two oval drive loops and shade trees, kept clear
+        // of generic blocks.
+        const court = facade(bendX + FRONT[0] * 30, bendZ + FRONT[1] * 30);
+        addBox(court, [120, 0.12, 50], [6, 0.06, 4], lawn).castShadow = false;
+        for (const x of [-26, 34]) {
+          const loop = addArcSlab(court, 9, 12.5, 0, Math.PI * 2, 0.12, 0.1, roofGrey, 28);
+          loop.position.x = x;
+          loop.scale.set(1.9, 1, 1);
+          loop.castShadow = false;
+          addLandmarkTree(court, x - 6, 0, 3.6, 4.8, landmarkLightCanopy);
+          addLandmarkTree(court, x + 6, 0, 3.4, 4.6, landmarkLightCanopy);
+        }
+        addBox(court, [10, 0.1, 22], [4, 0.14, -12], roofGrey).castShadow = false;
+        for (let index = 0; index < 9; index++) {
+          addPalm(court, -48 + index * 13, 20, 10 + (index % 3), 0.06, index * 0.7);
+        }
+        // Clear the forecourt (its world AABB) of generic blocks and park trees.
+        clearSite(court.position.x, court.position.z, 46, 46);
+        clearSite(court.position.x + along[0] * 40, court.position.z + along[1] * 40, 26, 26);
+        clearSite(court.position.x - along[0] * 40, court.position.z - along[1] * 40, 26, 26);
+        // Collision: the bounding box of this L-shaped plan would cover the
+        // forecourt and the neighbouring hospital blocks, so the masses are
+        // tiled with runs of 8 m cells instead.
+        boundsCollider = false;
+        const insidePlan = (x: number, z: number) => {
+          let inside = false;
+          for (let index = 0, prev = points.length - 1; index < points.length; prev = index++) {
+            const [ax, az] = points[index];
+            const [bx, bz] = points[prev];
+            if ((az > z) !== (bz > z) && x < ax + ((z - az) * (bx - ax)) / (bz - az)) inside = !inside;
+          }
+          return inside;
+        };
+        const CELL = 8;
+        for (let z = -mass.depth / 2 + CELL / 2; z < mass.depth / 2; z += CELL) {
+          let runStart: number | null = null;
+          for (let x = -mass.width / 2 + CELL / 2; x < mass.width / 2 + CELL; x += CELL) {
+            // A cell counts when any part of it (centre or a corner) is under
+            // the plan, so the diagonal spine leaves no open slivers.
+            const filled = x < mass.width / 2 && [[0, 0], [-1, -1], [1, -1], [-1, 1], [1, 1]].some(([cx, cz]) => (
+              insidePlan(x + mass.x + (cx * CELL) / 2, z + mass.z + (cz * CELL) / 2)
+            ));
+            if (filled && runStart === null) runStart = x;
+            if (!filled && runStart !== null) {
+              const runEnd = x - CELL;
+              solidBox(mass.x + (runStart + runEnd) / 2, mass.z + z, (runEnd - runStart) / 2 + CELL / 2, CELL / 2, H + 1.2);
+              runStart = null;
+            }
+          }
+        }
+        solid(dome.position.x, dome.position.z, 6.5, H + 12);
+        solid(entrance.position.x + FRONT[0] * 2, entrance.position.z + FRONT[1] * 2, 7, 21);
+        colliderTop = H + 1.2;
+        perchTarget = [dome.position.x, dome.position.z];
+      }
+    } else if (landmark.kind === "sher-e-bangla-stadium") {
+      // Sher-e-Bangla National Cricket Stadium, Mirpur: an oval two-tier bowl
+      // of green and grey seats split by a white concourse band, a cream back
+      // wall, white barrel-vault canopies over the WSW side and NNW end, six
+      // floodlight masts, and a striped oval outfield with a tan pitch strip
+      // on the 152° axis. Outer ring OSM 121390579 (196 × 249 m), outfield
+      // OSM 121390580. Local +Z is the long axis toward 152° (SSE), +X is ENE.
+      const STRETCH = 1.3; // the bowl is a circle stretched along local Z
+      colliderTop = 1;
+      const bowl = new THREE.Group();
+      bowl.scale.set(1, 1, STRETCH);
+      group.add(bowl);
+      const SECTORS = 16;
+      const sectorLength = (Math.PI * 2) / SECTORS;
+      const ring = (profile: Array<[number, number]>, phiStart: number, phiLength: number, material: THREE.Material, segments = 2) => {
+        const mesh = new THREE.Mesh(
+          new THREE.LatheGeometry(profile.map(([r, y]) => new THREE.Vector2(r, y)), segments, phiStart, phiLength),
+          material,
+        );
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        bowl.add(mesh);
+        return mesh;
+      };
+      for (let sector = 0; sector < SECTORS; sector++) {
+        const phi = sector * sectorLength;
+        // Profiles run so each face looks toward the field or the sky.
+        ring([[84, 9], [77, 4.6], [71, 1.3]], phi, sectorLength, sector % 2 ? plantGrey : seatGreen);
+        ring([[96, 20], [90, 15.5], [84, 11]], phi, sectorLength, sector % 4 === 1 ? plantGrey : seatGreen);
+      }
+      ring([[84, 11], [84, 9]], 0, Math.PI * 2, whiteStone, 32);
+      ring([[71, 1.3], [70, 1.3], [70, 0]], 0, Math.PI * 2, whiteStone, 32);
+      ring([[98.5, 0], [98.5, 22.5], [96, 22.5], [96, 20]], 0, Math.PI * 2, paleConcrete, 32);
+      // A row of dark openings round the outside of the back wall.
+      for (let index = 0; index < 48; index++) {
+        const phi = (index / 48) * Math.PI * 2;
+        const opening = addBox(bowl, [4.4, 2.2, 0.3], [Math.sin(phi) * 98.6, 17.5, Math.cos(phi) * 98.6], plantGrey);
+        opening.rotation.y = phi;
+        opening.castShadow = false;
+      }
+      // Outfield: an oval of mown grass with lighter stripes, the square and
+      // its tan pitch strip down the long axis.
+      const field = new THREE.Mesh(new THREE.CircleGeometry(70, 40), lawn);
+      field.rotation.x = -Math.PI / 2;
+      field.position.y = 0.1;
+      field.receiveShadow = true;
+      bowl.add(field);
+      for (let band = -6; band <= 6; band += 2) {
+        const z = band * 7.4;
+        const halfWidth = Math.sqrt(Math.max(0, 69.5 ** 2 - (z / 0.98) ** 2)) * 0.995;
+        addBox(bowl, [halfWidth * 2, 0.06, 7.4], [0, 0.16, z], landmarkLightCanopy).castShadow = false;
+      }
+      addBox(group, [3.2, 0.1, 22], [0, 0.24, 0], packedEarth).castShadow = false;
+      addBox(group, [9, 0.06, 26], [0, 0.2, 0], landmarkLightCanopy).castShadow = false;
+      // Point on the outer ellipse (radius r before stretching) at angle phi.
+      const onOval = (r: number, phi: number): [number, number] => [Math.sin(phi) * r, Math.cos(phi) * r * STRETCH];
+      // Tensile canopies: white barrel-vault bays over the WSW long side
+      // (local -X) and round the NNW end (local -Z), tilting up to the field.
+      const vault = new THREE.CylinderGeometry(5.6, 5.6, 10.5, 6, 1, true, Math.PI / 2, Math.PI);
+      const CANOPY_FROM = Math.PI * 0.62;
+      const CANOPY_TO = Math.PI * 1.72;
+      const BAYS = 22;
+      for (let bay = 0; bay < BAYS; bay++) {
+        const phi = CANOPY_FROM + ((bay + 0.5) / BAYS) * (CANOPY_TO - CANOPY_FROM);
+        const [x, z] = onOval(91, phi);
+        const [ix, iz] = onOval(85, phi);
+        const holder = new THREE.Group();
+        holder.position.set(x, 24.2, z);
+        holder.rotation.y = Math.atan2(ix - x, iz - z);
+        group.add(holder);
+        const shell = new THREE.Mesh(vault, whiteStone);
+        shell.rotation.set(Math.PI / 2 - 0.16, 0, 0);
+        shell.scale.set(1, 1, 0.28);
+        shell.castShadow = true;
+        holder.add(shell);
+        addCylinder(holder, 0.22, 0.22, 7, [5.5, 1.6, -4], whiteStone, 5);
+        addCylinder(holder, 0.35, 0.4, 4.5, [5.5, -2.1, -5.2], plantGrey, 5);
+      }
+      // Six floodlight masts on an oval 20 m outside the bowl, each with a
+      // lamp frame tipped toward the centre.
+      let northMast: [number, number] = [0, 0];
+      for (let mast = 0; mast < 6; mast++) {
+        const phi = Math.PI / 6 + (mast * Math.PI) / 3;
+        const [x, z] = [Math.sin(phi) * 118, Math.cos(phi) * 150];
+        addCylinder(group, 0.7, 1.3, 50, [x, 25, z], plantGrey, 6);
+        const head = new THREE.Group();
+        head.position.set(x, 50, z);
+        head.rotation.y = Math.atan2(-x, -z);
+        group.add(head);
+        const lamps = addBox(head, [10, 6, 1], [0, 2, 0.6], whiteStone);
+        lamps.rotation.x = 0.45;
+        addBox(head, [10.4, 0.5, 2.2], [0, -0.9, 0], plantGrey);
+        solid(x, z, 5.5, 52);
+        if (Math.abs(phi - (5 * Math.PI) / 6) < 0.01) northMast = [x, z];
+      }
+      // Pale-yellow four-storey club house built into the SSE end.
+      addBox(group, [60, 14, 13], [0, 7, 130], peach);
+      addBox(group, [61, 0.8, 14], [0, 14.4, 130], paleConcrete);
+      for (let floor = 0; floor < 4; floor++) {
+        addBox(group, [56, 1.3, 0.3], [0, 2.4 + floor * 3.3, 136.6], plantGrey).castShadow = false;
+      }
+      // The stands are struck as a ring of columns; the field stays open so the
+      // bird can drop into the bowl. The perch is the north mast's lamp frame.
+      // 48 columns on the upper tier's mid line overlap all round the ring
+      // and reach from the tier's inner lip to the back wall.
+      for (let index = 0; index < 56; index++) {
+        const [x, z] = onOval(92, (index / 56) * Math.PI * 2);
+        solid(x, z, 11, 22.5);
+      }
+      // The club house at the SSE end.
+      solidBox(0, 130, 31, 7.5, 14.8);
+      clearOval(0, 0, 105, 105 * STRETCH, 14);
+      perchTarget = northMast;
+    } else if (landmark.kind === "zia-udyan") {
+      // Zia Udyan (Chandrima Udyan): Ziaur Rahman's mausoleum, a white marble
+      // square with four corner wall blocks, a round dark pool holding two
+      // grass-topped graves and a green glass pyramid on a white frame, set
+      // diagonally. A red-brick axis walk runs south to the grey tied-arch
+      // footbridge over Crescent Lake, on Kahn's Parliament axis (355°).
+      // Local +Z points south (175°) toward the bridge; the lake (map water,
+      // OSM 438559926) spans local z ≈ 133–187 on the axis.
+      colliderTop = 8;
+      addBox(group, [46, 0.6, 46], [0, 0.3, 0], marble).castShadow = false;
+      // The grave pool: a white ring walk, a black granite pool and two
+      // grass-topped marble graves side by side, long axis north–south.
+      addCylinder(group, 11.5, 11.5, 0.2, [0, 0.7, 0], whiteStone, 32).castShadow = false;
+      addCylinder(group, 7.2, 7.2, 0.24, [0, 0.74, 0], recess, 28).castShadow = false;
+      addCylinder(group, 6.7, 6.7, 0.1, [0, 0.84, 0], water, 28).castShadow = false;
+      for (const x of [-1.7, 1.7]) {
+        addBox(group, [2.3, 1.0, 5.6], [x, 1.2, 0], whiteStone);
+        addBox(group, [2.0, 0.1, 5.2], [x, 1.75, 0], lawn).castShadow = false;
+      }
+      for (let strip = 0; strip < 24; strip++) {
+        const angle = (strip / 24) * Math.PI * 2;
+        const radial = addBox(group, [0.35, 0.06, 3.4], [Math.sin(angle) * 9.4, 0.82, Math.cos(angle) * 9.4], marble);
+        radial.rotation.y = angle;
+        radial.castShadow = false;
+      }
+      // Four corner wall blocks with black granite panels on their inner faces.
+      for (const sx of [-1, 1]) {
+        for (const sz of [-1, 1]) {
+          addBox(group, [12, 7.4, 12], [sx * 15, 4.3, sz * 15], whiteStone);
+          addBox(group, [12.6, 0.5, 12.6], [sx * 15, 8.2, sz * 15], marble);
+          addBox(group, [6, 4, 0.2], [sx * 15, 4, sz * 8.9], recess);
+          addBox(group, [0.2, 4, 6], [sx * 8.9, 4, sz * 15], recess);
+        }
+      }
+      // The pyramid: 26 m square in plan, turned 45° to the plaza (so a cone
+      // of four sides has its corners on the axes), eaves 11 m, apex 17.5 m,
+      // with white frame edges and paired struts down to the wall blocks.
+      const EAVE = 11;
+      const APEX = 17.5;
+      const CORNER = 18.4;
+      addCone(group, CORNER, APEX - EAVE, [0, (EAVE + APEX) / 2, 0], atriumGlass, 4);
+      for (let corner = 0; corner < 4; corner++) {
+        const angle = (corner * Math.PI) / 2;
+        const [cx, cz] = [Math.sin(angle) * CORNER, Math.cos(angle) * CORNER];
+        const [nx, nz] = [Math.sin(angle + Math.PI / 2) * CORNER, Math.cos(angle + Math.PI / 2) * CORNER];
+        // Eave beam to the next corner, and the hip up to the apex.
+        const eave = addBox(group, [0.55, 0.55, Math.hypot(nx - cx, nz - cz)], [(cx + nx) / 2, EAVE, (cz + nz) / 2], whiteStone);
+        eave.rotation.y = Math.atan2(nx - cx, nz - cz);
+        const hip = new THREE.Group();
+        hip.position.set(cx / 2, (EAVE + APEX) / 2, cz / 2);
+        hip.rotation.y = Math.atan2(cx, cz);
+        group.add(hip);
+        addBox(hip, [0.5, 0.5, Math.hypot(CORNER, APEX - EAVE) + 0.3], [0, 0, 0], whiteStone).rotation.x = Math.atan2(APEX - EAVE, CORNER);
+        // A strut from each neighbouring wall block's inner corner.
+        for (const side of [-1, 1]) {
+          const tx = Math.sin(angle) * 9.5 + Math.sin(angle + (side * Math.PI) / 2) * 9.5;
+          const tz = Math.cos(angle) * 9.5 + Math.cos(angle + (side * Math.PI) / 2) * 9.5;
+          addBeam(group, [tx, 8.4, tz], [cx * 0.97, EAVE - 0.2, cz * 0.97], 0.8, 0.8, whiteStone);
+        }
+      }
+      // The red-brick axis walk south to the bridge, lined with clipped
+      // shrub balls, and the bridge itself on the same line.
+      const BRIDGE: [number, number] = [-6, 160];
+      const axis = new THREE.Group();
+      axis.rotation.y = Math.atan2(BRIDGE[0], BRIDGE[1]);
+      group.add(axis);
+      const WALK_FROM = 23;
+      const WALK_TO = 131;
+      addBox(axis, [10, 0.14, WALK_TO - WALK_FROM], [0, 0.07, (WALK_FROM + WALK_TO) / 2], plazaBrick).castShadow = false;
+      for (let z = WALK_FROM + 4; z < WALK_TO - 2; z += 9) {
+        for (const side of [-1, 1]) {
+          const shrub = new THREE.Mesh(treeCrownGeo, lawn);
+          shrub.position.set(side * 6.4, 1.0, z);
+          shrub.scale.set(1.3, 1.0, 1.3);
+          shrub.castShadow = true;
+          axis.add(shrub);
+        }
+      }
+      // Tied-arch footbridge: a 5 m deck about 1.6 m above the water, two grey
+      // concrete box ribs rising 8 m and leaning outward, a white zig-zag of
+      // hangers and white cross ties at the crown. Brick landings on both banks.
+      const bridge = new THREE.Group();
+      bridge.position.set(0, 0, Math.hypot(BRIDGE[0], BRIDGE[1]));
+      axis.add(bridge);
+      const SPAN = 58;
+      const DECK = 1.2;
+      const RISE = 8;
+      addBox(bridge, [5.2, 0.6, SPAN + 4], [0, DECK - 0.3, 0], concrete);
+      // The north landing steps down into the walk; the south one meets the
+      // lakeside road (local +Z) directly.
+      addBox(bridge, [14, DECK, 7], [0, DECK / 2, -(SPAN / 2 + 3.5)], plazaBrick);
+      addBox(bridge, [16, 0.5, 2.5], [0, 0.25, -(SPAN / 2 + 8.2)], plazaBrick);
+      addBox(bridge, [10, DECK, 3], [0, DECK / 2, SPAN / 2 + 1.5], plazaBrick);
+      const ribPoint = (t: number, side: number): [number, number, number] => {
+        const z = -SPAN / 2 + t * SPAN;
+        const lift = RISE * (1 - ((2 * t - 1) ** 2));
+        return [side * (3.1 + lift * 0.17), DECK + lift, z];
+      };
+      const strutBetween = (a: [number, number, number], b: [number, number, number], thickness: [number, number], material: THREE.Material) => (
+        addBeam(bridge, a, b, thickness[0], thickness[1], material, 0.2)
+      );
+      const RIB_STEPS = 12;
+      for (const side of [-1, 1]) {
+        for (let step = 0; step < RIB_STEPS; step++) {
+          strutBetween(ribPoint(step / RIB_STEPS, side), ribPoint((step + 1) / RIB_STEPS, side), [0.9, 1.4], concrete);
+        }
+        const HANGERS = 14;
+        for (let index = 0; index < HANGERS; index++) {
+          const t0 = (index + 0.15) / (HANGERS + 0.3);
+          const t1 = (index + 0.65) / (HANGERS + 0.3);
+          const t2 = (index + 1.15) / (HANGERS + 0.3);
+          const deckA: [number, number, number] = [side * 2.5, DECK, -SPAN / 2 + t0 * SPAN];
+          const deckB: [number, number, number] = [side * 2.5, DECK, -SPAN / 2 + t2 * SPAN];
+          const rib = ribPoint(t1, side);
+          rib[1] -= 0.6;
+          if (rib[1] - DECK < 1.2) continue;
+          strutBetween(deckA, rib, [0.22, 0.22], whiteStone);
+          strutBetween(rib, deckB, [0.22, 0.22], whiteStone);
+        }
+      }
+      for (const t of [0.42, 0.5, 0.58]) {
+        const [x, y, z] = ribPoint(t, 1);
+        strutBetween([-x, y - 0.3, z], [x, y - 0.3, z], [0.4, 0.4], whiteStone);
+      }
+      // Keep generic blocks and park trees off the plaza, the walk and the
+      // landings; strike the canopy, the wall blocks and the arch crown.
+      clearSite(0, 0, 26, 26);
+      clearSite(BRIDGE[0] / 2, (WALK_FROM + WALK_TO) / 2, 9, (WALK_TO - WALK_FROM) / 2 + 2);
+      solid(0, 0, 13, APEX);
+      solid(BRIDGE[0], BRIDGE[1], 3.5, DECK + RISE + 0.8);
+      solidBox(BRIDGE[0], BRIDGE[1], 4, 31, DECK);
+      perchTarget = [0.01, 0];
+    } else if (landmark.kind === "sat-gambuj-mosque") {
+      // Sat Gambuj (Seven-Domed) Mosque, Mohammadpur (Mughal, c. 1680): a
+      // salmon-pink limewashed prayer hall with three weathered bulbous domes
+      // in a north–south row and four two-storey octagonal corner kiosks under
+      // ribbed domes, on a raised plinth with a gate on the east axis and the
+      // Eidgah lawn beyond. OSM 1560283156 is 15.7 × 22.6 m; built at 1.5× so it
+      // reads beside the madrasa blocks. Local +Z faces east (89°), +X north.
+      const S = 1.5;
+      const PLINTH = 2.6;
+      const WALL = 7.5;
+      const m = new THREE.Group();
+      m.scale.setScalar(S);
+      group.add(m);
+      colliderTop = (PLINTH + WALL) * S;
+      // Plinth with its east terrace, steps and the gate pavilion.
+      addBox(m, [26, PLINTH, 22], [0, PLINTH / 2, 3], concrete);
+      addBox(m, [26.4, 0.35, 22.4], [0, PLINTH - 0.12, 3], concrete);
+      addBox(m, [26.5, 0.5, 22.5], [0, PLINTH - 0.7, 3], brickTrim);
+      for (let step = 0; step < 4; step++) {
+        addBox(m, [6, PLINTH - step * 0.62, 1], [0, (PLINTH - step * 0.62) / 2, 14.5 + step], concrete);
+      }
+      addBox(m, [5, 4.6, 3], [0, PLINTH + 2.3, 12], salmon);
+      solidBox(0, 12 * S, 2.5 * S, 1.5 * S, (PLINTH + 5.9) * S);
+      addBox(m, [5.6, 0.7, 3.4], [0, PLINTH + 4.9, 12], brickTrim);
+      for (const x of [-2.3, -1.15, 0, 1.15, 2.3]) addBox(m, [0.5, 0.6, 0.3], [x, PLINTH + 5.55, 13.5], brickTrim);
+      for (const z of [10.48, 13.52]) {
+        const gate = new THREE.Mesh(pointedArch(2.2, 3.4), archDark);
+        gate.position.set(0, PLINTH, z);
+        if (z < 12) gate.rotation.y = Math.PI;
+        m.add(gate);
+      }
+      // Prayer hall: 17.7 m north–south by 8.2 m, crenellated parapet.
+      const HALL_X = 17.7;
+      const HALL_Z = 8.2;
+      addBox(m, [HALL_X, WALL, HALL_Z], [0, PLINTH + WALL / 2, 0], salmon);
+      addBox(m, [HALL_X + 0.4, 0.5, HALL_Z + 0.4], [0, PLINTH + WALL - 0.9, 0], brickTrim);
+      addBox(m, [HALL_X + 0.3, 0.7, HALL_Z + 0.3], [0, PLINTH + 0.35, 0], brickTrim);
+      for (let x = -HALL_X / 2 + 0.6; x <= HALL_X / 2 - 0.5; x += 1.15) {
+        for (const z of [-HALL_Z / 2 + 0.15, HALL_Z / 2 - 0.15]) addBox(m, [0.55, 0.6, 0.3], [x, PLINTH + WALL + 0.3, z], brickTrim);
+      }
+      for (let z = -HALL_Z / 2 + 0.7; z <= HALL_Z / 2 - 0.6; z += 1.15) {
+        for (const x of [-HALL_X / 2 + 0.15, HALL_X / 2 - 0.15]) addBox(m, [0.3, 0.6, 0.55], [x, PLINTH + WALL + 0.3, z], brickTrim);
+      }
+      // East facade: three pointed doorways in recessed frames (the middle one
+      // larger) between shallow blind-arch panels; blind arches on the back.
+      for (const [x, width, height] of [[-5.5, 1.9, 3.6], [0, 2.4, 4.4], [5.5, 1.9, 3.6]] as const) {
+        addBox(m, [width + 1.4, height + 1.6, 0.25], [x, PLINTH + (height + 1.6) / 2, HALL_Z / 2 + 0.1], brickTrim);
+        const door = new THREE.Mesh(pointedArch(width, height), archDark);
+        door.position.set(x, PLINTH + 0.2, HALL_Z / 2 + 0.26);
+        m.add(door);
+      }
+      for (const x of [-7.6, -3.2, 3.2, 7.6]) {
+        for (const [z, ry] of [[HALL_Z / 2 + 0.06, 0], [-HALL_Z / 2 - 0.06, Math.PI]] as const) {
+          for (const y of [1.2, 4.4]) {
+            const blind = new THREE.Mesh(pointedArch(1.3, 2.4), brickTrim);
+            blind.position.set(x, PLINTH + y, z);
+            blind.rotation.y = ry;
+            m.add(blind);
+          }
+        }
+      }
+      // Three bulbous domes on short octagonal drums with merlon rings.
+      const roof = PLINTH + WALL;
+      for (const [x, radius, rise] of [[-5.5, 2.5, 3.4], [0, 3.0, 4.3], [5.5, 2.5, 3.4]] as const) {
+        addCylinder(m, radius + 0.15, radius + 0.25, 1.1, [x, roof + 0.55, 0], salmon, 8);
+        addCylinder(m, radius + 0.35, radius + 0.35, 0.4, [x, roof + 1.25, 0], brickTrim, 8);
+        addLathe(m, domeProfile(radius, rise, 0.1, 9), 12, [x, roof + 1.4, 0], terracotta);
+        addFinial(m, [x, roof + 1.25 + rise, 0], radius * 0.28, terracotta);
+        solid(x * S, 0, radius * S, (roof + 1.4 + rise) * S);
+      }
+      // Four hollow two-storey octagonal kiosks at the corners, projecting
+      // past the walls, with arched openings, a cornice, a merlon ring and a
+      // ribbed dome.
+      const KIOSK = 2.15;
+      const KIOSK_TOP = 9.2;
+      for (const sx of [-1, 1]) {
+        for (const sz of [-1, 1]) {
+          const [x, z] = [sx * (HALL_X / 2 + 0.6), sz * (HALL_Z / 2 + 0.6)];
+          addCylinder(m, KIOSK, KIOSK, KIOSK_TOP, [x, PLINTH + KIOSK_TOP / 2, z], salmon, 8).rotation.y = Math.PI / 8;
+          addCylinder(m, KIOSK + 0.35, KIOSK + 0.2, 0.45, [x, PLINTH + 5.4, z], brickTrim, 8).rotation.y = Math.PI / 8;
+          addCylinder(m, KIOSK + 0.2, KIOSK + 0.2, 0.7, [x, PLINTH + KIOSK_TOP + 0.35, z], brickTrim, 8).rotation.y = Math.PI / 8;
+          for (let face = 0; face < 8; face++) {
+            const angle = (face / 8) * Math.PI * 2;
+            for (const [y, h] of [[1.2, 2.8], [6.2, 2.2]] as const) {
+              const opening = new THREE.Mesh(pointedArch(0.95, h), archDark);
+              opening.position.set(x + Math.sin(angle) * (KIOSK * 0.93 + 0.05), PLINTH + y, z + Math.cos(angle) * (KIOSK * 0.93 + 0.05));
+              opening.rotation.y = angle;
+              m.add(opening);
+            }
+          }
+          addLathe(m, domeProfile(1.8, 2.5, 0.08, 7), 8, [x, PLINTH + KIOSK_TOP + 0.7, z], terracotta, true);
+          addFinial(m, [x, PLINTH + KIOSK_TOP + 3.1, z], 0.38, terracotta);
+          solid(x * S, z * S, KIOSK * S, (PLINTH + KIOSK_TOP + 3.3) * S);
+        }
+      }
+      // The Eidgah lawn east of the gate, kept open.
+      addBox(group, [60, 0.12, 78], [0, 0.06, 72], lawn).castShadow = false;
+      clearSite(0, 4, 21, 19);
+      clearSite(0, 70, 31, 40);
+      perchTarget = [0.01, 0];
+    } else if (landmark.kind === "dhakeshwari-temple") {
+      // Dhakeshwari National Temple: the postcard row of four identical Shiva
+      // temples (OSM 989231329–332), cream-peach cellas under curvilinear
+      // rekha spires banded in bright red, facing SSW across a brick
+      // courtyard with two lawns; the main shrine with its squat banded dome
+      // facing east into the flat-roofed nat-mandir pavilion; the long
+      // red-roofed halls at the south tip; a cream wall with red trim round
+      // it all. The green pond (OSM 337722335) is map water. Local +Z faces
+      // SSW (199°), +X runs ESE along the temple row (109°).
+      colliderTop = 7;
+      // Brick courtyard east of the pond, and its two small lawns.
+      addBox(group, [36, 0.12, 44.5], [10, 0.06, -10.25], brickTrim).castShadow = false;
+      addBox(group, [26, 0.12, 15.5], [15, 0.06, 19.75], brickTrim).castShadow = false;
+      for (const x of [-9, 1.5]) addBox(group, [8, 0.1, 9], [x, 0.17, -15], lawn).castShadow = false;
+      // The four Shiva temples, built 1.4× so the row reads from the air.
+      const row = new THREE.Group();
+      row.position.set(-0.75, 0, -29.9);
+      row.scale.setScalar(1.4);
+      group.add(row);
+      const SHIVA = [-6.95, -2.4, 2.25, 6.95];
+      const spire: Array<[number, number]> = [[2.1, 4.0], [2.2, 4.9], [2.08, 5.8], [1.78, 6.6], [1.38, 7.4], [0.95, 8.1], [0.6, 8.7]];
+      const SQRT2 = Math.SQRT2;
+      for (const x of SHIVA) {
+        addBox(row, [4.2, 4.0, 4.2], [x, 2.0, 0], peach);
+        addBox(row, [4.5, 0.3, 4.5], [x, 0.15, 0], monumentRed);
+        for (const px of [-1.95, 1.95]) addBox(row, [0.36, 3.6, 0.3], [x + px, 1.9, 2.1], monumentRed);
+        addBox(row, [3.9, 0.3, 0.3], [x, 3.75, 2.12], monumentRed);
+        const door = new THREE.Mesh(pointedArch(1.1, 2.3), archDark);
+        door.position.set(x, 0.3, 2.13);
+        row.add(door);
+        // Rekha spire in banded tiers: cream courses with a red band proud
+        // at the top of each, square in plan (a four-sided lathe, turned 45°).
+        for (let tier = 0; tier < spire.length - 1; tier++) {
+          const [r0, y0] = spire[tier];
+          const [r1, y1] = spire[tier + 1];
+          const split = y0 + (y1 - y0) * 0.72;
+          const rSplit = r0 + (r1 - r0) * 0.72;
+          addLathe(row, [[r0 * SQRT2, y0], [rSplit * SQRT2, split]], 4, [x, 0, 0], peach, true).rotation.y = Math.PI / 4;
+          addLathe(row, [[rSplit * SQRT2 * 1.07, split], [r1 * SQRT2 * 1.07, y1], [r1 * SQRT2 * 0.98, y1]], 4, [x, 0, 0], monumentRed, true).rotation.y = Math.PI / 4;
+        }
+        addBox(row, [1.0, 0.25, 1.0], [x, 8.82, 0], peach);
+        addCylinder(row, 0.62, 0.62, 0.35, [x, 9.1, 0], monumentRed, 8);
+        // Trishul: a shaft, a crossbar low down, and three prongs (never a cross).
+        addCylinder(row, 0.04, 0.06, 1.3, [x, 9.9, 0], archDark, 4);
+        addBox(row, [0.62, 0.07, 0.07], [x, 10.05, 0], archDark);
+        for (const px of [-0.28, 0.28]) addBox(row, [0.07, 0.42, 0.07], [x + px, 10.27, 0], archDark);
+      }
+      // The low wall that links the four cellas.
+      addBox(row, [17.6, 2.6, 2.6], [0, 1.3, -0.4], peach);
+      // Main shrine: a 9 m peach cella under a squat banded char-chala dome
+      // and a red-and-cream crown turret, facing east (local +X) into the
+      // nat-mandir.
+      const SHRINE: [number, number] = [-4.2, 3.1];
+      addBox(group, [9, 6, 9], [SHRINE[0], 3, SHRINE[1]], peach);
+      addBox(group, [9.5, 0.6, 9.5], [SHRINE[0], 5.9, SHRINE[1]], monumentRed);
+      addBox(group, [9.4, 0.5, 9.4], [SHRINE[0], 0.25, SHRINE[1]], monumentRed);
+      const shrineDoor = new THREE.Mesh(pointedArch(2.4, 3.6), archDark);
+      shrineDoor.position.set(SHRINE[0] + 4.53, 0.5, SHRINE[1]);
+      shrineDoor.rotation.y = Math.PI / 2;
+      group.add(shrineDoor);
+      addLathe(group, domeProfile(4.5, 3.0, 0.06, 8), 8, [SHRINE[0], 6.2, SHRINE[1]], peach, true).rotation.y = Math.PI / 8;
+      addCylinder(group, 4.6, 4.75, 0.5, [SHRINE[0], 6.9, SHRINE[1]], monumentRed, 8).rotation.y = Math.PI / 8;
+      addCylinder(group, 3.55, 3.75, 0.45, [SHRINE[0], 8.0, SHRINE[1]], monumentRed, 8).rotation.y = Math.PI / 8;
+      addBox(group, [2.2, 1.6, 2.2], [SHRINE[0], 9.6, SHRINE[1]], monumentRed);
+      addBox(group, [1.4, 0.8, 1.4], [SHRINE[0], 10.8, SHRINE[1]], peach);
+      addCylinder(group, 0.05, 0.07, 1.4, [SHRINE[0], 11.9, SHRINE[1]], archDark, 4);
+      // Nat-mandir: an open hall with a flat brown concrete roof on columns
+      // and cream arched gateways on its shrine side.
+      const HALL_X = 15.5;
+      const HALL_Z = -5;
+      addBox(group, [17, 0.7, 38], [HALL_X, 6.3, HALL_Z], stoneStep);
+      addBox(group, [17, 0.6, 38], [HALL_X, 0.3, HALL_Z], cream);
+      for (const x of [HALL_X - 8, HALL_X + 8]) {
+        for (let z = HALL_Z - 18; z <= HALL_Z + 18.1; z += 6) addBox(group, [0.7, 5.5, 0.7], [x, 3.4, z], cream);
+      }
+      for (const z of [HALL_Z - 8, HALL_Z + 8]) {
+        addBox(group, [1.4, 5.4, 6], [HALL_X - 8.4, 3.3, z], cream);
+        const arch = new THREE.Mesh(roundArch(3.2, 4.2), archDark);
+        arch.position.set(HALL_X - 9.12, 0.6, z);
+        arch.rotation.y = -Math.PI / 2;
+        group.add(arch);
+      }
+      // The two long two-storey halls at the south tip, under red roofs.
+      for (const [x, z, width, length] of [[7.5, 50, 11, 40], [19.5, 53, 10, 30]] as const) {
+        addBox(group, [width, 7, length], [x, 3.5, z], cream);
+        // Gabled tile roof: a triangular prism with flat faces.
+        const gable = new THREE.Shape();
+        gable.moveTo(-width / 2 - 0.4, 0);
+        gable.lineTo(width / 2 + 0.4, 0);
+        gable.lineTo(0, width * 0.32);
+        gable.lineTo(-width / 2 - 0.4, 0);
+        const roofGeometry = new THREE.ExtrudeGeometry(gable, { depth: length + 0.8, bevelEnabled: false, curveSegments: 1 });
+        roofGeometry.translate(0, 0, -(length + 0.8) / 2);
+        const roof = new THREE.Mesh(roofGeometry, tileRoof);
+        roof.position.set(x, 7, z);
+        roof.castShadow = true;
+        group.add(roof);
+        solidBox(x, z, width / 2, length / 2, 7 + width * 0.3);
+      }
+      // Cream compound wall with red coping along the OSM outline (way
+      // 435104024); it runs just outside the pond's own edges.
+      const wall: Array<[number, number]> = [
+        [-4.7, 71.3], [2.2, 11.5], [-1.7, 11.7], [-4.8, 11.9], [-52.2, 24.1], [-65.3, -33.2], [-66.9, -38.5],
+        [-22.7, -49.6], [-18.2, -33.8], [41.8, -31.8], [55.3, 25.7], [35.5, 30.9], [25.7, 51.6], [26.3, 63.6], [17.7, 76.2],
+      ];
+      wall.forEach(([ax, az], index) => {
+        const [bx, bz] = wall[(index + 1) % wall.length];
+        addBeam(group, [ax, 1.25, az], [bx, 1.25, bz], 0.5, 2.5, cream);
+        addBeam(group, [ax, 2.6, az], [bx, 2.6, bz], 0.7, 0.25, monumentRed);
+      });
+      // Main gate on Dhakeshwari Road at the south tip: a pink arched gateway.
+      const gate = new THREE.Group();
+      gate.position.set(6.5, 0, 73.7);
+      gate.rotation.y = Math.atan2(17.7 + 4.7, 76.2 - 71.3) - Math.PI / 2;
+      group.add(gate);
+      addBox(gate, [7.5, 7, 2.4], [0, 3.5, 0], peach);
+      addBox(gate, [8, 0.7, 2.8], [0, 7.2, 0], monumentRed);
+      addBox(gate, [2.2, 1.4, 2.2], [0, 8.2, 0], monumentRed);
+      for (const z of [1.22, -1.22]) {
+        const opening = new THREE.Mesh(pointedArch(3.2, 5), archDark);
+        opening.position.set(0, 0, z);
+        if (z < 0) opening.rotation.y = Math.PI;
+        gate.add(opening);
+      }
+      clearSite(8, -6, 26, 32);
+      clearSite(13, 52, 14, 26);
+      solidBox(-0.75, -29.9, 15, 4, 14.4);
+      solid(SHRINE[0], SHRINE[1], 4.8, 12.6);
+      solidBox(HALL_X, HALL_Z, 8.5, 19, 6.7);
+      perchTarget = [-0.75 + SHIVA[2] * 1.4, -29.9];
+    } else if (landmark.kind === "aparajeyo-bangla") {
+      // Aparajeyo Bangla (Syed Abdullah Khalid, 1979), Dhaka University: three
+      // pale concrete Liberation War figures on a two-tier pedestal, facing
+      // south down the campus road from the Arts Faculty (Kala Bhaban). Seen
+      // from the front, left to right: the nurse in a sari with a first-aid
+      // box, the tallest bare-chested fighter holding his rifle upright, and
+      // the fighter with a rifle across his body. Built 1.5× on a round brick
+      // plaza under shade trees, with the long white, blue-banded Arts
+      // building behind. Local +Z faces south, +X east.
+      const S = 1.5;
+      colliderTop = 3.6;
+      addCylinder(group, 11, 11, 0.16, [0, 0.08, 0], plazaBrick, 28).castShadow = false;
+      addArcSlab(group, 10.6, 11.4, 0, Math.PI * 2, 0, 0.45, plazaBrick, 28);
+      // Brick path out to the road in front.
+      addBox(group, [5, 0.14, 14], [0, 0.07, 17], plazaBrick).castShadow = false;
+      // Pedestal: a low slab, then a truncated pyramid with flat faces.
+      addBox(group, [10 * S, 0.6 * S, 7 * S], [0, 0.3 * S, 0], concrete);
+      const frustum = new THREE.CylinderGeometry(Math.SQRT1_2 * 0.79, Math.SQRT1_2, 1, 4, 1).toNonIndexed();
+      frustum.rotateY(Math.PI / 4);
+      frustum.computeVertexNormals();
+      const pyramid = new THREE.Mesh(frustum, concrete);
+      pyramid.scale.set(8 * S, 1.6 * S, 5.5 * S);
+      pyramid.position.set(0, (0.6 + 0.8) * S, 0);
+      pyramid.castShadow = true;
+      group.add(pyramid);
+      const BASE = 2.2 * S;
+      addBox(group, [5.6 * S, 0.25 * S, 3.4 * S], [0, BASE + 0.12 * S, 0], paleConcrete);
+      // A stocky standing figure `height` tall, built in a 1.8 m body frame:
+      // merged legs, a broad torso and shoulders, a round head, and (for the
+      // fighters) a rifle in the same pale stone as the rest of the group.
+      const headGeometry = new THREE.SphereGeometry(0.15, 8, 6);
+      const figure = (x: number, z: number, height: number, turn: number, kind: "nurse" | "upright" | "across") => {
+        const body = new THREE.Group();
+        body.position.set(x, BASE + 0.25 * S, z);
+        body.rotation.y = turn;
+        // Broadened, so the group still reads as three figures from the air.
+        body.scale.set((height / 1.8) * 1.2, height / 1.8, (height / 1.8) * 1.2);
+        group.add(body);
+        if (kind === "nurse") {
+          // Sari: a long tapered skirt, the bodice, the drape over one shoulder,
+          // and the first-aid box held at her right hip.
+          addCylinder(body, 0.24, 0.34, 1.02, [0, 0.51, 0], paleConcrete, 8);
+          addBox(body, [0.5, 0.54, 0.3], [0, 1.27, 0], paleConcrete);
+          addBox(body, [0.6, 0.14, 0.3], [0, 1.5, 0], paleConcrete);
+          addBox(body, [0.18, 0.72, 0.32], [0.1, 1.12, 0.02], paleConcrete).rotation.z = 0.35;
+          addBox(body, [0.3, 0.24, 0.22], [-0.38, 0.9, 0.08], paleConcrete);
+        } else {
+          // Legs as one tapered block, a belt line, the bare torso and shoulders.
+          addBox(body, [0.44, 0.94, 0.28], [0, 0.47, 0], paleConcrete);
+          addBox(body, [0.56, 0.14, 0.31], [0, 0.98, 0], paleConcrete);
+          addBox(body, [0.66, 0.5, 0.34], [0, 1.3, 0], paleConcrete);
+          addBox(body, [0.76, 0.14, 0.34], [0, 1.52, 0], paleConcrete);
+        }
+        addCylinder(body, 0.07, 0.08, 0.12, [0, 1.62, 0], paleConcrete, 6);
+        const head = new THREE.Mesh(headGeometry, paleConcrete);
+        head.position.set(0, 1.74, 0.01);
+        head.scale.set(1, 1.15, 1);
+        head.castShadow = true;
+        body.add(head);
+        for (const side of [-1, 1]) {
+          const arm = addBox(body, [0.15, 0.66, 0.17], [side * (kind === "nurse" ? 0.33 : 0.42), 1.2, 0], paleConcrete);
+          arm.rotation.z = side * 0.06;
+        }
+        if (kind === "upright") {
+          // Rifle held upright by his left side, muzzle above the shoulder.
+          addBox(body, [0.06, 0.95, 0.07], [0.5, 1.22, 0.07], paleConcrete);
+        } else if (kind === "across") {
+          // Rifle across the body, stock low at his right, muzzle up past the left shoulder.
+          const rifle = addBox(body, [0.06, 0.98, 0.09], [0.08, 1.16, 0.2], paleConcrete);
+          rifle.rotation.z = -0.9;
+          addBox(body, [0.11, 0.26, 0.1], [-0.24, 0.94, 0.2], paleConcrete).rotation.z = -0.9;
+        }
+      };
+      // Shoulder to shoulder, as in the sculpture.
+      figure(-1.75 * S, -0.1, 4.6 * S, 0.12, "nurse");
+      figure(0, 0.25, 5.5 * S, 0, "upright");
+      figure(1.8 * S, -0.05, 5.0 * S, -0.1, "across");
+      // Shade trees ringing the plaza, open to the front.
+      for (let tree = 0; tree < 7; tree++) {
+        const angle = Math.PI * 0.45 + (tree / 6) * Math.PI * 1.1;
+        addLandmarkTree(group, Math.sin(angle) * 16, Math.cos(angle) * 16, 4.4, 6.5, tree % 2 ? landmarkCanopy : landmarkLightCanopy);
+      }
+      // Kala Bhaban (Arts Faculty, OSM 1152392502, 154 × 77 m, six storeys):
+      // a white concrete frame with pale-blue spandrel bands, wings round a
+      // row of courtyards. Its south front stands ~8 m behind the statue.
+      const [artsX, artsZ] = toLocal(23.734223, 90.392795);
+      const ARTS_H = 20;
+      const wing = (x: number, z: number, w: number, d: number) => {
+        addBox(group, [w, ARTS_H, d], [artsX + x, ARTS_H / 2, artsZ + z], paleConcrete);
+        addBox(group, [w - 0.6, 0.1, d - 0.6], [artsX + x, ARTS_H + 0.05, artsZ + z], concrete).castShadow = false;
+        solidBox(artsX + x, artsZ + z, w / 2, d / 2, ARTS_H);
+      };
+      wing(0, 31.5, 154, 14);
+      wing(0, -31.5, 154, 14);
+      for (const x of [-70, -35, 0, 35, 70]) wing(x, 0, 14, 49);
+      for (let floor = 0; floor < 5; floor++) {
+        const y = 4.4 + floor * 3.3;
+        addBox(group, [154.4, 1.2, 0.3], [artsX, y, artsZ + 38.62], skyGlass);
+        addBox(group, [154.4, 1.2, 0.3], [artsX, y, artsZ - 38.62], skyGlass);
+      }
+      clearSite(0, 4, 13, 14);
+      solid(0, 0, 4, BASE + 5.8 * S);
+      perchTarget = [0.01, 0.25];
     } else if (landmark.kind === "shishu-mela") {
-      // Shishu Mela / DNCC Wonderland (Shyamoli): children's amusement park with
-      // Ferris wheel, bright ride pavilions, mini-coaster frame, and festive plaza.
-      colliderTop = 3.5;
-      perchTarget = [-14, -8];
-      addBox(group, [66, 0.45, 58], [0, 0.22, 0], paleConcrete);
-      // Ferris wheel centerpiece
-      addFerrisWheel(group, 13, -6, 12.0, 15.0);
-      solid(13, -6, 11.5, 27.0);
-      // Bright ride pavilions & coaster arch loop
-      addCylinder(group, 10.0, 10.5, 1.2, [-14, 0.9, -8], whiteStone, 16);
-      addCone(group, 11.0, 5.6, [-14, 8.5, -8], carnivalBlue, 12);
-      addCone(group, 6.4, 3.8, [-14, 10.3, -8], accent, 12);
-      solid(-14, -8, 10.5, 12.6);
-      // Mini-coaster elevated blue steel oval deck & festive entrance
-      addBox(group, [26, 5.2, 11], [-10, 3.0, 16], terracotta);
-      addBox(group, [28, 0.9, 13], [-10, 6.0, 16], carnivalBlue);
-      addBox(group, [15, 6.6, 3.2], [10, 3.5, 28], monumentRed);
-      addBox(group, [16.5, 0.9, 4.0], [10, 7.1, 28], accent);
-      for (const [tx, tz, mat] of [
-        [-30, -25, landmarkCanopy],
-        [30, -25, landmarkLightCanopy],
-        [-30, 25, landmarkKrishnachura],
-        [30, 25, landmarkCanopy],
-      ] as const) {
-        addLandmarkTree(group, tx, tz, 4.8, 6.2, mat);
+      // Shishu Mela / DNCC Wonderland, Shyamoli (OSM way 32561560): a small,
+      // packed fairground filling an 86 × 62 m plot whose long axis runs SSE
+      // (161°) along local X. The cartoon gate faces WSW onto Mirpur Road
+      // (local +Z): two orange-and-white spiral seashell pillars and green
+      // dragons coiling off a sea-green relief wall with an octopus, under a
+      // cream-gold "DNCC WONDERLAND" banner. Inside a painted perimeter wall
+      // and shop row stand the Wonder Wheel, a green dragon coaster loop, a
+      // pirate-ship swing, a carousel and small ride canopies.
+      boundsCollider = false;
+      const HX = 43;
+      const HZ = 31;
+      const PAD = 0.3;
+      addBox(group, [HX * 2, PAD, HZ * 2], [0, PAD / 2, 0], paleConcrete);
+      // The perimeter: red frames with blue and yellow mural panels, on both
+      // faces where the wall meets the street.
+      const wallRun = (ax: number, az: number, bx: number, bz: number, height: number, depth: number, faces: number[]) => {
+        const length = Math.hypot(bx - ax, bz - az);
+        const ux = (bx - ax) / length;
+        const uz = (bz - az) / length;
+        const yaw = Math.atan2(ux, uz);
+        const body = addBox(group, [depth, height, length], [(ax + bx) / 2, PAD + height / 2, (az + bz) / 2], monumentRed);
+        body.rotation.y = yaw;
+        const panels = Math.max(1, Math.floor(length / 4));
+        for (let index = 0; index < panels; index++) {
+          const t = (index + 0.5) / panels;
+          for (const face of faces) {
+            const offset = (depth / 2 + 0.07) * face;
+            const panel = addBox(
+              group,
+              [0.14, height * 0.56, (length / panels) * 0.74],
+              [ax + (bx - ax) * t + uz * offset, PAD + height * 0.5, az + (bz - az) * t - ux * offset],
+              index % 2 ? accent : carnivalBlue,
+            );
+            panel.rotation.y = yaw;
+          }
+        }
+      };
+      // Front wall either side of the gate, the two side walls, and the back
+      // shop row (deeper, with its counters facing in).
+      wallRun(-HX + 0.4, HZ - 0.4, -10.5, HZ - 0.4, 4, 0.8, [1, -1]);
+      wallRun(10.5, HZ - 0.4, HX - 0.4, HZ - 0.4, 4, 0.8, [1, -1]);
+      wallRun(-HX + 0.4, -HZ + 5, -HX + 0.4, HZ - 0.8, 4, 0.8, [1, -1]);
+      wallRun(HX - 0.4, HZ - 0.8, HX - 0.4, -HZ + 5, 4, 0.8, [1, -1]);
+      wallRun(HX - 0.4, -HZ + 2.5, -HX + 0.4, -HZ + 2.5, 4.4, 5, [1]);
+      addBox(group, [HX * 2 - 0.4, 0.3, 6], [0, PAD + 4.55, -HZ + 2.8], carnivalBlue);
+
+      // The cartoon gate.
+      const GZ = HZ - 0.2;
+      for (const side of [-1, 1]) {
+        addBox(group, [2.2, 4.6, 1.8], [side * 6, PAD + 2.3, GZ], monumentRed);
+        // Spiral seashell pillar: stacked cones in orange-gold and white,
+        // under a mushroom cap.
+        for (let ring = 0; ring < 5; ring++) {
+          addCone(group, 1.05 - ring * 0.04, 1.5, [side * 8.6, PAD + 0.75 + ring * 1.22, GZ + 1.6], ring % 2 ? whiteStone : accent, 9);
+        }
+        addCylinder(group, 2.3, 0.7, 1.1, [side * 8.6, PAD + 7.0, GZ + 1.6], accent, 10);
+        // A coiled green dragon rising off the pillar cap to a head with an
+        // open red mouth, its tail running out along the wall top.
+        const coil: Array<[number, number, number]> = [
+          [side * 21, PAD + 4.3, GZ + 0.2], [side * 16, PAD + 5.2, GZ + 0.6], [side * 12.5, PAD + 6.4, GZ + 1.2],
+          [side * 10.4, PAD + 8.0, GZ + 1.6], [side * 11.4, PAD + 9.8, GZ + 1.9], [side * 9.4, PAD + 11.0, GZ + 2.2],
+        ];
+        for (let index = 0; index < coil.length - 1; index++) {
+          addBeam(group, coil[index], coil[index + 1], 1.3, 1.3, landmarkLightCanopy, 0.8);
+          addCone(group, 0.35, 1.1, [coil[index][0], coil[index][1] + 0.9, coil[index][2]], monumentRed, 4);
+        }
+        addBox(group, [2.0, 1.4, 2.4], [side * 8.6, PAD + 11.4, GZ + 2.6], landmarkLightCanopy);
+        addBox(group, [1.6, 0.5, 1.4], [side * 8.2, PAD + 10.7, GZ + 3.5], monumentRed);
       }
+      // The sea-green relief wall over the doorway, with the octopus.
+      addBox(group, [15, 5.2, 1.2], [0, PAD + 7.2, GZ], tealArch);
+      const head = new THREE.Mesh(new THREE.SphereGeometry(1.5, 8, 6), whiteStone);
+      head.position.set(0, PAD + 8.6, GZ + 0.9);
+      group.add(head);
+      for (let arm = 0; arm < 6; arm++) {
+        const angle = -0.5 - (arm / 5) * (Math.PI - 1);
+        addBeam(group, [0, PAD + 7.6, GZ + 0.9], [Math.cos(angle) * 5.2, PAD + 7.4 + Math.sin(angle) * 2.2, GZ + 0.75], 0.45, 0.45, accent);
+      }
+      // The arched cream-gold banner along the top.
+      const bannerPoints: Array<[number, number, number]> = [];
+      for (let step = 0; step <= 6; step++) {
+        const x = -11 + (22 * step) / 6;
+        bannerPoints.push([x, PAD + 10.6 + Math.cos((x / 11) * (Math.PI / 2)) * 0.9 - (Math.abs(x) > 9 ? 0.6 : 0), GZ + 0.4]);
+      }
+      for (let index = 0; index < bannerPoints.length - 1; index++) addBeam(group, bannerPoints[index], bannerPoints[index + 1], 0.5, 1.6, accent, 0.3);
+      solidBox(0, GZ + 1, 12, 2, 12);
+
+      // The Wonder Wheel at the NNW end.
+      addFerrisWheel(group, -22, -13, 12, 15);
+      solidBox(-22, -13, 12.5, 3, 28);
+      perchTarget = [-22, -13];
+
+      // The dragon coaster: a closed oval of green rail on silver posts,
+      // rising and dipping between 2 and 6 m, with a dragon-head train.
+      const track: QuadPoint[] = [];
+      const CX = 20;
+      const CZ = -8;
+      for (let step = 0; step <= 28; step++) {
+        const t = (step / 28) * Math.PI * 2;
+        track.push([CX + Math.cos(t) * 15, PAD + 4 + Math.sin(t * 2) * 1.6 + Math.cos(t) * 0.6, CZ + Math.sin(t) * 7.5]);
+      }
+      addSweptBox(group, track, 0.9, 0.55, landmarkLightCanopy);
+      for (let step = 0; step < 28; step += 2) {
+        const [px, py, pz] = track[step];
+        addBox(group, [0.35, py - PAD, 0.35], [px, PAD + (py - PAD) / 2 - 0.3, pz], silverPanel);
+      }
+      for (let car = 0; car < 4; car++) {
+        const [px, py, pz] = track[3 + car];
+        addBox(group, [1.6, 0.9, 1.6], [px, py + 0.5, pz], car === 0 ? landmarkLightCanopy : accent);
+      }
+      addCone(group, 0.5, 1.4, [track[3][0], track[3][1] + 1.6, track[3][2]], monumentRed, 4);
+      solidBox(CX, CZ, 16, 8.5, 6.8);
+
+      // The pirate-ship swing: an A-frame, and the hull caught mid-swing.
+      const SX = 24;
+      const SZ = 17;
+      const PIVOT = 11.5;
+      for (const side of [-2.4, 2.4]) {
+        for (const leg of [-1, 1]) addBeam(group, [SX + leg * 6, PAD, SZ + side], [SX, PAD + PIVOT, SZ + side * 0.4], 0.45, 0.45, silverPanel);
+      }
+      const ship = new THREE.Group();
+      ship.position.set(SX, PAD + PIVOT, SZ);
+      ship.rotation.z = 0.42;
+      group.add(ship);
+      addBeam(ship, [0, 0, -1.3], [0, -8.2, -1.3], 0.35, 0.35, silverPanel);
+      addBeam(ship, [0, 0, 1.3], [0, -8.2, 1.3], 0.35, 0.35, silverPanel);
+      addBox(ship, [10, 1.8, 3.4], [0, -9, 0], landmarkBark);
+      for (const end of [-1, 1]) {
+        const prow = addBox(ship, [2.4, 1.6, 3.0], [end * 5.6, -8.6, 0], landmarkBark);
+        prow.rotation.z = end * 0.5;
+      }
+      addBox(ship, [0.25, 4.2, 0.25], [0, -6.0, 0], landmarkBark);
+      addBox(ship, [0.1, 2.6, 2.6], [0.3, -5.4, 0], whiteStone);
+      solidBox(SX, SZ, 7, 3, 13);
+
+      // A carousel under a striped tent roof.
+      addCylinder(group, 6.2, 6.4, 0.8, [-3, PAD + 0.4, 12], whiteStone, 14);
+      for (let post = 0; post < 8; post++) {
+        const angle = (post / 8) * Math.PI * 2;
+        addBox(group, [0.3, 3.4, 0.3], [-3 + Math.sin(angle) * 5.4, PAD + 2.5, 12 + Math.cos(angle) * 5.4], accent);
+        addBox(group, [0.9, 1.0, 1.6], [-3 + Math.sin(angle) * 4.2, PAD + 1.5, 12 + Math.cos(angle) * 4.2], post % 2 ? monumentRed : carnivalBlue);
+      }
+      addCone(group, 6.9, 3.4, [-3, PAD + 5.9, 12], monumentRed, 14);
+      addCone(group, 3.2, 1.8, [-3, PAD + 7.6, 12], whiteStone, 14);
+      addFinial(group, [-3, PAD + 8.4, 12], 0.6, accent);
+      solidBox(-3, 12, 6.5, 6.5, 9);
+
+      // Small ride canopies (bumper cars, the paratrooper, kiosks) filling the rest.
+      for (const [x, z, w, d, roof] of [
+        [4, -22, 9, 6, carnivalBlue], [-34, 16, 8, 8, accent], [-20, 17, 6, 6, monumentRed],
+        [36, 14, 6, 9, accent], [-8, -2, 6, 5, carnivalBlue], [35, -22, 6, 5, monumentRed],
+      ] as const) {
+        addBox(group, [w, 2.6, d], [x, PAD + 1.3, z], whiteStone);
+        const cap = addCone(group, Math.max(w, d) * 0.74, 2.2, [x, PAD + 3.7, z], roof, 4);
+        cap.rotation.y = Math.PI / 4;
+      }
+      // The paratrooper: a mast with a tilted umbrella of hanging seats.
+      addCylinder(group, 0.5, 0.7, 9, [-33, PAD + 4.5, 3], silverPanel, 8);
+      const umbrella = new THREE.Group();
+      umbrella.position.set(-33, PAD + 9, 3);
+      umbrella.rotation.x = 0.35;
+      group.add(umbrella);
+      for (let arm = 0; arm < 8; arm++) {
+        const angle = (arm / 8) * Math.PI * 2;
+        addBeam(umbrella, [0, 0, 0], [Math.sin(angle) * 6, 0.6, Math.cos(angle) * 6], 0.3, 0.3, silverPanel);
+        addBox(umbrella, [1.2, 1.4, 1.2], [Math.sin(angle) * 6, -0.8, Math.cos(angle) * 6], arm % 2 ? accent : monumentRed);
+      }
+      solidBox(-33, 3, 6, 6, 11);
+      for (const [x, z] of [[-38, -22], [8, 25], [38, 2]] as const) addLandmarkTree(group, x, z, 3.4, 4.6, landmarkLightCanopy);
+      // The plot is solid fairground: keep generic blocks and park trees off it.
+      for (let strip = 0; strip < 4; strip++) solidBox(-HX + (HX / 4) * (strip * 2 + 1), 0, HX / 4, HZ, 4.4);
+    } else if (landmark.kind === "star-mosque") {
+      // Star Mosque (Tara Masjid), Armanitola: a brilliant white hall covered
+      // in blue star tile, five domes in a row along its back half (large,
+      // small, large alternating), an eleven-arch verandah facing east, slim
+      // domed corner turrets over a merlon parapet, and the star-shaped
+      // turquoise pool in the white marble courtyard. OSM 245019710 is 20 × 12 m;
+      // built at 1.3× against the 4–7 storey Armanitola blocks. Local +Z faces
+      // east, +X north.
+      const S = 1.3;
+      const WALL = 7.5;
+      const HALL_X = 21.4;
+      const DEPTH = 12;
+      const ROOF = WALL + 0.35;
+      const DOME_Z = -2.2;
+      const m = new THREE.Group();
+      m.scale.setScalar(S);
+      group.add(m);
+      const starDotGeometry = new THREE.OctahedronGeometry(0.2, 0);
+      colliderTop = (ROOF + 0.7) * S;
+      addBox(m, [HALL_X + 1.4, 0.45, DEPTH + 1.4], [0, 0.225, 0], marble);
+      addBox(m, [HALL_X, WALL, DEPTH], [0, WALL / 2, 0], whiteStone);
+      // The mihrab bay projecting from the back (west) wall.
+      addBox(m, [3.2, 6.2, 1.2], [0, 3.1, -DEPTH / 2 - 0.6], whiteStone);
+      // Roof slab, the pale pink floral frieze and a merlon parapet all round.
+      addBox(m, [HALL_X + 0.3, 0.35, DEPTH + 0.3], [0, WALL + 0.175, 0], whiteStone);
+      addBox(m, [HALL_X + 0.12, 0.45, 0.12], [0, WALL - 0.75, DEPTH / 2 + 0.06], pinkTrim);
+      addBox(m, [HALL_X + 0.12, 0.3, 0.12], [0, 5.25, DEPTH / 2 + 0.06], pinkTrim);
+      for (let x = -HALL_X / 2 + 0.45; x <= HALL_X / 2 - 0.4; x += 0.9) {
+        for (const z of [-DEPTH / 2 - 0.02, DEPTH / 2 + 0.02]) addBox(m, [0.5, 0.7, 0.26], [x, ROOF + 0.35, z], whiteStone);
+      }
+      for (let z = -DEPTH / 2 + 0.9; z <= DEPTH / 2 - 0.8; z += 0.9) {
+        for (const x of [-HALL_X / 2 - 0.02, HALL_X / 2 + 0.02]) addBox(m, [0.26, 0.7, 0.5], [x, ROOF + 0.35, z], whiteStone);
+      }
+      // East verandah: eleven pointed arches on star-tiled piers.
+      const BAY = HALL_X / 11;
+      for (let bay = 0; bay < 11; bay++) {
+        const arch = new THREE.Mesh(pointedArch(BAY - 0.6, 4.1), archDark);
+        arch.position.set(-HALL_X / 2 + BAY * (bay + 0.5), 0.45, DEPTH / 2 + 0.05);
+        m.add(arch);
+      }
+      for (let pier = 0; pier <= 11; pier++) {
+        addBox(m, [0.5, 4.7, 0.36], [-HALL_X / 2 + BAY * pier, 0.45 + 2.35, DEPTH / 2 + 0.18], whiteStone);
+      }
+      // Blind arched windows on the end walls.
+      for (const side of [-1, 1]) {
+        for (const z of [-3.4, 0, 3.4]) {
+          const blind = new THREE.Mesh(pointedArch(1.3, 2.8), archDark);
+          blind.position.set(side * (HALL_X / 2 + 0.05), 1.6, z);
+          blind.rotation.y = side * Math.PI / 2;
+          m.add(blind);
+        }
+      }
+      // Five onion domes on short drums along the back half, north to south:
+      // small, large, small, large, small.
+      for (const [x, radius, rise, finial] of [
+        [9.2, 1.65, 2.3, 0.5], [4.9, 2.55, 3.2, 0.8], [0, 1.75, 2.4, 0.55], [-4.9, 2.55, 3.2, 0.8], [-9.2, 1.65, 2.3, 0.5],
+      ] as const) {
+        const drum = radius > 2 ? 0.9 : 0.7;
+        addCylinder(m, radius + 0.08, radius + 0.12, drum, [x, ROOF + drum / 2, DOME_Z], whiteStone, 14);
+        addCylinder(m, radius + 0.3, radius + 0.3, 0.28, [x, ROOF + drum - 0.05, DOME_Z], pinkTrim, 14);
+        const profile = domeProfile(radius, rise, 0.16, 10);
+        addLathe(m, profile, 14, [x, ROOF + drum, DOME_Z], starTile);
+        // The blue stars, big enough to speckle the dome from a passing bird.
+        for (let step = 1; step <= 8; step += 1.5) {
+          const [ringRadius, ringY] = profile[Math.round(step)];
+          const count = Math.max(4, Math.round(ringRadius * 3.4));
+          for (let index = 0; index < count; index++) {
+            const angle = ((index + (step % 3) * 0.5) / count) * Math.PI * 2;
+            const dot = new THREE.Mesh(starDotGeometry, starBlue);
+            dot.position.set(x + Math.sin(angle) * (ringRadius + 0.04), ROOF + drum + ringY, DOME_Z + Math.cos(angle) * (ringRadius + 0.04));
+            m.add(dot);
+          }
+        }
+        addFinial(m, [x, ROOF + drum + rise - 0.25, DOME_Z], finial, whiteStone);
+        solid(x * S, DOME_Z * S, radius * S, (ROOF + drum + rise) * S);
+      }
+      // Slim octagonal turrets: full height at the four corners, and shorter
+      // ones rising from the parapet between them, each under a mini dome.
+      const turret = (x: number, z: number, base: number, top: number, radius: number) => {
+        addCylinder(m, radius, radius * 1.1, top - base, [x, base + (top - base) / 2, z], whiteStone, 8);
+        addCylinder(m, radius * 1.45, radius * 1.45, 0.22, [x, top - 0.1, z], pinkTrim, 8);
+        addLathe(m, domeProfile(radius * 1.2, radius * 1.9, 0.12, 6), 8, [x, top, z], starTile);
+        addFinial(m, [x, top + radius * 1.6, z], radius * 0.55, whiteStone);
+      };
+      for (const sx of [-1, 1]) {
+        for (const sz of [-1, 1]) turret(sx * (HALL_X / 2 + 0.1), sz * (DEPTH / 2 + 0.1), 0.45, ROOF + 2.4, 0.45);
+        for (const x of [3.9, 7.8]) turret(sx * x, DEPTH / 2 - 0.05, ROOF, ROOF + 1.9, 0.3);
+        turret(sx * 7.8, -DEPTH / 2 + 0.05, ROOF, ROOF + 1.9, 0.3);
+      }
+      // The white marble courtyard to the east, with two grass panels and the
+      // five-pointed star pool.
+      addBox(m, [28, 0.2, 18.6], [0, 0.1, 15.3], marble);
+      for (const side of [-1, 1]) addBox(m, [7.5, 0.08, 3.6], [side * 8.6, 0.24, 10.6], lawn).castShadow = false;
+      const star = (outer: number, inner: number) => {
+        const points: THREE.Vector2[] = [];
+        for (let index = 0; index < 10; index++) {
+          const angle = (index / 10) * Math.PI * 2;
+          const radius = index % 2 === 0 ? outer : inner;
+          points.push(new THREE.Vector2(Math.sin(angle) * radius, Math.cos(angle) * radius));
+        }
+        return points;
+      };
+      const rim = new THREE.Shape(star(4.2, 2.0));
+      rim.holes.push(new THREE.Path(star(3.5, 1.55)));
+      const rimGeometry = new THREE.ExtrudeGeometry(rim, { depth: 0.55, bevelEnabled: false, curveSegments: 1 });
+      rimGeometry.rotateX(-Math.PI / 2);
+      const pool = new THREE.Mesh(rimGeometry, marble);
+      pool.position.set(-1.2, 0.2, 19);
+      m.add(pool);
+      const poolWater = new THREE.Mesh(new THREE.ShapeGeometry(new THREE.Shape(star(3.55, 1.6))), poolTurquoise);
+      poolWater.rotation.x = -Math.PI / 2;
+      poolWater.position.set(-1.2, 0.42, 19);
+      m.add(poolWater);
+      clearSite(0, 8.5 * S, 16 * S, 17 * S);
+      perchTarget = [4.9 * S, DOME_Z * S];
+    } else if (landmark.kind === "kamalapur-station") {
+      // Kamalapur Railway Station (1968): a square of 36 umbrella shells on a
+      // 7 × 7 grid of slender columns. From above it is a diamond lattice of
+      // grey pyramidal shells with a zigzag edge; from the forecourt, a row of
+      // tall white pointed scallops. The shops and halls sit well inside under
+      // it, and four long cream platform canopies run 440 m north. Local +Z
+      // faces the west forecourt, local +X south.
+      const ROOF_Y = 13.4;
+      const PITCH = 14;
+      colliderTop = 17.5;
+      addBox(group, [64, 9, 64], [0, 4.5, 0], paleConcrete);
+      addBox(group, [64.6, 3.8, 64.6], [0, 2.1, 0], ribbonGlass);
+      for (let i = -3; i <= 3; i++) {
+        for (let j = -3; j <= 3; j++) {
+          const [cx, cz] = [i * PITCH, j * PITCH];
+          addCylinder(group, 0.5, 0.62, ROOF_Y, [cx, ROOF_Y / 2, cz], cream, 8);
+          if (Math.abs(i) < 3 && Math.abs(j) < 3) continue;
+          // The outer columns fork into ribbed arms under the shell edges.
+          for (const [ax, az] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+            if (Math.abs(cx + ax * 4.2) > 42 || Math.abs(cz + az * 4.2) > 42) continue;
+            addBeam(group, [cx, 8.4, cz], [cx + ax * 4.2, ROOF_Y, cz + az * 4.2], 0.45, 0.45, cream);
+          }
+        }
+      }
+      // Each facade bay is a tall pointed scallop: the turned-up edge of a shell.
+      const spandrel = new THREE.Shape();
+      spandrel.moveTo(-7, 0);
+      spandrel.lineTo(-6.5, 0);
+      spandrel.quadraticCurveTo(-6.5, 4.5, 0, 5.5);
+      spandrel.quadraticCurveTo(6.5, 4.5, 6.5, 0);
+      spandrel.lineTo(7, 0);
+      spandrel.lineTo(7, 6.2);
+      spandrel.lineTo(-7, 6.2);
+      spandrel.lineTo(-7, 0);
+      const spandrelGeometry = new THREE.ExtrudeGeometry(spandrel, { depth: 0.5, bevelEnabled: false, curveSegments: 6 });
+      for (let side = 0; side < 4; side++) {
+        const face = new THREE.Group();
+        face.rotation.y = side * Math.PI / 2;
+        group.add(face);
+        for (let bay = -3; bay < 3; bay++) {
+          const mesh = new THREE.Mesh(spandrelGeometry, cream);
+          mesh.position.set(bay * PITCH + 7, ROOF_Y - 6.2, 41.1);
+          face.add(mesh);
+        }
+      }
+      // The shell soffit, then the diamond lattice: 8 × 8 pyramids with 7 × 7
+      // set in their gaps, corners pointing N/S/E/W, tips forming the zigzag edge.
+      addBox(group, [83, 0.8, 83], [0, ROOF_Y + 0.4, 0], cream);
+      const SHELL = 10.5;
+      const pyramid = new THREE.ConeGeometry(SHELL / 2, 3.4, 4, 1, true).toNonIndexed();
+      pyramid.computeVertexNormals();
+      for (const count of [8, 7]) {
+        for (let i = 0; i < count; i++) {
+          for (let j = 0; j < count; j++) {
+            const shell = new THREE.Mesh(pyramid, boardConcrete);
+            shell.position.set((i - (count - 1) / 2) * SHELL, ROOF_Y + 0.8 + 1.7, (j - (count - 1) / 2) * SHELL);
+            group.add(shell);
+          }
+        }
+      }
+      // Platforms, tracks and canopies in world axes (east +x, south +z), from
+      // the headhouse's north edge to lat 23.7367.
+      const yard = new THREE.Group();
+      yard.rotation.y = -landmark.heading;
+      group.add(yard);
+      const YARD_MID = -284;
+      const YARD_LENGTH = 486;
+      addBox(yard, [114, 0.3, YARD_LENGTH], [29, 0.15, YARD_MID], roofGrey).castShadow = false;
+      const PLATFORMS: Array<[number, number]> = [[-16.3, 14], [14.3, 12], [40.8, 12], [69.3, 12]];
+      // Each track reads from the air as a dark steel-and-sleeper strip on the ballast.
+      for (const x of [-4.5, 3.5, 24, 31, 51, 59, 80]) {
+        addBox(yard, [2.6, 0.2, YARD_LENGTH], [x, 0.4, YARD_MID], bronze).castShadow = false;
+      }
+      const CANOPY_MID = -279;
+      const CANOPY_LENGTH = 470;
+      const vault = new THREE.CylinderGeometry(1.7, 1.7, 7.4, 6, 1, true, -Math.PI / 2, Math.PI);
+      vault.rotateX(-Math.PI / 2);
+      vault.scale(1, 0.7, 1);
+      for (const [x, width] of PLATFORMS) {
+        addBox(yard, [width, 0.9, 476], [x, 0.75, -282], paleConcrete);
+        addBox(yard, [width - 2, 0.5, CANOPY_LENGTH], [x, 6.25, CANOPY_MID], stationCream);
+        for (let z = -50; z >= -510; z -= 16) addBox(yard, [0.7, 4.9, 0.7], [x, 3.65, z], stationCream);
+        for (let z = -48.5; z >= -510; z -= 9) {
+          const hump = new THREE.Mesh(vault, boardConcrete);
+          hump.position.set(x, 6.5, z);
+          yard.add(hump);
+        }
+        colliders.push({ x: group.position.x + x, z: group.position.z + CANOPY_MID, halfWidth: width / 2 - 1, halfDepth: CANOPY_LENGTH / 2, top: 7.7 + group.position.y });
+      }
+      // The white footbridge over the yard, 120 m north of the headhouse.
+      addBox(yard, [130, 0.8, 3.6], [28, 8.4, -161], whiteStone);
+      for (const side of [-1.7, 1.7]) addBox(yard, [130, 1.1, 0.25], [28, 9.35, -161 + side], whiteStone);
+      for (const x of [-30, -16.3, 14.3, 40.8, 69.3, 90]) addBox(yard, [0.9, 7.7, 0.9], [x, 4.15, -161], whiteStone);
+      colliders.push({ x: group.position.x + 28, z: group.position.z - 161, halfWidth: 65, halfDepth: 2, top: 9.9 + group.position.y });
+      // Keep the yard and the west forecourt free of generic blocks.
+      colliders.push({ x: group.position.x + 29, z: group.position.z + YARD_MID, halfWidth: 60, halfDepth: YARD_LENGTH / 2 + 4, top: LANDMARK_CLEARING_TOP });
+      colliders.push({ x: group.position.x - 52, z: group.position.z, halfWidth: 12, halfDepth: 46, top: LANDMARK_CLEARING_TOP });
+    } else if (landmark.kind === "bcfcc") {
+      // Bangladesh-China Friendship Conference Centre (formerly BICC,
+      // Agargaon, 2001): one huge, thin grey metal roof plate floating at
+      // 23 m over the whole hall, carried on a ring of white round columns
+      // whose curved white brackets sweep up to its edge, with a row of
+      // shallow white barrel vaults hanging under the eaves and a dark space
+      // truss beneath. The hall itself, glass curtain walls between tan-tiled
+      // drums at the corners, sits in shadow well inside the roof edge; three
+      // pointed-arch portals mark the front. Out front: a fountain pool on the
+      // axis and a grid of forty flagpoles on two lawns. Local +Z is the front
+      // (east, inferred), +X is north.
+      const HX = 73;
+      const HZ = 64;
+      const EAVE = 22.3;
+      colliderTop = 24.2;
+      perchTarget = [0, HZ - 4];
+      // The roof plate, its white fascia, the dark soffit and the space truss.
+      addBox(group, [HX * 2, 1.2, HZ * 2], [0, 23.4, 0], plantGrey);
+      addBox(group, [HX * 2 + 0.8, 0.9, HZ * 2 + 0.8], [0, 23, 0], whiteStone);
+      addBox(group, [HX * 2 - 6, 0.4, HZ * 2 - 6], [0, EAVE + 0.2, 0], recess);
+      for (let z = -54; z <= 54; z += 12) addBox(group, [HX * 2 - 8, 0.5, 0.5], [0, 20.4, z], recess);
+      for (let x = -60; x <= 60; x += 12) addBox(group, [0.5, 0.5, HZ * 2 - 8], [x, 20.4, 0], recess);
+      for (let x = -60; x <= 60; x += 24) {
+        for (let z = -48; z <= 48; z += 24) {
+          for (const [dx, dz] of [[6, 6], [-6, 6], [6, -6], [-6, -6]] as const) addBeam(group, [x, 20.4, z], [x + dx, EAVE, z + dz], 0.3, 0.3, recess);
+        }
+      }
+      // The hall: glass curtain walls, tan drums at the corners, tan end blocks.
+      addBox(group, [112, 14, 96], [0, 7, 0], glass);
+      addBox(group, [104, 4, 88], [0, 16, 0], recess);
+      for (const sx of [-1, 1]) {
+        for (const sz of [-1, 1]) addCylinder(group, 7.5, 7.5, 17, [sx * 54, 8.5, sz * 46], peach, 16);
+        addBox(group, [12, 17, 22], [sx * 52, 8.5, 0], peach);
+      }
+      // Three tall pointed-arch portals in white frames at the front centre.
+      for (const x of [-8.5, 0, 8.5]) {
+        const frameArch = new THREE.Mesh(pointedArch(7, 13.4), whiteStone);
+        frameArch.position.set(x, 0.2, 48.12);
+        group.add(frameArch);
+        const doorway = new THREE.Mesh(pointedArch(5.4, 12), recess);
+        doorway.position.set(x, 0.2, 48.3);
+        group.add(doorway);
+      }
+      // The ring of white columns and their curved brackets, and the barrel
+      // vaults between them under the eaves.
+      const bracket = new THREE.TorusGeometry(5.6, 0.32, 4, 6, Math.PI / 2);
+      const vault = new THREE.CylinderGeometry(5.8, 5.8, 9, 6, 1, true, -Math.PI / 2, Math.PI);
+      vault.rotateX(Math.PI / 2);
+      vault.scale(1, 0.42, 1);
+      const sides = [
+        { across: HZ, half: HX, nx: 0, nz: 1 },
+        { across: HZ, half: HX, nx: 0, nz: -1 },
+        { across: HX, half: HZ, nx: 1, nz: 0 },
+        { across: HX, half: HZ, nx: -1, nz: 0 },
+      ];
+      for (const side of sides) {
+        const count = Math.round((side.half * 2 - 14) / 12);
+        const spacing = (side.half * 2 - 14) / count;
+        const facing = Math.atan2(side.nx, side.nz);
+        for (let index = 0; index <= count; index++) {
+          const along = -side.half + 7 + index * spacing;
+          const inset = side.across - 6;
+          const x = side.nz ? along : side.nx * inset;
+          const z = side.nz ? side.nz * inset : along;
+          addCylinder(group, 0.65, 0.65, 16.7, [x, 8.35, z], whiteStone, 8);
+          const holder = new THREE.Group();
+          holder.position.set(x + side.nx * 5.6, 16.7, z + side.nz * 5.6);
+          holder.rotation.y = facing - Math.PI / 2;
+          group.add(holder);
+          const rib = new THREE.Mesh(bracket, whiteStone);
+          rib.rotation.y = Math.PI;
+          holder.add(rib);
+          if (index === count) continue;
+          const mid = along + spacing / 2;
+          const vaultMesh = new THREE.Mesh(vault, whiteStone);
+          vaultMesh.position.set(side.nz ? mid : side.nx * (side.across - 7), EAVE, side.nz ? side.nz * (side.across - 7) : mid);
+          vaultMesh.rotation.y = facing;
+          group.add(vaultMesh);
+        }
+      }
+      // Forecourt: asphalt apron, two flagpole lawns and the fountain pool.
+      addBox(group, [140, 0.1, 62], [0, 0.05, HZ + 31], roofGrey).castShadow = false;
+      for (const sx of [-1, 1]) {
+        addBox(group, [43, 0.24, 22], [sx * 33.5, 0.12, HZ + 17], lawn).castShadow = false;
+        for (let row = 0; row < 4; row++) {
+          for (let pole = 0; pole < 5; pole++) {
+            addCylinder(group, 0.12, 0.14, 16, [sx * (16 + pole * 9), 8.2, HZ + 9 + row * 5.5], whiteStone, 5);
+          }
+        }
+      }
+      addBox(group, [31, 0.6, 11], [0, 0.3, HZ + 17], whiteStone);
+      addBox(group, [29.4, 0.14, 9.4], [0, 0.62, HZ + 17], water);
+      clearSite(0, HZ + 31, 72, 32);
+    } else if (landmark.kind === "jamuna-future-park") {
+      // Jamuna Future Park, Kuril: a 230 m block of light grey composite
+      // panelling (OSM 586535435, seven retail floors) whose skyline is a
+      // ring of taller square pavilions, each under a flat overhanging dark
+      // "hat" roof over a shadowed bracket band, with tall blue glass panels
+      // and slot windows. The west front onto Pragati Sarani has the big
+      // pavilion with the round-arched blue glass window, and blue glass
+      // blocks at its north end; an octagonal glass skylight crowns the
+      // atrium. The outdoor rides stand on the forecourt to the south-west,
+      // clear of the JW Marriott. Footprint mode: local axes are world axes.
+      const MALL = 586535435;
+      const mall = anchor(MALL);
+      if (mall) {
+        boundsCollider = false;
+        const H = mall.height;
+        slab(MALL, H - 1.6, 1.5, 1.004, copperDark);
+        slab(MALL, H - 0.1, 0.8, 1.012, roofGrey);
+        // Pavilions: group-local centre, outward facing, width, height, type
+        // (from the OSM outline, inset so their faces are flush with it).
+        const pavilions: Array<[number, number, number, number, number, "main" | "blue" | "pav"]> = [
+          [-100.9, -10.4, -1.392, 46, 44, "main"], [-109.4, -56.7, -1.813, 30, 46, "blue"], [-78, 78, -1.154, 32, 42, "pav"],
+          [-49.5, 106.4, 0.235, 32, 42, "pav"], [4.2, 94.5, 0.235, 30, 40, "pav"], [69.9, 78.1, 0.227, 32, 42, "pav"],
+          [114.8, 68.7, 0.227, 30, 42, "pav"], [103.1, 31.8, 1.776, 32, 40, "pav"], [77.7, -80.8, 1.821, 30, 42, "pav"],
+          [44, -101.9, -2.904, 32, 42, "pav"], [-45.3, -80.3, -2.904, 32, 40, "pav"],
+        ];
+        // The table is in metres from the footprint's bounds centre (the
+        // anchor), which sits about 35 m E and 25 m N of the OSM centroid.
+        for (const [px, pz, facing, w, h, type] of pavilions) {
+          const holder = new THREE.Group();
+          holder.position.set(mall.x + px, 0, mall.z + pz);
+          holder.rotation.y = facing;
+          group.add(holder);
+          addBox(holder, [w, h, w], [0, h / 2, 0], type === "blue" ? starBlue : silverPanel);
+          addBox(holder, [w + 0.5, 1.5, w + 0.5], [0, h - 0.9, 0], copperDark);
+          addBox(holder, [w + 4.6, 0.8, w + 4.6], [0, h + 0.3, 0], copperDark);
+          if (type === "main") {
+            const arch = new THREE.Mesh(roundArch(w * 0.62, h * 0.8), starBlue);
+            arch.position.set(0, 2, w / 2 + 0.15);
+            holder.add(arch);
+          } else if (type === "pav") {
+            addBox(holder, [w * 0.5, h * 0.62, 0.4], [0, h * 0.5, w / 2 + 0.1], starBlue);
+          }
+          if (type !== "blue") {
+            for (const side of [-1, 1]) {
+              addBox(holder, [0.9, h * 0.52, 0.3], [side * w * 0.4, h * 0.5, w / 2 + 0.1], starBlue);
+              addBox(holder, [0.3, h * 0.52, 0.9], [side * (w / 2 + 0.1), h * 0.5, 0], starBlue);
+            }
+          }
+          solid(mall.x + px, mall.z + pz, w * 0.5, h + 0.7);
+        }
+        // Rooftop: the octagonal atrium skylight over the mass centroid, and plant.
+        const [skyX, skyZ] = toLocal(23.813286, 90.42379);
+        addCylinder(group, 17.5, 17.5, 1.4, [skyX, H + 1.2, skyZ], roofGrey, 8);
+        addCone(group, 16.5, 4.5, [skyX, H + 4.15, skyZ], atriumGlass, 8);
+        for (const [rx, rz, w, d] of [[40, -40, 14, 9], [-40, 50, 12, 10], [70, 40, 10, 14], [-20, -70, 16, 8], [20, 70, 12, 8]] as const) {
+          addBox(group, [w, 3, d], [mall.x + rx, H + 2.2, mall.z + rz], roofGrey);
+        }
+        // Collision: three strips over the irregular mass, below the pavilions.
+        solidBox(mall.x - 5, mall.z, 110, 78, H + 0.7);
+        solidBox(mall.x + 20, mall.z - 95, 60, 17, H + 0.7);
+        solidBox(mall.x + 25, mall.z + 95, 65, 17, H + 0.7);
+        solidBox(mall.x + 111, mall.z + 30, 7, 50, H + 0.7);
+        perchTarget = [mall.x - 100.9, mall.z - 10.4];
+        // The rides on the south-west forecourt: a red coaster on blue
+        // trestles, a red pendulum ride and a red drop tower.
+        const rides = new THREE.Group();
+        rides.position.set(mall.x - 205, 0, mall.z + 82);
+        group.add(rides);
+        addBox(rides, [112, 0.12, 100], [0, 0.06, 0], roofGrey).castShadow = false;
+        const SEGMENTS = 28;
+        const trackPoint = (index: number): [number, number, number] => {
+          const angle = (index / SEGMENTS) * Math.PI * 2;
+          return [Math.cos(angle) * 34, 9 + 6 * Math.sin(angle * 2) + 3 * Math.cos(angle), Math.sin(angle) * 14 - 14];
+        };
+        for (let index = 0; index < SEGMENTS; index++) {
+          const a = trackPoint(index);
+          const b = trackPoint(index + 1);
+          addBeam(rides, a, b, 1.8, 0.5, monumentRed, 0.4);
+          if (index % 2 === 0) addBox(rides, [0.6, a[1], 0.6], [a[0], a[1] / 2, a[2]], carnivalBlue);
+        }
+        for (const side of [-1, 1]) {
+          addBeam(rides, [side * 7, 0, 22], [0, 24, 22], 0.9, 0.9, monumentRed);
+          addBeam(rides, [side * 7, 0, 28], [0, 24, 28], 0.9, 0.9, monumentRed);
+        }
+        addBeam(rides, [0, 24, 25], [9, 8, 25], 1.2, 1.2, accent);
+        addCylinder(rides, 3.4, 3.4, 1.4, [9.6, 7.2, 25], carnivalBlue, 10);
+        addBox(rides, [2.6, 32, 2.6], [32, 16, 26], monumentRed);
+        addCylinder(rides, 2.6, 2.6, 2.2, [32, 21, 26], accent, 8);
+        solid(mall.x - 205, mall.z + 68, 34, 17);
+        solid(mall.x - 205 + 32, mall.z + 82 + 26, 2, 32);
+        clearSite(mall.x - 205, mall.z + 82, 56, 50);
+      }
+    } else if (landmark.kind === "hatirjheel-bridge") {
+      // Hatirjheel's signature bridge (OSM way 444229773, 193 m): a straight
+      // pale deck low over the lake, crowned by four pairs of white concrete
+      // arch ribs that spring from the deck edges, lean in over the road and
+      // are tied by short struts at the crown, so side-on they read as a wave
+      // with the main arch tallest. From the NW end the spans are 30, 55, 40
+      // and 35 m. Local +Z runs down the axis to the SE (138°), +X is NE.
+      boundsCollider = false;
+      // The map draws the two carriageways (and their shoulders) flat on the
+      // water 7 m apart; the deck covers both, and its deep girder fascia
+      // comes down to just above them so they never show beneath it.
+      const DX = 3.5;
+      const HALF = 96.5;
+      const TOP = 3;
+      const END = 0.7;
+      const deckY = (s: number) => {
+        const a = Math.abs(s);
+        return a <= 68 ? TOP : TOP + (END - TOP) * Math.min(1, (a - 68) / (HALF - 68));
+      };
+      const along = (dx: number, lift = 0): QuadPoint[] => {
+        const path: QuadPoint[] = [];
+        for (let s = -HALF; s <= HALF + 0.01; s += 4) path.push([DX + dx, deckY(s) + lift, s]);
+        return path;
+      };
+      const EDGE = 10.4;
+      addSweptBox(group, along(0), 13.4, 0.4, paleConcrete, 0, 0.62);
+      addSweptBox(group, along(0, 0.07), 8, 0.4, roofGrey);
+      addSweptBox(group, along(0, 0.3), 0.5, 0.6, whiteStone);
+      for (const side of [-1, 1]) {
+        addSweptBox(group, along(side * 11.7, 0.25), 1.5, 0.5, concrete);
+        addSweptBox(group, along(side * 13.25, 1.15), 0.12, 1.1, plantGrey);
+      }
+      // Arch pairs: [start, end, rise] along the axis (lake water spans ±78 m).
+      const ARCHES: Array<[number, number, number]> = [[-80, -50, 10], [-50, 5, 18], [5, 45, 13], [45, 80, 11]];
+      const CROWN_GAP = 3;
+      const SEGMENTS = 12;
+      const ribPoint = (s0: number, s1: number, rise: number, side: number, t: number): QuadPoint => {
+        const s = s0 + (s1 - s0) * t;
+        const h = rise * Math.sin(Math.PI * t);
+        return [DX + side * (EDGE - ((EDGE - CROWN_GAP) * h) / rise), deckY(s) + h, s];
+      };
+      for (const [s0, s1, rise] of ARCHES) {
+        for (const side of [-1, 1]) {
+          for (let step = 0; step < SEGMENTS; step++) {
+            addBeam(group, ribPoint(s0, s1, rise, side, step / SEGMENTS), ribPoint(s0, s1, rise, side, (step + 1) / SEGMENTS), 1.3, 1.1, whiteStone, 0.7);
+          }
+          // Springing blocks where the ribs land on the deck edge.
+          addBox(group, [2.2, 1.4, 3.2], [DX + side * EDGE, deckY(s0) + 0.7, s0], whiteStone);
+          if (s1 === 80) addBox(group, [2.2, 1.4, 3.2], [DX + side * EDGE, deckY(s1) + 0.7, s1], whiteStone);
+        }
+        // Crown struts tie the two ribs where they lean closest.
+        const struts = rise > 15 ? [0.3, 0.4, 0.5, 0.6, 0.7] : [0.36, 0.5, 0.64];
+        for (const t of struts) addBeam(group, ribPoint(s0, s1, rise, -1, t), ribPoint(s0, s1, rise, 1, t), 0.8, 0.8, whiteStone);
+        // Hangers every 5 m down to the deck edges, on the main span only.
+        if (rise > 15) {
+          for (let s = s0 + 5; s < s1 - 2; s += 5) {
+            const t = (s - s0) / (s1 - s0);
+            for (const side of [-1, 1]) {
+              const top = ribPoint(s0, s1, rise, side, t);
+              addBeam(group, top, [DX + side * EDGE, deckY(s) + 0.4, s], 0.16, 0.16, plantGrey);
+            }
+          }
+        }
+        solid(DX, (s0 + s1) / 2, 4, deckY((s0 + s1) / 2) + rise + 0.7);
+      }
+      // The deck the bird can stand on, in short square columns along it.
+      for (let s = -HALF + 6; s <= HALF - 5; s += 12) solid(DX, s, 12, deckY(s));
+      // Keep generic blocks off both landings.
+      for (const end of [-1, 1]) clearSite(DX, end * (HALF + 14), 16, 15);
+      perchTarget = [DX, -22.5];
+    } else if (landmark.kind === "kuril-flyover") {
+      // Kuril Flyover: one-lane box-girder ramps (8.5 m, 1.6 m deep, pale
+      // concrete with parapets) on single round piers with hammerheads, tying
+      // a knot over Airport Road, the rail line and the ponds in its loops
+      // (map water). The three chains join the ten OSM ways named "Kuril
+      // Flyover" end to end; heights run from the free ground ends up to layer
+      // 1 (8 m) and layer 2 (15 m). Heading 0, so local axes are world axes.
+      boundsCollider = false;
+      type Ramp = { points: Array<[number, number]>; heights: Array<[number, number]> };
+      const RAMPS: Ramp[] = [
+        // 1207428605 (ground) → 316785308 (layer 1, the 470 m hook) → 1207086854.
+        {
+          points: [[23.8203951, 90.4170930], [23.8206336, 90.4173414], [23.8210005, 90.4178943], [23.8210704, 90.4180041], [23.8211315, 90.4180929], [23.8212386, 90.4182394], [23.8213518, 90.4183896], [23.8214946, 90.4185815], [23.8216086, 90.4187333], [23.8216581, 90.4187971], [23.8217236, 90.4188689], [23.8217941, 90.4189419], [23.8218800, 90.4190288], [23.8219580, 90.4191023], [23.8220193, 90.4191529], [23.8220908, 90.4192031], [23.8221778, 90.4192658], [23.8222272, 90.4193176], [23.8222745, 90.4193753], [23.8223197, 90.4194531], [23.8223522, 90.4195196], [23.8223709, 90.4195736], [23.8223824, 90.4196485], [23.8223842, 90.4197218], [23.8223814, 90.4198201], [23.8223680, 90.4199479], [23.8223414, 90.4200960], [23.8223068, 90.4202861], [23.8222624, 90.4204819], [23.8222351, 90.4205838], [23.8221857, 90.4206958], [23.8221525, 90.4207522], [23.8221122, 90.4207974], [23.8220565, 90.4208504], [23.8220101, 90.4208859], [23.8219567, 90.4209191], [23.8218917, 90.4209432], [23.8218419, 90.4209590], [23.8217505, 90.4209811], [23.8216843, 90.4209808], [23.8216046, 90.4209754], [23.8215629, 90.4209646], [23.8215082, 90.4209533], [23.8214211, 90.4209259], [23.8210697, 90.4207805], [23.8208244, 90.4206646], [23.8207166, 90.4206003], [23.8205928, 90.4205094]],
+          heights: [[0, 0.75], [150, 8], [590, 8], [650, 0.75]],
+        },
+        // 569957263 → 569962327 (layer 1) → 917305509 (layer 2, the hairpin)
+        // → 316785309 (layer 1) → 1207086856 (ground).
+        {
+          points: [[23.8252300, 90.4219105], [23.8251931, 90.4219101], [23.8251330, 90.4219048], [23.8250753, 90.4218873], [23.8250397, 90.4218726], [23.8250017, 90.4218558], [23.8249453, 90.4218256], [23.8249249, 90.4218125], [23.8248869, 90.4217881], [23.8248360, 90.4217590], [23.8247815, 90.4217298], [23.8246207, 90.4216560], [23.8245542, 90.4216229], [23.8244536, 90.4215926], [23.8243671, 90.4215775], [23.8242628, 90.4215625], [23.8229523, 90.4214569], [23.8227876, 90.4214396], [23.8226981, 90.4214261], [23.8226204, 90.4213994], [23.8225684, 90.4213737], [23.8225154, 90.4213366], [23.8224562, 90.4212841], [23.8223970, 90.4212216], [23.8223476, 90.4211484], [23.8223203, 90.4210912], [23.8222988, 90.4210262], [23.8222895, 90.4209625], [23.8222852, 90.4208874], [23.8222893, 90.4207828], [23.8223049, 90.4206338], [23.8223312, 90.4204810], [23.8223637, 90.4203422], [23.8224056, 90.4202026], [23.8224341, 90.4201310], [23.8224849, 90.4200397], [23.8225464, 90.4199676], [23.8226234, 90.4199063], [23.8227005, 90.4198707], [23.8227934, 90.4198412], [23.8228798, 90.4198244], [23.8229586, 90.4198297], [23.8230449, 90.4198408], [23.8231259, 90.4198596], [23.8232375, 90.4198875], [23.8235835, 90.4200186], [23.8237761, 90.4200847], [23.8238554, 90.4201064], [23.8239445, 90.4201315], [23.8240933, 90.4201839], [23.8243009, 90.4202329], [23.8244087, 90.4202551], [23.8245204, 90.4202778], [23.8246263, 90.4203039], [23.8247345, 90.4203233], [23.8248443, 90.4203396], [23.8252082, 90.4203790], [23.8254053, 90.4204313]],
+          heights: [[0, 0.75], [81, 7], [170, 15], [390, 15], [792, 0.75]],
+        },
+        // 316785310 (layer 2 over the expressway) → 1307888384 (ground). Its
+        // west end joins ways not in the snapshot, so it is landed there.
+        {
+          points: [[23.8250362, 90.4211850], [23.8250109, 90.4213417], [23.8250079, 90.4214604], [23.8250186, 90.4215745], [23.8250317, 90.4216448], [23.8250518, 90.4217575], [23.8250975, 90.4219643], [23.8251230, 90.4220852], [23.8251869, 90.4223723], [23.8252434, 90.4226610], [23.8253241, 90.4230412], [23.8255060, 90.4238220], [23.8256522, 90.4244002], [23.8257638, 90.4247858]],
+          heights: [[0, 0.75], [100, 15], [193, 15], [377, 0.75]],
+        },
+      ];
+      const DECK_HALF = 4.25;
+      const DEPTH = 1.6;
+      let bestPerch = -1;
+      RAMPS.forEach((ramp, rampIndex) => {
+        // Resample to ≤ 9 m steps so the height profile bends smoothly.
+        const plan = ramp.points.map(([lat, lon]) => toLocal(lat, lon));
+        const samples: Array<{ x: number; z: number; s: number; dx: number; dz: number }> = [];
+        let travelled = 0;
+        for (let index = 0; index < plan.length - 1; index++) {
+          const [ax, az] = plan[index];
+          const [bx, bz] = plan[index + 1];
+          const length = Math.hypot(bx - ax, bz - az);
+          const steps = Math.max(1, Math.ceil(length / 9));
+          for (let step = 0; step < steps; step++) {
+            const t = step / steps;
+            samples.push({ x: ax + (bx - ax) * t, z: az + (bz - az) * t, s: travelled + length * t, dx: (bx - ax) / length, dz: (bz - az) / length });
+          }
+          travelled += length;
+          if (index === plan.length - 2) samples.push({ x: bx, z: bz, s: travelled, dx: (bx - ax) / length, dz: (bz - az) / length });
+        }
+        const heightAt = (s: number) => {
+          const keys = ramp.heights;
+          if (s <= keys[0][0]) return keys[0][1];
+          for (let index = 1; index < keys.length; index++) {
+            const [s1, h1] = keys[index];
+            const [s0, h0] = keys[index - 1];
+            if (s <= s1) return h0 + ((h1 - h0) * (s - s0)) / (s1 - s0);
+          }
+          return keys[keys.length - 1][1];
+        };
+        const path: QuadPoint[] = samples.map(({ x, z, s }) => [x, heightAt(s), z]);
+        addSweptBox(group, path, DECK_HALF, DEPTH, paleConcrete);
+        addSweptBox(group, path.map(([x, y, z]) => [x, y + 0.06, z] as QuadPoint), DECK_HALF - 0.6, 0.3, roofGrey);
+        for (const side of [-1, 1]) {
+          addSweptBox(group, path.map(([x, y, z]) => [x, y + 1, z] as QuadPoint), 0.22, 1.3, concrete, side * (DECK_HALF - 0.22));
+        }
+        // Piers every ≈30 m wherever the deck is clear of the ground, each a
+        // round column under a hammerhead turned square to the deck.
+        let nextPier = 12;
+        let nextColumn = 0;
+        for (const { x, z, s, dx, dz } of samples) {
+          const top = heightAt(s);
+          if (s >= nextPier && top > 3.2) {
+            nextPier = s + 30;
+            const column = top - DEPTH - 1.5;
+            addCylinder(group, 0.9, 0.9, column, [x, column / 2, z], concrete, 8);
+            const head = addBox(group, [6.4, 1.5, 2.2], [x, column + 0.75, z], concrete);
+            head.rotation.y = Math.atan2(dx, dz);
+          }
+          if (s >= nextColumn && top > 2.4) {
+            // Overlapping columns as wide as the deck and its parapets.
+            nextColumn = s + 6;
+            solid(x, z, DECK_HALF + 0.8, top + 0.4);
+          }
+          // The perch: the middle of the layer-2 hairpin (way 917305509).
+          if (rampIndex === 1 && bestPerch < 0 && s >= 243) {
+            bestPerch = s;
+            perchTarget = [x, z];
+          }
+        }
+      });
+    } else if (landmark.kind === "gulshan-central-mosque") {
+      // Gulshan Central Mosque & Eidgah (Azad Masjid): a white two-storey hall
+      // famous for its folded-plate facade, a row of tapering fins whose
+      // points rise above the roof as a sawtooth crest, dark trapezoid windows
+      // between them over a ground-floor arcade of round arches. A separate
+      // white arched loggia runs along the forecourt, palms line it, and the
+      // Eidgah lawn opens to the east. The minaret with its saucer balcony
+      // and pine-cone lantern stands at the south end. Local +Z faces east
+      // (the front), +X points north.
+      colliderTop = 13.2;
+      const HX = 30;
+      const HZ = 20;
+      addBox(group, [HX * 2, 13, HZ * 2], [0, 6.5, 0], whiteStone);
+      addBox(group, [HX * 2 - 2, 0.2, HZ * 2 - 2], [0, 13.05, 0], concrete);
+      // The plain stair tower at the north end of the facade.
+      addBox(group, [6, 16.5, 9], [HX - 3, 8.25, HZ - 5], whiteStone);
+      const BAY = 5.5;
+      const fin = new THREE.Shape();
+      fin.moveTo(-0.35, 4.6);
+      fin.lineTo(0.35, 4.6);
+      fin.lineTo(1.35, 13);
+      fin.lineTo(0, 17.6);
+      fin.lineTo(-1.35, 13);
+      fin.lineTo(-0.35, 4.6);
+      const finGeometry = new THREE.ExtrudeGeometry(fin, { depth: 1.9, bevelEnabled: false });
+      const trapezoid = new THREE.Shape();
+      trapezoid.moveTo(-1.1, 0);
+      trapezoid.lineTo(1.1, 0);
+      trapezoid.lineTo(1.5, 3);
+      trapezoid.lineTo(-1.5, 3);
+      trapezoid.lineTo(-1.1, 0);
+      const trapezoidGeometry = shapeGeometry(trapezoid, 1);
+      const arcadeArch = roundArch(4.4, 4.9);
+      const upperArch = rectPane(2.6, 1.5);
+      for (let bay = 0; bay <= 10; bay++) {
+        const x = -HX + 2.5 + bay * BAY;
+        const finMesh = new THREE.Mesh(finGeometry, whiteStone);
+        finMesh.position.set(x - BAY / 2, 0, HZ - 0.4);
+        group.add(finMesh);
+        if (bay === 10) {
+          const last = new THREE.Mesh(finGeometry, whiteStone);
+          last.position.set(x + BAY / 2, 0, HZ - 0.4);
+          group.add(last);
+        }
+        for (const [geometry, y] of [[arcadeArch, 0.3], [trapezoidGeometry, 6.2], [upperArch, 10.6]] as const) {
+          const pane = new THREE.Mesh(geometry, recess);
+          pane.position.set(x, y, HZ + 0.12);
+          group.add(pane);
+        }
+      }
+      // The loggia: two arched screens under a flat roof along the forecourt,
+      // with a return at the south end beside the minaret.
+      const archScreen = (length: number, height: number, span: number) => {
+        const shape = new THREE.Shape();
+        shape.moveTo(-length / 2, -0.3);
+        shape.lineTo(length / 2, -0.3);
+        shape.lineTo(length / 2, height);
+        shape.lineTo(-length / 2, height);
+        shape.lineTo(-length / 2, -0.3);
+        const count = Math.max(1, Math.floor(length / (span + 1.4)));
+        const pitch = length / count;
+        for (let index = 0; index < count; index++) {
+          const cx = -length / 2 + pitch * (index + 0.5);
+          const hole = new THREE.Path();
+          hole.moveTo(cx - span / 2, 0);
+          hole.lineTo(cx + span / 2, 0);
+          hole.lineTo(cx + span / 2, height - span / 2 - 0.7);
+          hole.absarc(cx, height - span / 2 - 0.7, span / 2, 0, Math.PI, false);
+          hole.lineTo(cx - span / 2, 0);
+          shape.holes.push(hole);
+        }
+        return new THREE.ExtrudeGeometry(shape, { depth: 0.6, bevelEnabled: false, curveSegments: 6 });
+      };
+      const LOGGIA_Z = 31;
+      const LOGGIA_FROM = -50;
+      const LOGGIA_TO = 36;
+      const loggiaLength = LOGGIA_TO - LOGGIA_FROM;
+      const front = archScreen(loggiaLength, 4.6, 5.6);
+      for (const z of [LOGGIA_Z + 5.4, LOGGIA_Z - 0.6]) {
+        const screen = new THREE.Mesh(front, whiteStone);
+        screen.position.set((LOGGIA_FROM + LOGGIA_TO) / 2, 0, z);
+        group.add(screen);
+      }
+      addBox(group, [loggiaLength + 0.6, 0.8, 6.8], [(LOGGIA_FROM + LOGGIA_TO) / 2, 4.9, LOGGIA_Z + 2.7], whiteStone);
+      const returnLength = LOGGIA_Z - (HZ - 2);
+      const roofLength = returnLength - 0.7;
+      const side = archScreen(returnLength, 4.6, 5.6);
+      for (const x of [LOGGIA_FROM, LOGGIA_FROM + 6]) {
+        const screen = new THREE.Mesh(side, whiteStone);
+        screen.rotation.y = Math.PI / 2;
+        screen.position.set(x - 0.3, 0, (HZ - 2 + LOGGIA_Z) / 2);
+        group.add(screen);
+      }
+      addBox(group, [6.8, 0.8, roofLength], [LOGGIA_FROM + 3, 4.9, HZ - 2 + roofLength / 2], whiteStone);
+      // Paved forecourt, the Eidgah lawn and the palms along the loggia.
+      addBox(group, [LOGGIA_TO - LOGGIA_FROM + 8, 0.1, LOGGIA_Z - HZ + 8], [(LOGGIA_FROM + LOGGIA_TO) / 2, 0.05, (HZ + LOGGIA_Z + 6) / 2], paleConcrete).castShadow = false;
+      addBox(group, [88, 0.08, 114], [-12, 0.04, 98], lawn).castShadow = false;
+      for (let x = -42; x <= 30; x += 9) addPalm(group, x + 2, LOGGIA_Z + 10, 10.5, 0.05, x * 0.37);
+      // Minaret: a faceted shaft tapering from 3 m to 1.5 m, a saucer
+      // balcony, a short neck, a fluted pine-cone lantern and a spire.
+      const MX = -HX - 4;
+      const MZ = 12;
+      addCylinder(group, 1.5, 3, 19.5, [MX, 9.75, MZ], whiteStone, 8);
+      addLathe(group, [[0.6, 0], [3.4, 0.5], [3.7, 1.1], [3.1, 1.6], [1.5, 1.8]], 16, [MX, 19.4, MZ], whiteStone);
+      addCylinder(group, 1.25, 1.35, 3.6, [MX, 22.8, MZ], whiteStone, 8);
+      addLathe(group, [[1.3, 0], [2.3, 0.9], [2.4, 2.4], [1.3, 3.9], [0.3, 5.2]], 8, [MX, 24.4, MZ], whiteStone, true);
+      addCone(group, 0.35, 3.2, [MX, 31.2, MZ], whiteStone, 6);
+      solid(MX, MZ, 1.6, 32.8);
+      solid(HX - 3, HZ - 5, 4.5, 16.6);
+      clearSite(-12, 98, 44, 58);
+      clearSite((LOGGIA_FROM + LOGGIA_TO) / 2, (HZ + LOGGIA_Z + 6) / 2, (LOGGIA_TO - LOGGIA_FROM) / 2 + 4, (LOGGIA_Z - HZ + 8) / 2);
+      // The perch is on the saucer balcony, beside the shaft.
+      perchTarget = [MX + 2.9, MZ];
+    } else if (landmark.kind === "army-stadium") {
+      // Bangladesh Army Stadium, Banani (OSM 24821768, 145 × 218 m): a pale
+      // single-tier bowl round a red eight-lane running track and a striped
+      // football field, the renovated two-storey brick-and-glass grandstand
+      // on the west straight under a long flat white canopy, and four lattice
+      // floodlight pylons at the corners. Local +Z faces west (279°) toward
+      // Airport Road; the long axis is local X (+X is south).
+      colliderTop = 1;
+      const SEG = 72;
+      // A rounded-rectangle (superellipse) outline with half axes a (X) and b (Z).
+      const rim = (a: number, b: number, theta: number, power = 3): [number, number] => {
+        const s = Math.sin(theta);
+        const c = Math.cos(theta);
+        return [a * Math.sign(s) * Math.abs(s) ** (2 / power), b * Math.sign(c) * Math.abs(c) ** (2 / power)];
+      };
+      // A ring of quads between two outlines ([a, b, power] each) at heights
+      // yIn and yOut, facing up, or (for a wall) in toward the field or out.
+      const ring = (inner: [number, number, number], outer: [number, number, number], yIn: number, yOut: number, facing: "up" | "in" | "out" = "up") => {
+        const quads: Array<[QuadPoint, QuadPoint, QuadPoint, QuadPoint, QuadPoint]> = [];
+        for (let index = 0; index < SEG; index++) {
+          const t0 = (index / SEG) * Math.PI * 2;
+          const t1 = ((index + 1) / SEG) * Math.PI * 2;
+          const i0 = rim(inner[0], inner[1], t0, inner[2]);
+          const i1 = rim(inner[0], inner[1], t1, inner[2]);
+          const o0 = rim(outer[0], outer[1], t0, outer[2]);
+          const o1 = rim(outer[0], outer[1], t1, outer[2]);
+          const sign = facing === "in" ? -1 : 1;
+          const out: QuadPoint = facing === "up" ? [0, 1, 0] : [sign * i0[0], 0, sign * i0[1]];
+          quads.push([[i0[0], yIn, i0[1]], [i1[0], yIn, i1[1]], [o1[0], yOut, o1[1]], [o0[0], yOut, o0[1]], out]);
+        }
+        return quads;
+      };
+      const TRACK_IN: [number, number, number] = [75, 42.5, 2.6];
+      const TRACK_OUT: [number, number, number] = [85, 52.5, 2.6];
+      const APRON: [number, number, number] = [89, 57, 2.8];
+      const BOWL_TOP: [number, number, number] = [107, 71, 3];
+      const OUTER: [number, number, number] = [108.5, 72.5, 3];
+      // Infield (a fan of triangles drawn as degenerate quads), track, apron.
+      const infield: Array<[QuadPoint, QuadPoint, QuadPoint, QuadPoint, QuadPoint]> = [];
+      for (let index = 0; index < SEG; index++) {
+        const a = rim(TRACK_IN[0], TRACK_IN[1], (index / SEG) * Math.PI * 2, TRACK_IN[2]);
+        const b = rim(TRACK_IN[0], TRACK_IN[1], ((index + 1) / SEG) * Math.PI * 2, TRACK_IN[2]);
+        infield.push([[0, 0.08, 0], [a[0], 0.08, a[1]], [b[0], 0.08, b[1]], [0, 0.08, 0], [0, 1, 0]]);
+      }
+      addQuads(group, infield, lawn);
+      addQuads(group, ring(TRACK_IN, TRACK_OUT, 0.1, 0.1), plazaRed);
+      addQuads(group, ring(TRACK_OUT, APRON, 0.1, 0.1), concrete);
+      // The terraces rise from a 1.2 m front wall to 9 m at the back, with a
+      // parapet and the outer wall round the outside.
+      addQuads(group, [
+        ...ring(APRON, APRON, 0, 1.2, "in"),
+        ...ring(BOWL_TOP, OUTER, 10, 10),
+        ...ring(BOWL_TOP, BOWL_TOP, 9, 10, "in"),
+        ...ring(OUTER, OUTER, 0, 10, "out"),
+      ], concrete);
+      addQuads(group, ring(APRON, BOWL_TOP, 1.2, 9), paleConcrete);
+      // Football field with mown stripes and goal mouths.
+      addBox(group, [105, 0.1, 68], [0, 0.12, 0], lawn).castShadow = false;
+      for (let stripe = -3; stripe <= 3; stripe += 2) addBox(group, [105 / 7, 0.06, 68], [stripe * (105 / 7), 0.2, 0], landmarkLightCanopy).castShadow = false;
+      for (const end of [-1, 1]) addBox(group, [0.4, 2.4, 7.3], [end * 52.5, 1.3, 0], whiteStone);
+      // West grandstand: a 120 m two-storey block behind the west terraces,
+      // brick below, a teal glass band above, a cream fascia and name board,
+      // and the cantilevered white canopy over the seats.
+      addBox(group, [120, 12, 14], [0, 6, 73], paleConcrete);
+      addBox(group, [118, 4.6, 0.3], [0, 2.5, 80.1], brickTrim);
+      addBox(group, [118, 3.6, 0.3], [0, 8, 80.1], atriumGlass);
+      addBox(group, [30, 2.6, 1.2], [0, 13.3, 78.6], paleConcrete);
+      addBox(group, [110, 0.8, 21], [0, 16.4, 68.5], whiteStone);
+      for (let x = -50; x <= 50; x += 12.5) addBox(group, [0.8, 4.4, 0.8], [x, 14, 78.4], whiteStone);
+      solidBox(0, 70, 60, 11, 16.8);
+      // Four lattice floodlight pylons at the corners, lamps turned inward.
+      for (const sx of [-1, 1]) {
+        for (const sz of [-1, 1]) {
+          const px = sx * 100;
+          const pz = sz * 68;
+          const pylon = new THREE.Group();
+          pylon.position.set(px, 0, pz);
+          pylon.rotation.y = Math.atan2(-px, -pz);
+          group.add(pylon);
+          const H = 38;
+          for (const cx of [-1, 1]) {
+            for (const cz of [-1, 1]) addBeam(pylon, [cx * 2.2, 0, cz * 2.2], [cx * 0.8, H, cz * 0.8], 0.35, 0.35, concrete);
+          }
+          for (let y = 6; y < H; y += 8) {
+            const r = 2.2 - (1.4 * y) / H;
+            for (const cz of [-1, 1]) addBeam(pylon, [-r, y, cz * r], [r, y + 4, cz * r], 0.2, 0.2, concrete);
+          }
+          addBox(pylon, [7, 4.6, 0.9], [0, H + 2, 0.6], whiteStone).rotation.x = 0.35;
+          addBox(pylon, [7.4, 0.5, 2.2], [0, H - 0.4, 0], concrete);
+          solid(px, pz, 2.5, H + 4.5);
+        }
+      }
+      // The bowl strikes as a ring of columns; the field stays open.
+      for (let index = 0; index < 28; index++) {
+        const [x, z] = rim(98, 64, (index / 28) * Math.PI * 2, 3);
+        solid(x, z, 10, 9.5);
+      }
+      clearOval(0, 0, 108.5, 80, 10);
+      perchTarget = [0, 66];
+    } else if (landmark.kind === "tsc-raju") {
+      // TSC (Teacher-Student Centre) and the Raju Memorial Sculpture. The TSC
+      // main block (OSM 655714604) is a long modernist slab of open galleries:
+      // a grey concrete frame on a 4.5 m grid, thin white slab edges with a
+      // pale blue spandrel band under each, white jali screens in some bays,
+      // and a deep overhanging roof. The auditorium behind it has a low
+      // barrel roof. Sixty metres north, on the TSC Mor roundabout, seven
+      // linked figures stride on a grey granite drum (×1.4). Footprint mode:
+      // local axes are world axes.
+      boundsCollider = false;
+      const MAIN = 655714604;
+      const AUDITORIUM = 447734507;
+      const GAME_ROOM = 507722586;
+      const main = frame(MAIN, [-0.156, -0.988]);
+      if (main) {
+        const { g, hx, hz } = main;
+        for (const y of [3.8, 7.4, 11]) {
+          addBox(g, [hx * 2 + 1.2, 0.35, hz * 2 + 1.8], [0, y, 0], whiteStone);
+          addBox(g, [hx * 2 + 0.5, 1, hz * 2 + 0.6], [0, y - 0.68, 0], skyGlass);
+        }
+        addBox(g, [hx * 2 + 2.4, 0.6, hz * 2 + 8], [0, 15.3, 0], roofGrey);
+        const bays = Math.round((hx * 2) / 4.5);
+        for (let bay = 0; bay <= bays; bay++) {
+          const x = -hx + (bay * hx * 2) / bays;
+          for (const face of [-1, 1]) addBox(g, [0.45, 15, 0.5], [x, 7.5, face * (hz + 0.35)], whiteStone);
+        }
+        for (const bay of [3, 4, 9, 10]) {
+          const x = -hx + ((bay + 0.5) * hx * 2) / bays;
+          for (const y of [5.6, 9.2]) addBox(g, [(hx * 2) / bays - 0.6, 2.2, 0.2], [x, y, hz + 0.18], paleConcrete);
+        }
+      }
+      const hall = frame(AUDITORIUM, [0, -1]);
+      if (hall) {
+        const vault = new THREE.Mesh(new THREE.CylinderGeometry(hall.hz, hall.hz, hall.hx * 2, 14, 1, false, 0, Math.PI), roofGrey);
+        vault.rotation.z = Math.PI / 2;
+        vault.scale.set(2.6 / hall.hz, 1, 1);
+        vault.position.set(0, hall.height, 0);
+        hall.g.add(vault);
+      }
+      for (const [id, top] of [[MAIN, 15.6], [AUDITORIUM, 12.6], [GAME_ROOM, 5]] as const) {
+        const seat = anchor(id);
+        if (seat) solidBox(seat.x, seat.z, seat.width / 2, seat.depth / 2, top);
+      }
+      // Raju Memorial on its kerbed lawn island.
+      const [rx, rz] = toLocal(23.732649, 90.39568);
+      addCylinder(group, 7.2, 7.4, 0.6, [rx, 0.25, rz], concrete, 24);
+      addCylinder(group, 6.7, 6.7, 0.1, [rx, 0.58, rz], lawn, 24);
+      addCylinder(group, 3.85, 4.9, 4.2, [rx, 2.7, rz], stoneStep, 12);
+      addCylinder(group, 3.6, 3.9, 0.4, [rx, 5, rz], concrete, 12);
+      const figures = new THREE.Group();
+      figures.position.set(rx, 5.2, rz);
+      figures.rotation.y = Math.PI;
+      group.add(figures);
+      for (let index = -3; index <= 3; index++) {
+        const x = index * 1.2;
+        const z = 1.1 * (1 - (index / 3.4) ** 2);
+        const tall = 1 + ((index * 7 + 3) % 3) * 0.03;
+        if (index === 0) {
+          addCylinder(figures, 0.42, 0.68, 2.3 * tall, [x, 1.15 * tall, z], paleConcrete, 6);
+        } else {
+          // Striding legs, one forward and one back.
+          for (const leg of [-1, 1]) {
+            const limb = addBox(figures, [0.34, 2.3 * tall, 0.4], [x + leg * 0.2, 1.1 * tall, z + leg * 0.22], paleConcrete);
+            limb.rotation.x = leg * 0.2;
+          }
+        }
+        addBox(figures, [1.02, 1.55 * tall, 0.55], [x, 2.98 * tall, z], paleConcrete);
+        addBox(figures, [1.2, 0.35, 0.6], [x, 3.65 * tall, z], paleConcrete);
+        const head = new THREE.Mesh(new THREE.SphereGeometry(0.36, 7, 5), paleConcrete);
+        head.position.set(x, 4.12 * tall, z + 0.05);
+        figures.add(head);
+      }
+      addBeam(figures, [-3.6, 3, 0.55], [0, 3, 1.4], 0.32, 0.32, paleConcrete, 0.3);
+      addBeam(figures, [0, 3, 1.4], [3.6, 3, 0.55], 0.32, 0.32, paleConcrete, 0.3);
+      solid(rx, rz, 4.9, 5.3);
+      clearSite(rx, rz, 8, 8);
+      // The head of the woman at the centre of the group (the figures face north).
+      perchTarget = [rx, rz - 1.15];
+    } else if (landmark.kind === "doyel-chattar") {
+      // Doyel Chattar: two black-and-white magpie-robins (doyel, the national
+      // bird) with long wings swept up in a V, on a pale lens-shaped disc
+      // carried on short posts over a round sky-blue basin with a yellow base
+      // band and white coping, in a lawn island inside the roundabout. ×1.3.
+      // Local +Z is where the beaks point (NW).
+      colliderTop = 1.8;
+      addCylinder(group, 14, 14, 0.12, [0, 0.06, 0], lawn, 32);
+      addLathe(group, [[9.1, 0.35], [9.1, 1.56], [8.5, 1.56], [8.5, 0.95]], 40, [0, 0, 0], poolTurquoise);
+      addLathe(group, [[9.18, 0.05], [9.18, 0.4]], 40, [0, 0, 0], accent);
+      addLathe(group, [[9.25, 1.5], [9.25, 1.72], [8.42, 1.72], [8.42, 1.5]], 40, [0, 0, 0], whiteStone);
+      addCylinder(group, 8.55, 8.55, 0.2, [0, 1, 0], poolTurquoise, 32);
+      // The lens disc on short posts, lifted clear of the coping.
+      for (const x of [-1.8, 1.8]) addCylinder(group, 0.6, 0.6, 1.7, [x, 1.9, 0], poolTurquoise, 10);
+      addLathe(group, [[0.01, 2.65], [4.9, 2.9], [4.95, 3.15], [0.01, 3.4]], 28, [0, 0, 0], concrete);
+      // Each wing is a long blade, broad at the root and pointed at the tip,
+      // its broad face turned mostly to the front, with a white stripe along
+      // the leading edge. The left wing is the mirror image of the right.
+      const blade = (points: Array<[number, number]>, mirror: boolean, depth: number) => {
+        const shape = new THREE.Shape();
+        points.forEach(([x, y], index) => (index === 0 ? shape.moveTo(x, mirror ? -y : y) : shape.lineTo(x, mirror ? -y : y)));
+        const geometry = new THREE.ExtrudeGeometry(shape, { depth, bevelEnabled: false });
+        geometry.translate(0, 0, -depth / 2);
+        // Twisted along the span so the broad face shows from the front, the
+        // sides and above, not only head-on.
+        geometry.rotateX(mirror ? -0.6 : 0.6);
+        return geometry;
+      };
+      const WING: Array<[number, number]> = [[0, -0.75], [3.2, -0.45], [4.3, 0.05], [3.4, 0.45], [0, 0.75]];
+      const STRIPE: Array<[number, number]> = [[0.35, 0.36], [3.3, 0.2], [4.05, 0.08], [3.35, 0.36], [0.35, 0.6]];
+      const wingGeometries = [false, true].map((mirror) => blade(WING, mirror, 0.18));
+      const stripeGeometries = [false, true].map((mirror) => blade(STRIPE, mirror, 0.24));
+      const bellyGeometry = new THREE.SphereGeometry(1, 12, 6, 0, Math.PI * 2, Math.PI / 2, Math.PI / 2);
+      for (const [bx, bz, turn] of [[-2.4, -0.8, 0.1], [2.4, 0.6, -0.08]] as const) {
+        const bird = new THREE.Group();
+        bird.position.set(bx, 3.4, bz);
+        bird.rotation.y = turn;
+        bird.scale.setScalar(1.8);
+        group.add(bird);
+        const body = new THREE.Mesh(new THREE.SphereGeometry(1, 12, 8), recess);
+        body.scale.set(0.7, 0.8, 1.4);
+        body.position.set(0, 1.15, 0);
+        body.rotation.x = -0.18;
+        bird.add(body);
+        const belly = new THREE.Mesh(bellyGeometry, whiteStone);
+        belly.scale.set(0.74, 0.9, 1.34);
+        belly.position.set(0, 1.12, 0);
+        belly.rotation.x = -0.18;
+        bird.add(belly);
+        addCylinder(bird, 0.45, 0.5, 0.5, [0, 0.25, 0], whiteStone, 10);
+        const head = new THREE.Mesh(new THREE.SphereGeometry(0.5, 10, 7), recess);
+        head.position.set(0, 1.95, 1.2);
+        bird.add(head);
+        addCone(bird, 0.14, 0.6, [0, 1.9, 1.85], recess, 6).rotation.x = Math.PI / 2;
+        addBox(bird, [0.5, 0.14, 1.3], [0, 1.6, -1.55], recess).rotation.x = 0.55;
+        for (const side of [-1, 1]) {
+          const holder = new THREE.Group();
+          holder.position.set(side * 0.45, 1.45, 0.1);
+          holder.rotation.set(-0.1, 0, side > 0 ? 0.75 : Math.PI - 0.75);
+          bird.add(holder);
+          const mirror = side < 0 ? 1 : 0;
+          holder.add(new THREE.Mesh(wingGeometries[mirror], recess));
+          holder.add(new THREE.Mesh(stripeGeometries[mirror], whiteStone));
+        }
+      }
+      solid(0, 0, 4, 6.9);
+      clearSite(0, 0, 14, 14);
+      perchTarget = [2.4, 0.6];
+    } else if (landmark.kind === "three-leaders-mausoleum") {
+      // Mausoleum of Three Leaders (OSM 296802766): three white hyperbolic-
+      // paraboloid shells in a row over the graves, each four tall pointed
+      // "petals" that stand on four feet at the diagonals and sweep up to
+      // sharp tips, so side on they read as a row of tall pointed arches and
+      // from the air as three four-petal flowers. They stand on a 60 × 33 m
+      // plinth with a pink-red border round a white marble field, broad
+      // stairs front and back, in a paved garden of lawn beds and palm rows.
+      // The small three-domed Haji Khwaja Shahbaz mosque stands to the NE.
+      // Local +Z faces WSW (257°); the row runs along local X (+X is SSE).
+      colliderTop = 1.3;
+      const PLINTH = 1.2;
+      // The paved garden court, its lawn beds and palm rows.
+      addBox(group, [82, 0.1, 60], [0, 0.05, 0], roofTerrace).castShadow = false;
+      for (const side of [-1, 1]) {
+        for (const x of [-27, -15, 15, 27]) addBox(group, [7, 0.16, 3.4], [x, 0.12, side * 22.5], lawn).castShadow = false;
+        addBox(group, [5, 0.16, 18], [side * 37, 0.12, 0], lawn).castShadow = false;
+        addBox(group, [9, 0.16, 4], [side * 37, 0.12, 22], lawn).castShadow = false;
+        addBox(group, [9, 0.16, 4], [side * 37, 0.12, -22], lawn).castShadow = false;
+      }
+      for (let z = -26; z <= 26; z += 6.5) addPalm(group, -39.5, z, 9 + ((z * 7) % 3), 0.06, z);
+      for (let x = -30; x <= 30; x += 10) addPalm(group, x, 28.5, 8.5 + ((x * 3) % 2), 0.07, x);
+      for (let z = -20; z <= 20; z += 10) addPalm(group, 39.5, z, 9, 0.05, z * 2);
+      // The plinth: a pink-red sandstone border round the marble field, with
+      // a grid of joints, and stairs on both long sides and both ends.
+      addBox(group, [60, PLINTH, 33], [0, PLINTH / 2, 0], terracotta);
+      addBox(group, [53, 0.08, 26], [0, PLINTH + 0.04, 0], marble);
+      for (let x = -22; x <= 22; x += 4.4) addBox(group, [0.16, 0.05, 26], [x, PLINTH + 0.1, 0], roofTerrace).castShadow = false;
+      for (let z = -8.6; z <= 8.6; z += 4.3) addBox(group, [53, 0.05, 0.16], [0, PLINTH + 0.1, z], roofTerrace).castShadow = false;
+      for (let step = 0; step < 3; step++) {
+        const h = PLINTH - step * 0.4;
+        for (const side of [-1, 1]) {
+          addBox(group, [15, h, 1.1], [0, h / 2, side * (17.05 + step * 1.1)], paleConcrete);
+          addBox(group, [1.1, h, 6], [side * (30.55 + step * 1.1), h / 2, 0], paleConcrete);
+        }
+      }
+      // The three graves, pale marble chests under the shells.
+      for (const x of [-15, 0, 15]) addBox(group, [1.4, 0.8, 2.8], [x, PLINTH + 0.4, 0], marble);
+      // Shells. Each petal is a Coons patch bounded by two valley creases
+      // (from the crown down to the feet at the diagonals) and two arch edges
+      // (from the feet up to the tip, springing vertically and bowing out).
+      const N = 8;
+      const FOOT = 4.9;
+      const CROWN = PLINTH + 7.5;
+      const TIP = PLINTH + 12;
+      const BOW = 2.6;
+      const shellTop: number[] = [];
+      const shellIndex: number[] = [];
+      type V3 = [number, number, number];
+      const petal = (cx: number, ax: number, az: number, reach: number) => {
+        const px = -az;
+        const pz = ax;
+        const C: V3 = [cx, CROWN, 0];
+        const T: V3 = [cx + ax * reach, TIP, az * reach];
+        const foot = (side: number): V3 => [cx + (ax + side * px) * FOOT, PLINTH, (az + side * pz) * FOOT];
+        const Fl = foot(-1);
+        const Fr = foot(1);
+        const crease = (F: V3, u: number): V3 => [C[0] + (F[0] - C[0]) * u, PLINTH + (CROWN - PLINTH) * Math.cos((u * Math.PI) / 2), C[2] + (F[2] - C[2]) * u];
+        const arch = (F: V3, side: number, u: number): V3 => {
+          const k = 1 - Math.cos((u * Math.PI) / 2);
+          const bow = BOW * Math.sin(u * Math.PI) * side;
+          return [F[0] + (T[0] - F[0]) * k + px * bow, PLINTH + (TIP - PLINTH) * u, F[2] + (T[2] - F[2]) * k + pz * bow];
+        };
+        const at = (s: number, t: number): V3 => {
+          const c0 = crease(Fl, s);
+          const c1 = arch(Fr, 1, s);
+          const d0 = crease(Fr, t);
+          const d1 = arch(Fl, -1, t);
+          const out: V3 = [0, 0, 0];
+          for (let axis = 0; axis < 3; axis++) {
+            out[axis] = (1 - t) * c0[axis] + t * c1[axis] + (1 - s) * d0[axis] + s * d1[axis]
+              - ((1 - s) * (1 - t) * C[axis] + s * (1 - t) * Fl[axis] + (1 - s) * t * Fr[axis] + s * t * T[axis]);
+          }
+          return out;
+        };
+        // Wind every petal so its front face looks up out of the scoop.
+        const a = at(0.55, 0.5), b = at(0.45, 0.5), c = at(0.5, 0.55), d = at(0.5, 0.45);
+        const ux = a[0] - b[0], uz = a[2] - b[2];
+        const vx = c[0] - d[0], vz = c[2] - d[2];
+        // (d/ds × d/dt).y > 0: wind s before t.
+        const flip = uz * vx - ux * vz > 0;
+        const base = shellTop.length / 3;
+        for (let i = 0; i <= N; i++) for (let j = 0; j <= N; j++) shellTop.push(...at(i / N, j / N));
+        for (let i = 0; i < N; i++) {
+          for (let j = 0; j < N; j++) {
+            const p00 = base + i * (N + 1) + j;
+            const p10 = p00 + N + 1;
+            if (flip) shellIndex.push(p00, p10, p00 + 1, p10, p10 + 1, p00 + 1);
+            else shellIndex.push(p00, p00 + 1, p10, p10, p00 + 1, p10 + 1);
+          }
+        }
+      };
+      const UNITS = [-15, 0, 15];
+      for (const cx of UNITS) {
+        petal(cx, 0, 1, 10.5);
+        petal(cx, 0, -1, 10.5);
+        petal(cx, 1, 0, cx === 15 ? 10 : 7.5);
+        petal(cx, -1, 0, cx === -15 ? 10 : 7.5);
+      }
+      const shellGeometry = new THREE.BufferGeometry();
+      shellGeometry.setAttribute("position", new THREE.Float32BufferAttribute(shellTop, 3));
+      shellGeometry.setAttribute("uv", new THREE.Float32BufferAttribute(new Array((shellTop.length / 3) * 2).fill(0), 2));
+      shellGeometry.setIndex(shellIndex);
+      shellGeometry.computeVertexNormals();
+      // The underside: the same surface 0.18 m lower along its normal, wound
+      // the other way, so the thin shell shows from above and from below.
+      const normals = shellGeometry.getAttribute("normal");
+      const under: number[] = [];
+      for (let index = 0; index < shellTop.length / 3; index++) {
+        under.push(
+          shellTop[index * 3] - normals.getX(index) * 0.18,
+          shellTop[index * 3 + 1] - normals.getY(index) * 0.18,
+          shellTop[index * 3 + 2] - normals.getZ(index) * 0.18,
+        );
+      }
+      const underIndex: number[] = [];
+      for (let index = 0; index < shellIndex.length; index += 3) underIndex.push(shellIndex[index], shellIndex[index + 2], shellIndex[index + 1]);
+      const underGeometry = new THREE.BufferGeometry();
+      underGeometry.setAttribute("position", new THREE.Float32BufferAttribute(under, 3));
+      underGeometry.setAttribute("uv", new THREE.Float32BufferAttribute(new Array((under.length / 3) * 2).fill(0), 2));
+      underGeometry.setIndex(underIndex);
+      underGeometry.computeVertexNormals();
+      for (const geometry of [shellGeometry, underGeometry]) {
+        const mesh = new THREE.Mesh(geometry, paleConcrete);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        group.add(mesh);
+      }
+      for (const cx of UNITS) solid(cx, 0, 8, TIP + 0.4);
+      // Haji Khwaja Shahbaz's mosque (1679, OSM 297592460), in world axes:
+      // a 20 × 8 m prayer hall, long side N–S, three ribbed terracotta domes,
+      // octagonal corner turrets and three arched doors facing east.
+      const [mx, mz] = toLocal(23.729302, 90.40032);
+      const mosque = new THREE.Group();
+      mosque.position.set(mx, 0, mz);
+      mosque.rotation.y = -landmark.heading;
+      group.add(mosque);
+      addBox(mosque, [9, 0.6, 21], [0, 0.3, 0], terracotta);
+      addBox(mosque, [8, 6.4, 20], [0, 3.6, 0], paleConcrete);
+      addBox(mosque, [8.4, 0.5, 20.4], [0, 6.6, 0], paleConcrete);
+      for (const z of [-6.4, 0, 6.4]) {
+        const r = z === 0 ? 2.9 : 2.4;
+        addCylinder(mosque, r, r, 1.2, [0, 7.4, z], paleConcrete, 12);
+        addLathe(mosque, domeProfile(r, r * 1.15, 0.1, 6), 12, [0, 8, z], terracotta, true);
+        addCone(mosque, 0.16, 1.8, [0, 8.9 + r * 1.15, z], paleConcrete, 5);
+        addBox(mosque, [0.2, z === 0 ? 3.6 : 3, z === 0 ? 2 : 1.7], [4.05, 2.8, z], recess);
+      }
+      for (const sx of [-1, 1]) for (const sz of [-1, 1]) addCylinder(mosque, 0.55, 0.6, 9, [sx * 4, 4.5, sz * 10], paleConcrete, 8);
+      solid(mx, mz, 10, 11);
+      // Keep the garden, its approach and the mosque clear of the city.
+      clearSite(0, 0, 42, 31);
+      clearSite(mx, mz, 13, 12);
+      // The tip of the middle shell's front petal.
+      perchTarget = [0, 9.2];
+    } else if (landmark.kind === "hussaini-dalan") {
+      // Hussaini Dalan, the Shia imambara (OSM 234106448, 32 × 22 m): a
+      // brilliant white raised hall standing straight out of its tank on the
+      // south, with a recessed loggia of six tall Tuscan columns in front of
+      // green arched windows, an octagonal tower with a blue-tiled dome at
+      // each end of the south front, two slender white onion-domed corner
+      // turrets behind them and a red-and-white toothed parapet. The tank
+      // (OSM 234069504) is drawn from the map's water; only its red coping is
+      // built here. A big earth forecourt opens to the north. Local +Z faces
+      // south over the tank; the table point sits on the tank's north bank.
+      boundsCollider = false;
+      const [, hallZ] = toLocal(23.722405, 90.397979);
+      const hall = new THREE.Group();
+      hall.position.set(0, 0, hallZ);
+      group.add(hall);
+      const FRONT = 11;
+      // Plinth storey, recessed upper hall and the side bays either side of
+      // the loggia.
+      addBox(hall, [32, 3.6, 22], [0, 1.8, 0], whiteStone);
+      addBox(hall, [32, 8.4, 19], [0, 7.8, -1.5], whiteStone);
+      for (const side of [-1, 1]) addBox(hall, [8, 8.4, 3.2], [side * 12, 7.8, FRONT - 1.6], whiteStone);
+      addBox(hall, [33, 0.5, 23], [0, 3.85, 0], whiteStone);
+      addBox(hall, [33, 0.7, 23], [0, 12.2, 0], whiteStone);
+      addBox(hall, [30, 0.12, 20.4], [0, 12.6, -0.2], paleConcrete).castShadow = false;
+      // Plinth-storey doors and the north entrance stair.
+      const door = roundArch(1.6, 2.6);
+      for (let x = -13.5; x <= 13.5; x += 4.5) {
+        const mesh = new THREE.Mesh(door, seatGreen);
+        mesh.position.set(x, 0.1, FRONT + 0.03);
+        hall.add(mesh);
+      }
+      for (let step = 0; step < 5; step++) addBox(hall, [12, 3.6 - step * 0.72, 1.1], [0, (3.6 - step * 0.72) / 2, -11.55 - step * 1.1], paleConcrete);
+      // The loggia: a balustraded floor, six columns, the entablature, and the
+      // green-glazed arched windows on the recessed wall behind.
+      addBox(hall, [16, 1, 0.3], [0, 4.6, FRONT - 0.3], whiteStone);
+      for (let index = 0; index < 6; index++) {
+        const x = -6.5 + index * 2.6;
+        addCylinder(hall, 0.42, 0.5, 7, [x, 7.6, FRONT - 0.9], whiteStone, 10);
+        addBox(hall, [1.1, 0.4, 1.1], [x, 4.3, FRONT - 0.9], whiteStone);
+      }
+      addBox(hall, [16.4, 1.1, 1.6], [0, 11.5, FRONT - 0.9], whiteStone);
+      // The shaded back wall of the loggia.
+      addBox(hall, [16, 7.2, 0.1], [0, 7.8, FRONT - 3], paleConcrete);
+      const tallArch = roundArch(1.9, 4.4);
+      for (let index = 0; index < 5; index++) {
+        const mesh = new THREE.Mesh(tallArch, seatGreen);
+        mesh.position.set(-5.2 + index * 2.6, 5.2, FRONT - 2.92);
+        hall.add(mesh);
+      }
+      // Side-bay windows, two storeys.
+      for (const side of [-1, 1]) {
+        for (const y of [4.6, 8.4]) {
+          const mesh = new THREE.Mesh(roundArch(1.2, 2.4), seatGreen);
+          mesh.position.set(side * 10.2, y, FRONT + 0.03);
+          hall.add(mesh);
+        }
+      }
+      // Octagonal end towers with their blue-tiled domes.
+      for (const side of [-1, 1]) {
+        const tx = side * 13.6;
+        const tz = FRONT - 1.4;
+        addCylinder(hall, 3.2, 3.2, 12.4, [tx, 6.2, tz], whiteStone, 8).rotation.y = Math.PI / 8;
+        addCylinder(hall, 3.55, 3.55, 0.45, [tx, 4.1, tz], whiteStone, 8).rotation.y = Math.PI / 8;
+        addCylinder(hall, 3.6, 3.6, 0.6, [tx, 12.5, tz], whiteStone, 8).rotation.y = Math.PI / 8;
+        for (let face = 0; face < 8; face++) {
+          const angle = (face / 8) * Math.PI * 2;
+          for (const y of [5.2, 8.6]) {
+            const mesh = new THREE.Mesh(roundArch(1, 2), seatGreen);
+            mesh.position.set(tx + Math.sin(angle) * 3.02, y, tz + Math.cos(angle) * 3.02);
+            mesh.rotation.y = angle;
+            hall.add(mesh);
+          }
+        }
+        addCylinder(hall, 2.5, 2.6, 0.8, [tx, 13.2, tz], whiteStone, 12);
+        addLathe(hall, domeProfile(2.6, 3.1, 0.12, 8), 12, [tx, 13.6, tz], carnivalBlue);
+        addFinial(hall, [tx, 16.5, tz], 0.55, whiteStone);
+        // The slender corner turret behind it.
+        const cz = FRONT - 7.5;
+        const cx = side * 15.2;
+        addCylinder(hall, 1.25, 1.25, 4, [cx, 14.4, cz], whiteStone, 8);
+        addCylinder(hall, 1.5, 1.5, 0.35, [cx, 16.5, cz], whiteStone, 8);
+        addLathe(hall, domeProfile(1.3, 2.1, 0.22, 7), 10, [cx, 16.65, cz], whiteStone);
+        addFinial(hall, [cx, 18.6, cz], 0.4, whiteStone);
+        solid(tx, hallZ + tz, 3.6, 16.8);
+        solid(cx, hallZ + cz, 1.6, 18.8);
+      }
+      // The red-and-white toothed parapet strip on the south and side walls.
+      for (let x = -16; x <= 16; x += 0.9) addBox(hall, [0.45, 0.55, 0.35], [x, 12.8, FRONT + 0.4], monumentRed);
+      for (const side of [-1, 1]) for (let z = -11; z <= 10; z += 0.9) addBox(hall, [0.35, 0.55, 0.45], [side * 16.5, 12.8, z], monumentRed);
+      solidBox(0, hallZ, 16.5, 11.2, 13.2);
+      // The ledge between the hall and the tank, and the tank's red-tile
+      // coping and low railing round the water drawn from the map.
+      const [tankW, tankN] = toLocal(23.7222568, 90.3978562);
+      const [tankE, tankS] = toLocal(23.7219, 90.3981537);
+      addBox(group, [tankE - tankW + 2, 0.3, tankN - hallZ - FRONT], [(tankE + tankW) / 2, 0.15, (hallZ + FRONT + tankN) / 2], paleConcrete);
+      const rimY = 0.2;
+      addBox(group, [tankE - tankW + 3, 0.5, 1.4], [(tankE + tankW) / 2, rimY, tankS + 0.7], brickTrim);
+      for (const x of [tankW - 0.7, tankE + 0.7]) addBox(group, [1.4, 0.5, tankS - tankN + 1.4], [x, rimY, (tankN + tankS) / 2], brickTrim);
+      // The walled earth forecourt to the north.
+      addBox(group, [64, 0.1, 62], [-6, 0.05, hallZ - 11 - 33], packedEarth).castShadow = false;
+      clearSite(-6, hallZ - 44, 34, 33);
+      clearSite(0, hallZ, 19, 13);
+      clearSite((tankE + tankW) / 2, (tankN + tankS) / 2, (tankE - tankW) / 2 + 3, (tankS - tankN) / 2 + 3);
+      // The east blue dome.
+      perchTarget = [13.6, hallZ + FRONT - 1.4];
+    } else if (landmark.kind === "supreme-court") {
+      // Supreme Court of Bangladesh (OSM relation 15508050): a brilliant
+      // white two-storey courtyard block round a square lawn, with Mughal
+      // cusped-arch verandahs on the first floor of every outer face. Over
+      // the middle of the east wing a projecting entrance tower with a deep
+      // flat cornice carries a square drum stage, four small chhatris and the
+      // big white bulbous dome (36 m). A red-roofed apse juts into the court
+      // behind it, and the round lotus fountain lies 45 m in front. Local +Z
+      // faces east (81°); +X runs along the long axis to the north (351°).
+      boundsCollider = false;
+      const EAVE = 14;
+      // [x0, x1, z0, z1] of each wing, from the OSM outer ring and court.
+      const wings: Array<[number, number, number, number]> = [
+        [-60, 61, 36, 57],
+        [-58, 58, -59, -42],
+        [38, 58, -42, 36],
+        [-57, -40, -42, 36],
+      ];
+      for (const [x0, x1, z0, z1] of wings) {
+        const cx = (x0 + x1) / 2;
+        const cz = (z0 + z1) / 2;
+        addBox(group, [x1 - x0, EAVE, z1 - z0], [cx, EAVE / 2, cz], whiteStone);
+        addBox(group, [x1 - x0 + 1.6, 0.7, z1 - z0 + 1.6], [cx, EAVE + 0.1, cz], whiteStone);
+        addBox(group, [x1 - x0 - 1, 0.1, z1 - z0 - 1], [cx, EAVE + 0.5, cz], paleConcrete).castShadow = false;
+        addBox(group, [x1 - x0 + 0.8, 0.45, z1 - z0 + 0.8], [cx, 6.3, cz], whiteStone);
+        solidBox(cx, cz, (x1 - x0) / 2, (z1 - z0) / 2, EAVE + 0.6);
+      }
+      // Corner pavilions, a storey's parapet higher.
+      for (const sx of [-1, 1]) {
+        for (const [z0, z1] of [[-50, -26], [34, 57]] as const) {
+          addBox(group, [9, EAVE + 1.8, z1 - z0], [sx * 62.5, (EAVE + 1.8) / 2, (z0 + z1) / 2], whiteStone);
+          addBox(group, [10.2, 0.7, z1 - z0 + 1.2], [sx * 62.5, EAVE + 2, (z0 + z1) / 2], whiteStone);
+          solidBox(sx * 62.5, (z0 + z1) / 2, 4.5, (z1 - z0) / 2, EAVE + 2.4);
+        }
+      }
+      // First-floor verandahs of cusped (pointed) arches, and small lattice
+      // windows below, on every outer face. Each run is [x0, z0, x1, z1].
+      const cusp = pointedArch(2.4, 4.2);
+      const lattice = rectPane(1.1, 1.3);
+      const runs: Array<[number, number, number, number]> = [
+        [-58, 57, -14, 57], [14, 57, 58, 57],
+        [-58, -59, 58, -59],
+        [58, -24, 58, 32], [-57, -24, -57, 32],
+      ];
+      for (const [x0, z0, x1, z1] of runs) {
+        const length = Math.hypot(x1 - x0, z1 - z0);
+        const dx = (x1 - x0) / length;
+        const dz = (z1 - z0) / length;
+        // Outward normal: away from the court centre.
+        let nx = dz;
+        let nz = -dx;
+        if (nx * (x0 + x1) + nz * (z0 + z1) < 0) {
+          nx = -nx;
+          nz = -nz;
+        }
+        // The side runs stand on the end pavilions' inner wall line.
+        const face = Math.abs(nx) > 0.5 ? (nx > 0 ? 58 : -57) : 0;
+        const count = Math.floor(length / 3.6);
+        for (let index = 0; index < count; index++) {
+          const along = (index + 0.5) * (length / count);
+          const px = face || x0 + dx * along;
+          const pz = z0 + dz * along;
+          for (const [geometry, y] of [[cusp, 7.2], [lattice, 2.6]] as const) {
+            const mesh = new THREE.Mesh(geometry, archDark);
+            mesh.position.set(px + nx * 0.06, y, pz + nz * 0.06);
+            mesh.rotation.y = Math.atan2(nx, nz);
+            group.add(mesh);
+          }
+        }
+      }
+      // The entrance tower: a deep flat cornice at 20 m, a square drum stage,
+      // four chhatris, a ribbed drum and the bulbous white dome.
+      addBox(group, [26, 20, 12], [0, 10, 57], whiteStone);
+      addBox(group, [30, 1.1, 16], [0, 20.3, 57.4], whiteStone);
+      addBox(group, [27, 0.8, 13], [0, 21.2, 57.2], whiteStone);
+      addBox(group, [8, 9, 0.3], [0, 10.5, 63.1], archDark);
+      for (const x of [-3, -1, 1, 3]) addCylinder(group, 0.38, 0.42, 8, [x, 10.8, 63.6], whiteStone, 8);
+      addBox(group, [10, 0.6, 2], [0, 6.5, 63.6], whiteStone);
+      const gate = new THREE.Mesh(pointedArch(7, 5.4), archDark);
+      gate.position.set(0, 0, 63.07);
+      group.add(gate);
+      addBox(group, [14, 4.6, 14], [0, 23.9, 56], whiteStone);
+      addBox(group, [15, 0.6, 15], [0, 26.4, 56], whiteStone);
+      addCylinder(group, 6.1, 6.3, 2.6, [0, 28, 56], whiteStone, 24);
+      addCylinder(group, 6.6, 6.6, 0.5, [0, 29.4, 56], whiteStone, 24);
+      addLathe(group, domeProfile(6.4, 6.8, 0.1, 12), 24, [0, 29.6, 56], whiteStone);
+      addFinial(group, [0, 36.1, 56], 0.9, whiteStone);
+      for (const sx of [-1, 1]) for (const sz of [-1, 1]) addChhatri(group, [sx * 6.6, 26.7, 56 + sz * 6.6], 2.4, whiteStone, whiteStone);
+      solid(0, 57, 13, 21.6);
+      solid(0, 56, 7, 38);
+      // The red-roofed apse behind the entrance, and the inner court lawn.
+      addBox(group, [29, 10, 10], [0, 5, 31], whiteStone);
+      addCylinder(group, 14.5, 14.5, 10, [0, 5, 26], whiteStone, 24);
+      addCylinder(group, 15, 13.5, 1.6, [0, 10.8, 26], tileRoof, 24);
+      addBox(group, [77, 0.12, 77], [-1, 0.06, -3], lawn).castShadow = false;
+      // The forecourt and the round lotus fountain: the pool is drawn from
+      // the map's water (OSM 982460216), redrawn here above the paving; a kerb of white posts rings it, and
+      // lotus buds and flowers stand on green stalks in the water.
+      addBox(group, [60, 0.1, 50], [0, 0.05, 88], paleConcrete).castShadow = false;
+      addCylinder(group, 12.7, 12.7, 0.1, [0, 0.13, 92], water, 32).castShadow = false;
+      addLathe(group, [[13.2, -0.3], [13.2, 1.1], [12.6, 1.1], [12.6, -0.3]], 40, [0, 0, 92], whiteStone);
+      for (let index = 0; index < 22; index++) {
+        const angle = index * 2.4;
+        const radius = 3 + (index % 5) * 2;
+        const lx = Math.sin(angle) * radius;
+        const lz = 92 + Math.cos(angle) * radius;
+        const h = 1.4 + (index % 3) * 0.5;
+        addCylinder(group, 0.08, 0.08, h + 0.5, [lx, h / 2 - 0.2, lz], seatGreen, 4);
+        addCone(group, 0.6, 0.9, [lx, h + 0.4, lz], index % 2 ? seatGreen : whiteStone, 6);
+      }
+      clearSite(0, -1, 70, 64);
+      clearSite(0, 88, 32, 26);
+      perchTarget = [0, 56];
+    } else if (landmark.kind === "national-stadium") {
+      // National Stadium, Motijheel (OSM 24477071, 229 × 220 m): a near-
+      // round single-tier concrete bowl raked up to an 18 m rim, its grey
+      // seating broken by a regular rhythm of red-orange seat blocks, round
+      // a red athletics track and a north–south football pitch. A white
+      // cantilever roof covers the ESE stand, a press box breaks the north
+      // rim, and four 50 m lattice floodlight masts stand at the diagonals.
+      // Local axes are world axes (+X east, +Z south).
+      colliderTop = 1;
+      const SEG = 80;
+      // A rounded outline with half axes a (X) and b (Z); theta runs from +Z
+      // (south) toward +X (east), so a bearing B sits at theta = π − B.
+      const rim = (a: number, b: number, theta: number, power = 2.2): [number, number] => {
+        const s = Math.sin(theta);
+        const c = Math.cos(theta);
+        return [a * Math.sign(s) * Math.abs(s) ** (2 / power), b * Math.sign(c) * Math.abs(c) ** (2 / power)];
+      };
+      type Outline = [number, number, number];
+      const ring = (inner: Outline, outer: Outline, yIn: number, yOut: number, facing: "up" | "down" | "in" | "out" = "up", from = 0, to = Math.PI * 2, steps = SEG) => {
+        const quads: Array<[QuadPoint, QuadPoint, QuadPoint, QuadPoint, QuadPoint]> = [];
+        for (let index = 0; index < steps; index++) {
+          const t0 = from + ((to - from) * index) / steps;
+          const t1 = from + ((to - from) * (index + 1)) / steps;
+          const i0 = rim(inner[0], inner[1], t0, inner[2]);
+          const i1 = rim(inner[0], inner[1], t1, inner[2]);
+          const o0 = rim(outer[0], outer[1], t0, outer[2]);
+          const o1 = rim(outer[0], outer[1], t1, outer[2]);
+          const sign = facing === "in" ? -1 : 1;
+          const out: QuadPoint = facing === "up" ? [0, 1, 0] : facing === "down" ? [0, -1, 0] : [sign * i0[0], 0, sign * i0[1]];
+          quads.push([[i0[0], yIn, i0[1]], [i1[0], yIn, i1[1]], [o1[0], yOut, o1[1]], [o0[0], yOut, o0[1]], out]);
+        }
+        return quads;
+      };
+      const TRACK_IN: Outline = [43, 58, 2.7];
+      const TRACK_OUT: Outline = [52, 69, 2.7];
+      const FIELD: Outline = [80, 87, 2.2];
+      const BOWL_TOP: Outline = [104, 112, 2.2];
+      const OUTER: Outline = [108, 116, 2.2];
+      // Infield lawn (a fan drawn as degenerate quads), the track.
+      const infield: Array<[QuadPoint, QuadPoint, QuadPoint, QuadPoint, QuadPoint]> = [];
+      for (let index = 0; index < SEG; index++) {
+        const a = rim(FIELD[0], FIELD[1], (index / SEG) * Math.PI * 2, FIELD[2]);
+        const b = rim(FIELD[0], FIELD[1], ((index + 1) / SEG) * Math.PI * 2, FIELD[2]);
+        infield.push([[0, 0.08, 0], [a[0], 0.08, a[1]], [b[0], 0.08, b[1]], [0, 0.08, 0], [0, 1, 0]]);
+      }
+      addQuads(group, infield, lawn);
+      addQuads(group, ring(TRACK_IN, TRACK_OUT, 0.14, 0.14), terracotta);
+      // Football pitch with mown stripes, white lines and goals.
+      addBox(group, [72, 0.1, 104], [0, 0.18, 0], lawn).castShadow = false;
+      for (let stripe = -4; stripe <= 4; stripe += 2) addBox(group, [72, 0.06, 104 / 9], [0, 0.26, stripe * (104 / 9)], landmarkLightCanopy).castShadow = false;
+      for (const [w, d, x, z] of [[72, 0.25, 0, -52], [72, 0.25, 0, 52], [0.25, 104, -36, 0], [0.25, 104, 36, 0], [72, 0.25, 0, 0]] as const) {
+        addBox(group, [w, 0.05, d], [x, 0.32, z], whiteStone).castShadow = false;
+      }
+      for (const end of [-1, 1]) addBox(group, [7.3, 2.4, 0.4], [0, 1.4, end * 52.2], whiteStone);
+      // The bowl: a 2 m front wall, seating raked to the 18 m rim in sectors
+      // of grey with red seat blocks, a walkway, and the outer facade.
+      addQuads(group, [
+        ...ring(FIELD, FIELD, 0, 2, "in"),
+        ...ring(BOWL_TOP, OUTER, 18.6, 18.6),
+        ...ring(BOWL_TOP, BOWL_TOP, 18, 18.6, "in"),
+        ...ring(OUTER, OUTER, 0, 18.6, "out"),
+      ], concrete);
+      const SECTORS = 36;
+      const greyQuads: Array<[QuadPoint, QuadPoint, QuadPoint, QuadPoint, QuadPoint]> = [];
+      const redQuads: Array<[QuadPoint, QuadPoint, QuadPoint, QuadPoint, QuadPoint]> = [];
+      const MID: Outline = [93, 100.5, 2.2];
+      for (let sector = 0; sector < SECTORS; sector++) {
+        const a0 = (sector / SECTORS) * Math.PI * 2;
+        const a1 = ((sector + 0.62) / SECTORS) * Math.PI * 2;
+        const a2 = ((sector + 1) / SECTORS) * Math.PI * 2;
+        // Lower tier: red blocks alternate with grey; upper tier: grey with
+        // a narrow red aisle band.
+        greyQuads.push(...ring(FIELD, MID, 2, 10.5, "up", a0, a1, 2));
+        redQuads.push(...ring(FIELD, MID, 2, 10.5, "up", a1, a2, 2));
+        greyQuads.push(...ring(MID, BOWL_TOP, 10.5, 18, "up", a0, a2 - 0.012, 2));
+        redQuads.push(...ring(MID, BOWL_TOP, 10.5, 18, "up", a2 - 0.012, a2, 1));
+      }
+      addQuads(group, greyQuads, paleConcrete);
+      addQuads(group, redQuads, plazaRed);
+      // Dark concourse openings round the outer facade.
+      for (let index = 0; index < 48; index++) {
+        const theta = ((index + 0.5) / 48) * Math.PI * 2;
+        const [x, z] = rim(OUTER[0] + 0.08, OUTER[1] + 0.08, theta, OUTER[2]);
+        const opening = new THREE.Mesh(rectPane(5, 3.2), archDark);
+        opening.position.set(x, 13.5, z);
+        opening.rotation.y = Math.atan2(x / OUTER[0] ** 2, z / OUTER[1] ** 2);
+        group.add(opening);
+      }
+      // The covered ESE stand (bearings 100–160°): a white cantilever roof
+      // on raking back girders and columns behind the rim.
+      const ROOF_FROM = Math.PI - (160 * Math.PI) / 180;
+      const ROOF_TO = Math.PI - (100 * Math.PI) / 180;
+      const ROOF_IN: Outline = [88, 95.5, 2.2];
+      const ROOF_OUT: Outline = [109, 117, 2.2];
+      addQuads(group, [
+        ...ring(ROOF_IN, ROOF_OUT, 23.4, 25.2, "up", ROOF_FROM, ROOF_TO, 16),
+        ...ring(ROOF_IN, ROOF_OUT, 22.8, 24.6, "down", ROOF_FROM, ROOF_TO, 16),
+        ...ring(ROOF_IN, ROOF_IN, 22.8, 23.4, "in", ROOF_FROM, ROOF_TO, 16),
+        ...ring(ROOF_OUT, ROOF_OUT, 24.6, 25.2, "out", ROOF_FROM, ROOF_TO, 16),
+      ], whiteStone);
+      for (let index = 0; index <= 8; index++) {
+        const theta = ROOF_FROM + ((ROOF_TO - ROOF_FROM) * index) / 8;
+        const [bx, bz] = rim(108, 116, theta);
+        const [fx, fz] = rim(90, 97.5, theta);
+        addBeam(group, [bx, 25.6, bz], [fx, 23.8, fz], 0.6, 0.9, concrete);
+        addBox(group, [0.9, 25, 0.9], [bx, 12.5, bz], concrete);
+      }
+      // The press box breaking the north rim.
+      addBox(group, [16, 6, 9], [0, 21, -110], whiteStone);
+      addBox(group, [16.4, 0.7, 9.4], [0, 24.2, -110], plazaRed);
+      addBox(group, [14, 2.6, 0.2], [0, 21, -105.4], archDark);
+      solidBox(0, -110, 8, 4.5, 24.6);
+      // Four lattice floodlight masts at the diagonals, lamps turned inward.
+      for (const bearing of [45, 135, 225, 315]) {
+        const theta = Math.PI - (bearing * Math.PI) / 180;
+        const px = Math.sin(theta) * 124;
+        const pz = Math.cos(theta) * 128;
+        const mast = new THREE.Group();
+        mast.position.set(px, 0, pz);
+        mast.rotation.y = Math.atan2(-px, -pz);
+        group.add(mast);
+        const H = 50;
+        for (const cx of [-1, 1]) {
+          for (const cz of [-1, 1]) addBeam(mast, [cx * 1.6, 0, cz * 1.6], [cx * 0.8, H, cz * 0.8], 0.32, 0.32, concrete);
+        }
+        for (let y = 5; y < H - 2; y += 6) {
+          const r = 1.6 - (0.8 * y) / H;
+          const r2 = 1.6 - (0.8 * (y + 6)) / H;
+          for (const cz of [-1, 1]) addBeam(mast, [-r, y, cz * r], [r2, y + 6, cz * r2], 0.16, 0.16, concrete);
+          for (const cx of [-1, 1]) addBeam(mast, [cx * r, y, -r], [cx * r2, y + 6, r2], 0.16, 0.16, concrete);
+        }
+        addBox(mast, [7, 5, 0.9], [0, H + 2.4, 0.8], whiteStone).rotation.x = 0.4;
+        addBox(mast, [7.6, 0.5, 2.6], [0, H - 0.3, 0], concrete);
+        solid(px, pz, 5, H + 5);
+      }
+      // The bowl strikes as a ring of overlapping columns over the upper
+      // tier and rim (the field stays open), the covered stand's roof as a
+      // second ring over its sector.
+      for (let index = 0; index < 56; index++) {
+        const [x, z] = rim(101, 109, (index / 56) * Math.PI * 2);
+        solid(x, z, 10, 18.6);
+      }
+      for (let index = 0; index < 48; index++) {
+        const [x, z] = rim(89, 96, (index / 48) * Math.PI * 2);
+        solid(x, z, 6.5, 10.5);
+      }
+      for (let index = 0; index <= 10; index++) {
+        for (const [ra, rb] of [[95, 102.5], [108, 115.5]]) {
+          const [x, z] = rim(ra, rb, ROOF_FROM + ((ROOF_TO - ROOF_FROM) * index) / 10);
+          solid(x, z, 8, 24.6);
+        }
+      }
+      clearOval(0, 0, 108, 116, 10);
+      // The front edge of the covered stand's roof.
+      perchTarget = rim(93, 100.5, Math.PI - (130 * Math.PI) / 180);
+    } else if (landmark.kind === "rayer-bazar-memorial") {
+      // Martyred Intellectuals Memorial, Rayer Bazar (OSM 1074764129): a
+      // 0.9 m thick red-brick wall, 115.8 m long and 17.7 m at its highest,
+      // curving round the west side of a still D-shaped pool. Its top is
+      // broken: low and torn at both ends, rising to a ragged crest, with a
+      // square window cut through it south of the middle. A black granite
+      // pillar stands in the water, and a red-brick plaza with square lawns
+      // looks across the pool at the wall. The pool (OSM 320577211) is drawn
+      // from the map's water. Local +Z faces ENE (77°) toward the plaza; +X
+      // runs NNW (347°) along the pool's straight east edge at z = −5.6.
+      boundsCollider = false;
+      const CX = 1.2;
+      const CHORD = -5.6;
+      const A = 44.2;
+      const B = 24;
+      // The wall top from the SSE end (u = 0) round to the NNW end (u = 1).
+      const crest = (u: number) => {
+        // Torn brick steps up from the SSE end, a long high run with the
+        // ragged crest, then torn steps down to the NNW end (photo 03).
+        const rise = [3.2, 5.4, 8.2, 10.6];
+        if (u < 0.12) return rise[Math.floor((u / 0.12) * rise.length)];
+        if (u < 0.36) return 11.4 + ((u - 0.12) / 0.24) * 3.8;
+        if (u < 0.5) return 15.2 + ((u - 0.36) / 0.14) * 2.5;
+        if (u < 0.74) return 17.7 - ((u - 0.5) / 0.24) * 2;
+        const steps = [14.6, 12.8, 11.6, 9.4, 8.2, 6, 4.6];
+        return steps[Math.min(steps.length - 1, Math.floor(((u - 0.74) / 0.26) * steps.length))];
+      };
+      const SEGMENTS = 30;
+      const WINDOW = 11;
+      const point = (u: number): [number, number] => {
+        const phi = Math.PI + 0.08 - u * (Math.PI + 0.16);
+        return [CX + A * Math.cos(phi), CHORD - B * Math.sin(phi)];
+      };
+      for (let index = 0; index < SEGMENTS; index++) {
+        const u0 = index / SEGMENTS;
+        const u1 = (index + 1) / SEGMENTS;
+        const [x0, z0] = point(u0);
+        const [x1, z1] = point(u1);
+        // A ragged crest: a small deterministic jitter on every segment.
+        const height = crest((u0 + u1) / 2) + (((index * 7) % 5) - 2) * 0.22;
+        const length = Math.hypot(x1 - x0, z1 - z0);
+        const turn = Math.atan2(-(z1 - z0), x1 - x0);
+        const pieces: Array<[number, number]> = index === WINDOW ? [[0, 4.8], [9.4, height]] : [[0, height]];
+        for (const [bottom, top] of pieces) {
+          const piece = addBox(group, [length + 0.35, top - bottom, 0.9], [(x0 + x1) / 2, (bottom + top) / 2, (z0 + z1) / 2], plazaRed);
+          piece.rotation.y = turn;
+        }
+        if (index % 2 === 0) solid((x0 + x1) / 2, (z0 + z1) / 2, 3.2, height);
+      }
+      // The black granite pillar in the water, and the dark slab near it.
+      addBox(group, [3.2, 9.6, 3.2], [8, 4.4, CHORD - 4], recess);
+      addBox(group, [5, 0.14, 5], [-15, -0.33, CHORD - 2.4], recess);
+      solid(8, CHORD - 4, 2, 9.2);
+      // The low brick parapet along the pool's straight edge, broken by a
+      // landing at its middle.
+      for (const [x0, x1] of [[-40, -6], [6, 43]] as const) addBox(group, [x1 - x0, 1, 0.6], [(x0 + x1) / 2, 0.3, CHORD + 0.4], brick);
+      addBox(group, [12, 0.5, 3], [0, 0.1, CHORD + 1.6], brick);
+      // Lawn over the whole site, the red-brick plaza, its sunken central
+      // lawn and the square lawn panels either side.
+      // (The lawn leaves the pool and the strip inside the wall uncovered.)
+      addBox(group, [210, 0.06, 16], [0, 0.03, -38], lawn).castShadow = false;
+      for (const sx of [-1, 1]) addBox(group, [59, 0.06, 25], [sx * 75.5, 0.03, -17.5], lawn).castShadow = false;
+      addBox(group, [210, 0.06, 53], [0, 0.03, 21.5], lawn).castShadow = false;
+      addBox(group, [96, 0.1, 46], [1, 0.08, 19], brickTrim).castShadow = false;
+      addBox(group, [42, 0.08, 17], [1, 0.16, 23], lawn).castShadow = false;
+      for (const sx of [-1, 1]) {
+        for (const x of [28, 41]) for (const z of [8, 21, 34]) addBox(group, [10.5, 0.1, 10.5], [1 + sx * x, 0.16, z], lawn).castShadow = false;
+      }
+      // Brick paths across the lawns beyond the plaza.
+      for (const x of [-62, -78, -94, 64, 80, 96]) addBox(group, [3, 0.08, 90], [x, 0.07, 1], brickTrim).castShadow = false;
+      addBox(group, [206, 0.08, 3], [0, 0.07, 44], brickTrim).castShadow = false;
+      // Trees line the outer edges of the site, never between plaza and wall.
+      for (let x = -96; x <= 96; x += 16) addLandmarkTree(group, x, 40.5 + ((x / 16) % 2) * 2.5, 4.4, 5.6);
+      for (const sx of [-1, 1]) for (let z = -38; z <= 30; z += 17) addLandmarkTree(group, sx * 101, z, 4.6, 6);
+      clearSite(0, 1, 106, 48);
+      // The crest at the wall's highest point.
+      perchTarget = point(0.5);
+    } else if (landmark.kind === "sadarghat-terminal") {
+      // Sadarghat Launch Terminal on the Buriganga (OSM ferry terminal
+      // 332507445): a concrete quay with steps down to the water, a modest
+      // BIWTA terminal block, a line of rusty floating pontoons with long
+      // grey-green shed roofs 25–30 m offshore, gangways out to them, and
+      // the signature: big white three-deck passenger launches moored bow-in
+      // side by side in two rows, with arched window bands on every deck and
+      // pale cyan, green or salmon roof decks, among small wooden nouka.
+      // Local +Z faces the river (211°, square to the in-game bank, which
+      // runs along local X about 15 m from the origin); +X is ESE.
+      boundsCollider = false;
+      const BANK = 15;
+      const WATER = -0.42;
+      // The quay apron, its edge and the steps down to the water.
+      addBox(group, [420, 0.12, 12], [0, 0.06, BANK - 7], concrete).castShadow = false;
+      for (let step = 0; step < 3; step++) addBox(group, [420, 0.3, 1.6], [0, -0.12 - step * 0.18, BANK - 0.6 + step * 1.4], concrete);
+      // The terminal block: three storeys, dark window bands, a flat roof.
+      addBox(group, [64, 12, 16], [10, 6, BANK - 30], whiteStone);
+      for (const y of [3, 6.8, 10.4]) addBox(group, [62, 1.6, 0.12], [10, y, BANK - 21.94], archDark);
+      addBox(group, [66, 0.6, 18], [10, 12.3, BANK - 30], concrete);
+      addBox(group, [40, 0.4, 7], [10, 4.4, BANK - 18.6], sageConcrete);
+      solidBox(10, BANK - 30, 32, 8, 12.6);
+      // Floating pontoons, their shed roofs on posts, and the gangways.
+      const PONTOON = BANK + 27;
+      for (let index = 0; index < 10; index++) {
+        const x = -198 + index * 44;
+        addBox(group, [41, 1.2, 8], [x, WATER + 0.6, PONTOON], recess);
+        addBox(group, [38, 0.25, 9], [x, 3.9, PONTOON], sageConcrete);
+        for (const px of [-17, -8.5, 0, 8.5, 17]) for (const pz of [-3.2, 3.2]) addBox(group, [0.25, 3.1, 0.25], [x + px, 2.3, PONTOON + pz], concrete);
+      }
+      solidBox(0, PONTOON, 220, 4.5, 4.2);
+      for (let x = -180; x <= 180; x += 60) {
+        addBox(group, [3, 0.35, PONTOON - BANK - 2], [x, 0.75, (BANK + PONTOON) / 2 - 2], concrete);
+        for (const side of [-1, 1]) addBox(group, [0.12, 0.9, PONTOON - BANK - 2], [x + side * 1.45, 1.35, (BANK + PONTOON) / 2 - 2], recess);
+      }
+      // One launch, bow toward the bank: a dark hull with a pointed bow,
+      // three white decks with arched window bands, a coloured roof deck,
+      // a wheelhouse and two funnels.
+      const roofs = [starTile, seatGreen, salmon, starTile, whiteStone, seatGreen, salmon];
+      // In the launch's own frame the bow tip is at z = 0 and the stern at
+      // z = length (toward the open river).
+      const launch = (x: number, length: number, roof: THREE.Material, turn: number) => {
+        const boat = new THREE.Group();
+        boat.position.set(x, WATER, PONTOON + 4.5);
+        boat.rotation.y = turn;
+        group.add(boat);
+        addBox(boat, [14, 3.4, length - 5], [0, 1.1, (5 + length) / 2], recess);
+        addBox(boat, [9.9, 3.4, 9.9], [0, 1.1, 7], recess).rotation.y = Math.PI / 4;
+        const decks: Array<[number, number, number, number, number]> = [
+          [13.6, 2.8, 8, length - 1, 2.8],
+          [13.2, 2.8, 12, length - 3, 5.6],
+          [11, 2.6, 20, length - 6, 8.4],
+        ];
+        for (const [width, height, from, to, bottom] of decks) {
+          const cz = (from + to) / 2;
+          addBox(boat, [width, height, to - from], [0, bottom + height / 2, cz], whiteStone);
+          for (const side of [-1, 1]) addBox(boat, [0.1, height * 0.62, to - from - 3], [side * (width / 2 + 0.03), bottom + height * 0.52, cz], archDark);
+          for (const end of [from - 0.03, to + 0.03]) addBox(boat, [width - 2, height * 0.62, 0.1], [0, bottom + height * 0.52, end], archDark);
+        }
+        addBox(boat, [11.6, 0.3, length - 25.4], [0, 11.15, (20 + length - 6) / 2], roof);
+        addBox(boat, [6, 2.4, 5], [0, 12.5, 24], whiteStone);
+        addBox(boat, [6.2, 0.9, 0.1], [0, 12.8, 21.47], archDark);
+        for (const fx of [-2.2, 2.2]) addCylinder(boat, 0.55, 0.6, 2.8, [fx, 12.6, length - 12], recess, 8);
+      };
+      const rows: Array<[number, number]> = [[-150, 6], [40, 7]];
+      let count = 0;
+      for (const [start, n] of rows) {
+        for (let index = 0; index < n; index++) {
+          const x = start + index * 15.2;
+          const length = 78 + ((index * 5 + count) % 3) * 6;
+          launch(x, length, roofs[(index + count) % roofs.length], (((index * 3 + count) % 5) - 2) * 0.012);
+          // The wheelhouse and the funnel pair stand above the roof deck.
+          solid(x, PONTOON + 4.5 + 24, 3.4, WATER + 13.7);
+          solid(x, PONTOON + 4.5 + length - 12, 3.2, WATER + 14);
+          count++;
+        }
+        // The row of hulls up to the roof deck (11.3 m above the water).
+        solidBox(start + ((n - 1) * 15.2) / 2, PONTOON + 4.5 + 45, (n - 1) * 7.6 + 8, 45, WATER + 11.3);
+      }
+      // Wooden nouka taxi boats among the launches and across the river.
+      const nouka = [[-108, 70], [-96, 140], [-60, 112], [-30, 160], [-12, 96], [12, 134], [24, 186], [148, 120], [162, 82], [180, 150], [-170, 104], [80, 168], [120, 210], [-70, 200]];
+      nouka.forEach(([x, z], index) => {
+        const boat = addBox(group, [1.8, 0.7, 7], [x, WATER + 0.3, BANK + z], landmarkBark);
+        boat.rotation.y = index * 1.3;
+        const bow = addBox(group, [1.2, 0.5, 2.4], [x + Math.sin(index * 1.3) * 4, WATER + 0.45, BANK + z + Math.cos(index * 1.3) * 4], landmarkBark);
+        bow.rotation.set(0.25, index * 1.3, 0, "YXZ");
+      });
+      // Keep the quay road clear; the city comes right up to it.
+      clearSite(0, BANK - 11, 210, 11);
+      // The top deck of the middle launch in the SE row.
+      perchTarget = [40 + 3 * 15.2, PONTOON + 4.5 + 45];
+    } else if (landmark.kind === "air-force-museum") {
+      // Bangladesh Air Force Museum, Agargaon (OSM way 462486324): a 688 m
+      // lawn strip (long axis 165°, local X) beside Begum Rokeya Sarani, with
+      // static aircraft on low brick-edged beds either side of a brick path.
+      // The An-24 "Balaka" transport and a dark-green Mi-8 lead; yellow
+      // trainers with red noses (Fouga Magister, CJ-6) and silver jets (FT-7,
+      // F-86 Sabre on angled white plinths, F-6, F-7) follow, and the white
+      // "BAF Nokkhotro" shuttle replica stands by the dark-red brick gate.
+      // The lawn and its trees are a DHAKA_PARKS row. Local +Z faces WSW
+      // (255°) toward the road; +X runs SSE.
+      boundsCollider = false;
+      // Flat parts: a plan polygon (x, z) extruded up by `thick`.
+      const flatPoly = (parent: THREE.Object3D, points: Array<[number, number]>, y: number, thick: number, material: THREE.Material) => {
+        const geometry = new THREE.ExtrudeGeometry(new THREE.Shape(points.map(([px, pz]) => new THREE.Vector2(px, -pz))), { depth: thick, bevelEnabled: false, curveSegments: 1 });
+        geometry.rotateX(-Math.PI / 2);
+        const mesh = new THREE.Mesh(geometry, material);
+        mesh.position.y = y;
+        parent.add(mesh);
+        return mesh;
+      };
+      // A fin: an outline in (z, y) given thickness across x.
+      const finPoly = (parent: THREE.Object3D, points: Array<[number, number]>, thick: number, material: THREE.Material) => {
+        const geometry = new THREE.ExtrudeGeometry(new THREE.Shape(points.map(([pz, py]) => new THREE.Vector2(pz, py))), { depth: thick, bevelEnabled: false, curveSegments: 1 });
+        geometry.rotateY(-Math.PI / 2);
+        geometry.translate(thick / 2, 0, 0);
+        const mesh = new THREE.Mesh(geometry, material);
+        parent.add(mesh);
+        return mesh;
+      };
+      // A body of revolution along local Z (nose toward +Z).
+      const tube = (parent: THREE.Object3D, rFront: number, rBack: number, length: number, y: number, z: number, material: THREE.Material, segments = 8) => {
+        const mesh = addCylinder(parent, rFront, rBack, length, [0, y, z], material, segments);
+        mesh.rotation.x = Math.PI / 2;
+        return mesh;
+      };
+      const mirror = (points: Array<[number, number]>) => [...points, ...points.filter(([px]) => px !== 0).reverse().map(([px, pz]) => [-px, pz] as [number, number])];
+      const aircraft = (x: number, z: number, yaw: number, lift = 0) => {
+        const holder = new THREE.Group();
+        holder.position.set(x, lift, z);
+        holder.rotation.y = yaw;
+        group.add(holder);
+        return holder;
+      };
+      // A brick-edged display bed under each exhibit, kept free of park trees.
+      const bed = (x: number, z: number, half: number) => {
+        for (const [bx, bz, w, d] of [[0, half, half * 2 + 0.4, 0.4], [0, -half, half * 2 + 0.4, 0.4], [half, 0, 0.4, half * 2], [-half, 0, 0.4, half * 2]] as const) {
+          addBox(group, [w, 0.4, d], [x + bx, 0.2, z + bz], plazaBrick);
+        }
+        clearSite(x, z, half + 2, half + 2);
+      };
+      const roundel = (parent: THREE.Object3D, x: number, y: number, z: number, radius: number) => {
+        for (const side of [-1, 1]) {
+          const ring = addCylinder(parent, radius, radius, 0.06, [x * side, y, z], landmarkCanopy, 10);
+          ring.rotation.z = Math.PI / 2;
+          const dot = addCylinder(parent, radius * 0.6, radius * 0.6, 0.06, [(x + 0.04) * side, y, z], monumentRed, 10);
+          dot.rotation.z = Math.PI / 2;
+        }
+      };
+
+      // The brick path down the lawn (it skirts the pond in the middle, OSM
+      // 583653806, drawn from map data), and the red pipe railing round the site.
+      addSweptBox(group, [[-420, 0.14, 12], [-60, 0.14, 12], [-32, 0.14, -38], [70, 0.14, -38], [110, 0.14, -20], [235, 0.14, -40]], 1.6, 0.14, plazaBrick);
+      const site: Array<[number, number]> = [[-433, 71], [80, 68], [88, 60], [102, 42], [118, 21], [133, 11], [168, 6], [252, 9], [254, -100], [-332, -94], [-429, -93]];
+      addSweptBox(group, [...site, site[0]].map(([sx, sz]) => [sx, 1.1, sz] as QuadPoint), 0.07, 1.1, monumentRed);
+
+      // An-24 "Balaka" 0001, broadside to the road.
+      const AN_X = -75;
+      const AN_Z = -30;
+      bed(AN_X, AN_Z, 15.5);
+      const an = aircraft(AN_X, AN_Z, Math.PI / 2);
+      tube(an, 1.45, 1.45, 17, 2.6, 0.5, whiteStone);
+      addBox(an, [2.6, 1.0, 17], [0, 1.65, 0.5], roofGrey);
+      tube(an, 0.7, 1.45, 2.0, 2.5, 10.0, starTile);
+      addLathe(an, [[0.7, 0], [0.45, 0.35], [0.01, 0.5]], 8, [0, 2.5, 11.0], starTile).rotation.x = Math.PI / 2;
+      tube(an, 1.45, 0.45, 5.4, 2.95, -10.7, whiteStone);
+      addBox(an, [1.6, 0.5, 1.6], [0, 3.85, 8.3], recess);
+      flatPoly(an, mirror([[0, 2.0], [3, 2.0], [14.5, 1.1], [14.5, -0.4], [3, -0.9]]), 3.95, 0.35, whiteStone);
+      for (const side of [-1, 1]) {
+        const nacelle = tube(an, 0.62, 0.55, 6, 3.4, 1.2, silverPanel);
+        nacelle.position.x = side * 4.3;
+        for (const blade of [0, 1]) {
+          const prop = addBox(an, [3.8, 0.24, 0.12], [side * 4.3, 3.4, 4.3], recess);
+          prop.rotation.z = blade * (Math.PI / 2) + 0.4;
+        }
+        addBox(an, [0.4, 2.2, 0.4], [side * 4.3, 1.1, 1.5], recess);
+      }
+      addBox(an, [0.4, 1.4, 0.4], [0, 0.7, 8], recess);
+      finPoly(an, [[-9.2, 3.4], [-13.4, 3.4], [-13.6, 8.3], [-12.3, 8.3]], 0.32, whiteStone);
+      flatPoly(an, mirror([[0, -10.6], [5.1, -11.8], [5.1, -12.9], [0, -13.2]]), 3.5, 0.22, whiteStone);
+      roundel(an, 1.46, 2.7, -5.5, 0.85);
+      addBox(an, [0.36, 1.0, 1.6], [0, 7.0, -12.9], landmarkCanopy);
+      solidBox(AN_X, AN_Z, 12.5, 1.6, 4.3);
+      solidBox(AN_X + 1.5, AN_Z, 1.4, 14.5, 4.4);
+      solid(AN_X - 12.6, AN_Z, 1.3, 8.4);
+      perchTarget = [AN_X - 12.9, AN_Z];
+
+      // The dark-green Mi-8 helicopter beside it.
+      const MI_X = -112;
+      const MI_Z = -30;
+      bed(MI_X, MI_Z, 10.5);
+      const mi = aircraft(MI_X, MI_Z, Math.PI / 2);
+      tube(mi, 1.0, 1.3, 10.5, 2.3, 0.5, landmarkCanopy);
+      tube(mi, 0.4, 1.0, 2.2, 2.1, 6.85, landmarkCanopy);
+      addBox(mi, [1.7, 0.9, 4.5], [0, 3.7, 1.5], landmarkCanopy);
+      tube(mi, 0.55, 0.25, 8, 2.9, -8.6, landmarkCanopy, 6);
+      finPoly(mi, [[-11.6, 2.8], [-12.9, 2.8], [-13.3, 5.4], [-12.4, 5.4]], 0.22, landmarkCanopy);
+      addCylinder(mi, 0.25, 0.25, 0.8, [0, 4.5, 1.2], recess, 6);
+      for (let blade = 0; blade < 5; blade++) {
+        const angle = (blade / 5) * Math.PI * 2;
+        const rotor = addBox(mi, [0.55, 0.12, 10.5], [Math.sin(angle) * 5.25, 4.95, 1.2 + Math.cos(angle) * 5.25], recess);
+        rotor.rotation.y = angle;
+      }
+      addBox(mi, [2.8, 0.25, 0.12], [0.2, 4.3, -12.6], recess);
+      roundel(mi, 1.25, 2.4, -2.8, 0.6);
+      solidBox(MI_X, MI_Z, 9, 1.6, 5);
+
+      // A jet: fuselage, nose cone, wing and tailplane outlines, swept fin.
+      const jet = (
+        holder: THREE.Object3D, body: THREE.Material, length: number, radius: number, y: number,
+        wing: Array<[number, number]>, tail: Array<[number, number]>, fin: Array<[number, number]>, finTip: THREE.Material,
+      ) => {
+        tube(holder, radius * 0.8, radius, length, y, 0, body);
+        const cone = addCone(holder, radius * 0.8, length * 0.16, [0, y, length / 2 + length * 0.08], body, 8);
+        cone.rotation.x = Math.PI / 2;
+        addBox(holder, [radius * 1.1, radius * 0.8, length * 0.22], [0, y + radius * 0.8, length * 0.2], recess);
+        flatPoly(holder, mirror(wing), y - radius * 0.45, 0.16, body);
+        flatPoly(holder, mirror(tail), y + 0.05, 0.12, body);
+        finPoly(holder, fin, 0.16, body);
+        const [tipZ, tipY] = fin[2];
+        addBox(holder, [0.2, 0.7, 1.2], [0, tipY - 0.3, tipZ + 0.2], finTip);
+        roundel(holder, radius * 0.98, y + 0.1, -length * 0.25, radius * 0.6);
+      };
+      // FT-7 two-seater "036": delta wing.
+      bed(-82, 32, 8.5);
+      const ft7 = aircraft(-82, 32, -Math.PI / 2 + 0.35);
+      jet(ft7, silverPanel, 13, 0.62, 1.8,
+        [[0, 1.5], [3.6, -3.8], [3.6, -4.4], [0, -4.4]], [[0, -5.2], [1.9, -6.4], [1.9, -6.8], [0, -6.6]],
+        [[-3.6, 2.2], [-6.6, 2.2], [-6.9, 4.8], [-5.8, 4.8]], landmarkCanopy);
+      solid(-82, 32, 3, 5);
+      // F-86 Sabre "JB-255": swept wing, raised on angled white plinths.
+      const SABRE_X = -150;
+      const SABRE_Z = -12;
+      bed(SABRE_X, SABRE_Z, 8.5);
+      const sabre = aircraft(SABRE_X, SABRE_Z, Math.PI / 2 + 0.5, 1.6);
+      jet(sabre, silverPanel, 11, 0.72, 1.4,
+        [[0, 1.4], [5.6, -1.6], [5.6, -2.5], [0, -1.2]], [[0, -4.0], [2.2, -5.2], [2.2, -5.7], [0, -5.2]],
+        [[-3.2, 1.8], [-5.6, 1.8], [-6.0, 4.1], [-5.0, 4.1]], silverPanel);
+      for (const [px, pz, lean] of [[0, 3.2, 0.5], [2.2, -1, -0.45], [-2.2, -1, -0.45]] as const) {
+        const plinth = addBox(sabre, [0.9, 2.8, 1.6], [px, -0.4, pz], whiteStone);
+        plinth.rotation.x = lean;
+      }
+      addBox(group, [3.6, 0.5, 3.6], [SABRE_X, 0.25, SABRE_Z], plazaBrick);
+      solid(SABRE_X, SABRE_Z, 3, 6.2);
+      // An F-6 (MiG-19 type), swept wing with the green and white fin.
+      bed(-182, 30, 8.5);
+      const f6 = aircraft(-182, 30, -Math.PI / 2 - 0.25);
+      jet(f6, silverPanel, 12.5, 0.7, 1.7,
+        [[0, 1.6], [4.6, -2.6], [4.6, -3.4], [0, -1.6]], [[0, -4.5], [2.3, -5.9], [2.3, -6.4], [0, -6.0]],
+        [[-3.4, 2.2], [-6.0, 2.2], [-6.6, 4.9], [-5.4, 4.9]], landmarkCanopy);
+      solid(-182, 30, 3, 5);
+      // An F-7 (MiG-21 type) delta.
+      bed(-236, -12, 8.5);
+      const f7 = aircraft(-236, -12, Math.PI / 2 - 0.3);
+      jet(f7, silverPanel, 13.5, 0.62, 1.8,
+        [[0, 1.2], [3.6, -4.0], [3.6, -4.6], [0, -4.6]], [[0, -5.4], [1.9, -6.6], [1.9, -7.0], [0, -6.8]],
+        [[-3.8, 2.2], [-6.9, 2.2], [-7.2, 4.9], [-6.1, 4.9]], landmarkCanopy);
+      solid(-236, -12, 3, 5);
+
+      // Yellow-orange trainers with red noses and wingtips.
+      const trainer = (holder: THREE.Object3D, vTail: boolean) => {
+        tube(holder, 0.55, 0.62, 8.2, 1.6, 0, accent);
+        tube(holder, 0.2, 0.55, 1.6, 1.6, 4.9, monumentRed);
+        addBox(holder, [0.8, 0.6, 2.8], [0, 2.25, 1.4], recess);
+        flatPoly(holder, mirror([[0, 1.6], [5.0, 1.1], [5.0, -0.2], [0, -0.6]]), 1.1, 0.16, accent);
+        for (const side of [-1, 1]) addBox(holder, [0.5, 0.2, 1.4], [side * 5.3, 1.18, 0.45], monumentRed);
+        if (vTail) {
+          for (const side of [-1, 1]) {
+            const fin = finPoly(holder, [[-3.4, 0], [-4.7, 0], [-5.2, 2.5], [-4.4, 2.5]], 0.14, accent);
+            fin.rotation.z = side * 0.6;
+            fin.position.y = 1.75;
+          }
+        } else {
+          finPoly(holder, [[-3.4, 1.8], [-4.6, 1.8], [-4.8, 3.5], [-4.1, 3.5]], 0.14, accent);
+          flatPoly(holder, mirror([[0, -3.5], [2.0, -3.8], [2.0, -4.5], [0, -4.6]]), 1.7, 0.12, accent);
+          for (const blade of [0, 1]) {
+            const prop = addBox(holder, [2.2, 0.18, 0.08], [0, 1.6, 5.75], recess);
+            prop.rotation.z = blade * (Math.PI / 2) + 0.3;
+          }
+        }
+      };
+      bed(102, 30, 7);
+      trainer(aircraft(102, 30, -2.4), true);
+      solid(102, 30, 2.5, 4.4);
+      bed(140, -55, 7);
+      trainer(aircraft(140, -55, 2.6), false);
+      solid(140, -55, 2.5, 3.8);
+
+      // The "BAF Nokkhotro" shuttle replica on its round red-tile plinth.
+      const SHX = 85;
+      const SHZ = 40;
+      addCylinder(group, 3.1, 3.1, 1.0, [SHX, 0.5, SHZ], monumentRed, 14);
+      addBox(group, [2.8, 1.2, 2.2], [SHX, 1.6, SHZ], recess);
+      addCylinder(group, 0.9, 0.9, 7.6, [SHX, 2.2 + 3.8, SHZ - 0.6], whiteStone, 10);
+      addCone(group, 0.9, 1.6, [SHX, 2.2 + 7.6 + 0.8, SHZ - 0.6], monumentRed, 10);
+      for (const side of [-1, 1]) {
+        addCylinder(group, 0.5, 0.5, 6.4, [SHX + side * 1.45, 2.2 + 3.2, SHZ - 0.6], whiteStone, 8);
+        addCone(group, 0.5, 1.2, [SHX + side * 1.45, 2.2 + 6.4 + 0.6, SHZ - 0.6], monumentRed, 8);
+        for (const band of [1.2, 3.6, 4.8]) addCylinder(group, 0.53, 0.53, 0.22, [SHX + side * 1.45, 2.2 + band, SHZ - 0.6], recess, 8);
+        addCone(group, 0.45, 0.8, [SHX + side * 0.5, 2.2, SHZ + 0.5], monumentRed, 6);
+      }
+      addCylinder(group, 0.62, 0.62, 5.6, [SHX, 2.4 + 2.8, SHZ + 0.55], whiteStone, 8);
+      addCone(group, 0.62, 1.3, [SHX, 2.4 + 5.6 + 0.65, SHZ + 0.55], whiteStone, 8);
+      const orbiterWing = new THREE.Shape([new THREE.Vector2(-2.6, 0), new THREE.Vector2(2.6, 0), new THREE.Vector2(0.4, 4.6), new THREE.Vector2(-0.4, 4.6)]);
+      const wingGeometry = new THREE.ExtrudeGeometry(orbiterWing, { depth: 0.24, bevelEnabled: false, curveSegments: 1 });
+      const wingMesh = new THREE.Mesh(wingGeometry, whiteStone);
+      wingMesh.position.set(SHX, 2.4, SHZ + 0.45);
+      group.add(wingMesh);
+      addBox(group, [0.2, 1.8, 1.3], [SHX, 2.4 + 0.9, SHZ + 1.6], whiteStone);
+      solid(SHX, SHZ, 3.1, 11.4);
+      clearSite(SHX, SHZ, 6, 6);
+
+      // The dark-red brick main gate at the south-west entry, the BAF eagle
+      // on its left pylon, and relief walls either side.
+      const GX = 72;
+      const GZ = 67;
+      for (const side of [-1, 1]) {
+        addBox(group, [2.4, 9.2, 2.4], [GX + side * 7.2, 4.6, GZ], plazaBrick);
+        addBox(group, [9, 2.6, 0.7], [GX + side * 13.6, 1.3, GZ], plazaBrick);
+      }
+      addBox(group, [16.8, 2.4, 2.4], [GX, 8.0, GZ], plazaBrick);
+      addBox(group, [14, 0.12, 0.12], [GX, 9.6, GZ - 0.6], silverPanel);
+      addBox(group, [14, 0.12, 0.12], [GX, 10.2, GZ - 0.6], silverPanel);
+      // The eagle sits on the pylon to the left of a visitor facing the gate.
+      const EX = GX - 7.2;
+      addBox(group, [0.7, 1.2, 0.8], [EX, 9.8, GZ], recess);
+      for (const side of [-1, 1]) {
+        const wing = addBox(group, [1.8, 0.2, 0.7], [EX + side * 1.0, 10.5, GZ], recess);
+        wing.rotation.z = side * 0.6;
+      }
+      solidBox(GX, GZ, 9, 1.4, 9.2);
+      clearSite(GX, GZ - 8, 10, 8);
+    } else if (landmark.kind === "sonargaon-hotel") {
+      // Pan Pacific Sonargaon, Karwan Bazar (OSM way 32562242): a long,
+      // low, dusty pink-beige ten-storey room slab running ENE (70°) along
+      // the south side of a podium wedge. Both long faces are a sawtooth of
+      // deep balcony trays between angled fins over dark glass; the blank end
+      // walls carry a projecting central pier and the hotel name on the roof
+      // cornice, with a glazed roof lounge at the WSW end. The podium courts
+      // open to the NNW, the pool court in the notch; the garden is on
+      // the south. Local +Z faces NNW (340°), +X runs WSW along the slab.
+      boundsCollider = false;
+      const X0 = -72;
+      const X1 = 51;
+      const Z0 = -38.6;
+      const Z1 = -18.6;
+      const ZM = (Z0 + Z1) / 2;
+      const H = 33;
+      const FLOOR = 3.3;
+      // Glazed core, the balcony trays at every floor, and the end walls.
+      addBox(group, [X1 - X0 - 3, H, Z1 - Z0 - 4], [(X0 + X1) / 2, H / 2, ZM], darkGlass);
+      for (let floor = 1; floor <= 9; floor++) {
+        addBox(group, [X1 - X0 - 5, 0.7, Z1 - Z0], [(X0 + X1) / 2, floor * FLOOR, ZM], roseBeige);
+      }
+      // Angled fins between the bays turn each face into a sawtooth.
+      for (const side of [-1, 1]) {
+        for (let bay = 0; bay < 15; bay++) {
+          const x = X0 + 5.6 + bay * 8.0;
+          const fin = addBox(group, [0.6, H - FLOOR + 0.4, 3.0], [x, FLOOR + (H - FLOOR) / 2, ZM + side * (Z1 - Z0 - 2.6) / 2], roseBeige);
+          fin.rotation.y = side * 0.6;
+        }
+      }
+      for (const [x, sign] of [[X1 - 1.5, 1], [X0 + 1.5, -1]] as const) {
+        // The end wall, its edges stepping in by floor.
+        addBox(group, [3, H, Z1 - Z0 - 3], [x, H / 2, ZM], roseBeige);
+        for (let floor = 0; floor < 10; floor++) {
+          if (floor % 2) continue;
+          for (const edge of [-1, 1]) addBox(group, [3, FLOOR, 1.5], [x, floor * FLOOR + FLOOR / 2, ZM + edge * (Z1 - Z0 - 1.5) / 2], roseBeige);
+        }
+        addBox(group, [1.3, H + 2, 5.2], [x + sign * 2.1, (H + 2) / 2, ZM], roseBeige);
+        addBox(group, [0.18, 0.8, 12], [x + sign * 2.15, H + 0.75, ZM], darkGlass);
+      }
+      addBox(group, [X1 - X0 + 1, 1.4, Z1 - Z0 + 1], [(X0 + X1) / 2, H + 0.7, ZM], roseBeige);
+      addBox(group, [X1 - X0 - 2, 0.1, Z1 - Z0 - 2], [(X0 + X1) / 2, H + 1.42, ZM], roofGrey);
+      addBox(group, [16, 3.2, 12], [38, H + 3.0, ZM], darkGlass);
+      addBox(group, [16.6, 0.3, 12.6], [38, H + 4.75, ZM], roseBeige);
+      addBox(group, [8, 2.6, 6], [-20, H + 2.7, ZM], roofGrey);
+      // Podium blocks round the forecourt notch, and the 24 m east wing.
+      const podium: Array<[number, number, number, number, number]> = [
+        [25.5, X1 - 0.5, Z1 - 1, 27, 10], [-8, 25.5, Z1 - 1, -9.6, 10], [-54, -8, Z1 - 1, 27, 10], [X0 + 0.5, -54, Z1 - 1, 27, 24],
+      ];
+      for (const [x0, x1, z0, z1, top] of podium) {
+        addBox(group, [x1 - x0, top, z1 - z0], [(x0 + x1) / 2, top / 2, (z0 + z1) / 2], roseBeige);
+        for (let y = 3.4; y < top - 1; y += FLOOR) {
+          addBox(group, [x1 - x0 + 0.2, 1.3, z1 - z0 + 0.2], [(x0 + x1) / 2, y + 0.65, (z0 + z1) / 2], darkGlass);
+        }
+        addBox(group, [x1 - x0 - 1.2, 0.1, z1 - z0 - 1.2], [(x0 + x1) / 2, top + 0.05, (z0 + z1) / 2], roofGrey);
+        solidBox((x0 + x1) / 2, (z0 + z1) / 2, (x1 - x0) / 2, (z1 - z0) / 2, top);
+      }
+      for (let part = 0; part < 4; part++) {
+        const length = (X1 - X0) / 4;
+        solidBox(X0 + length * (part + 0.5), ZM, length / 2, (Z1 - Z0) / 2, H + 1.4);
+      }
+      // The pool court in the podium notch (map water OSM 948448048, which
+      // this deck would hide, so the pool is redrawn on it), its palms, and
+      // the porte-cochère on the north face of the east podium.
+      addBox(group, [33.6, 0.1, 37], [8.75, 0.05, 8.7], paleConcrete);
+      addBox(group, [24, 0.1, 18], [8.5, 0.12, 5.5], water);
+      for (let palm = 0; palm < 6; palm++) addPalm(group, -5 + (palm % 3) * 13.6, palm < 3 ? -7.2 : 18.5, 9 + (palm % 2) * 2, 0.08, palm * 1.1);
+      clearSite(8.75, 12, 16.5, 21);
+      addBox(group, [16, 0.8, 9], [-32, 6.2, 31.5], roseBeige);
+      for (const [px, pz] of [[-39, 35], [-25, 35]] as const) addBox(group, [0.9, 5.8, 0.9], [px, 2.9, pz], roseBeige);
+      addBox(group, [30, 0.1, 16], [-32, 0.05, 35], paleConcrete);
+      clearSite(-32, 35, 15, 8);
+      // The garden on the south, under old trees and palms.
+      addBox(group, [120, 0.1, 40], [-10, 0.05, Z0 - 21], lawn);
+      clearSite(-10, Z0 - 21, 60, 20);
+      for (let tree = 0; tree < 9; tree++) {
+        const x = -64 + tree * 12.5 + (tree % 2) * 3;
+        addLandmarkTree(group, x, Z0 - 12 - (tree % 3) * 9, 4.2, 5.4, landmarkLightCanopy);
+      }
+      for (let palm = 0; palm < 6; palm++) addPalm(group, -40 + palm * 15, Z0 - 31 - (palm % 2) * 3, 10 + (palm % 3), 0.08, palm * 1.3);
+      perchTarget = [X1 - 1.5, ZM];
+    } else if (landmark.kind === "pm-office") {
+      // Prime Minister's Office, Tejgaon (the old Sangsad Bhaban; OSM
+      // 571232877). A long white two-storey block, long axis N–S, whose
+      // central portico faces west over the formal lawns: four square white
+      // columns under a broad, shallow white gable with a dark-wood fascia and
+      // the state emblem, flanked by white wall piers. The wings carry green
+      // hipped metal roofs; tall flagpoles line the forecourt. The full plan
+      // was not surveyed, so the courtyards are an estimate. Local +Z faces
+      // west, +X south.
+      const H = 10;
+      const roofGreen = lawn;
+      // Front and back ranges joined by three cross wings round two courts.
+      const blocks: Array<[number, number, number, number]> = [
+        [-55, 55, 6, 20], [-55, 55, -20, -8], [-55, -43, -8, 6], [-6, 6, -8, 6], [43, 55, -8, 6],
+      ];
+      for (const [x0, x1, z0, z1] of blocks) addBox(group, [x1 - x0, H, z1 - z0], [(x0 + x1) / 2, H / 2, (z0 + z1) / 2], whiteStone);
+      // A hipped roof (ridge along X) over a rectangle, with eaves.
+      const hipRoof = (x0: number, x1: number, z0: number, z1: number, rise: number) => {
+        const e = 0.7;
+        const ax = x0 - e, bx = x1 + e, az = z0 - e, bz = z1 + e;
+        const halfD = (bz - az) / 2;
+        const midZ = (az + bz) / 2;
+        const r1: QuadPoint = [ax + halfD, H + rise, midZ];
+        const r2: QuadPoint = [bx - halfD, H + rise, midZ];
+        addQuads(group, [
+          [[ax, H, bz], [bx, H, bz], r2, r1, [0, 1, 1]],
+          [[ax, H, az], [bx, H, az], r2, r1, [0, 1, -1]],
+          [[ax, H, az], [ax, H, bz], r1, r1, [-1, 1, 0]],
+          [[bx, H, az], [bx, H, bz], r2, r2, [1, 1, 0]],
+        ], roofGreen);
+      };
+      hipRoof(-55, -15, 6, 20, 2.6);
+      hipRoof(15, 55, 6, 20, 2.6);
+      hipRoof(-55, 55, -20, -8, 2.4);
+      // The flat-roofed centre of the front range behind the portico, with a parapet.
+      for (const [x, z, w, d] of [[0, 20, 30, 0.5], [0, 6, 30, 0.5], [-15, 13, 0.5, 14], [15, 13, 0.5, 14]] as const) {
+        addBox(group, [w, 0.9, d], [x, H + 0.45, z], whiteStone);
+      }
+      addBox(group, [29, 0.08, 13], [0, H + 0.04, 13], paleConcrete);
+      // Window strips on the west front, both storeys.
+      const windowPane = rectPane(1.6, 2.4);
+      for (let bay = 0; bay < 26; bay++) {
+        const x = -52 + bay * 4.16;
+        if (Math.abs(x) < 12) continue;
+        for (const y of [1.4, 6.0]) {
+          const pane = new THREE.Mesh(windowPane, archDark);
+          pane.position.set(x, y, 20.03);
+          group.add(pane);
+        }
+      }
+      // The portico.
+      const PZ = 20;
+      for (const side of [-1, 1]) addBox(group, [2.6, 8.2, 10], [side * 10.4, 4.1, PZ + 5], whiteStone);
+      for (const x of [-6.6, -2.2, 2.2, 6.6]) addBox(group, [1.1, 7.6, 1.1], [x, 3.8, PZ + 8.6], whiteStone);
+      const doorway = new THREE.Mesh(rectPane(16, 6.4), recess);
+      doorway.position.set(0, 0, PZ + 0.03);
+      group.add(doorway);
+      const SLOPE = Math.atan2(3.2, 11.5);
+      addBox(group, [23.4, 0.8, 0.9], [0, 7.95, PZ + 10.4], bronze);
+      const tympanum = new THREE.Mesh(trianglePane(22, 3.2), whiteStone);
+      tympanum.position.set(0, 8.35, PZ + 10.0);
+      group.add(tympanum);
+      for (const side of [-1, 1]) {
+        const roof = addBox(group, [12.2, 0.9, 12.4], [side * 5.75, 8.35 + 1.6 + 0.45, PZ + 5.2], whiteStone);
+        roof.rotation.z = -side * SLOPE;
+        const fascia = addBox(group, [12.0, 0.5, 0.5], [side * 5.75, 8.35 + 1.6 - 0.15, PZ + 10.55], bronze);
+        fascia.rotation.z = -side * SLOPE;
+      }
+      const emblem = new THREE.Mesh(discPane(0.75, 14), accent);
+      emblem.position.set(0, 8.75, PZ + 10.05);
+      group.add(emblem);
+      // Flagpoles along the forecourt.
+      for (const side of [-1, 1]) {
+        for (let pole = 0; pole < 5; pole++) addCylinder(group, 0.1, 0.14, 15, [side * (16 + pole * 3.6), 7.5, PZ + 13], silverPanel, 5);
+      }
+      addBox(group, [44, 0.1, 22], [0, 0.05, PZ + 22], paleConcrete);
+      clearSite(0, PZ + 22, 22, 11);
+      solidBox(0, PZ + 5.2, 11.8, 6.2, 12.2);
+      // The walled compound's lawns round the block stay open.
+      clearSite(0, 0, 72, 36);
+      colliderTop = H + 2.6;
+      perchTarget = [0, PZ + 5.2];
+    } else if (landmark.kind === "armenian-church") {
+      // Armenian Church of the Holy Resurrection, Armanitola (1781; OSM
+      // 243376194, 31 × 16 m, long axis 98°). An ochre flat-roofed nave behind
+      // a balustraded parapet, with low round-arched verandahs down both long
+      // sides. The west door is under the bell tower: a square base, an
+      // octagonal open belfry and a pointed octagonal spire with an oculus and
+      // a cross, about 22 m. The east end is a round apse crowned by a curved
+      // Baroque scroll gable with an oculus. A walled yard of flat white
+      // grave slabs lies south and west. Local +Z faces west (278°), +X south.
+      const WALL = 9;
+      const HW = 5.5;
+      const ZW = 14;
+      const ZE = -11;
+      const MID = (ZW + ZE) / 2;
+      const LEN = ZW - ZE;
+      addBox(group, [HW * 2, WALL, LEN], [0, WALL / 2, MID], stationCream);
+      addBox(group, [HW * 2 + 0.5, 0.45, LEN + 0.5], [0, WALL + 0.05, MID], cream);
+      addBox(group, [HW * 2 - 0.4, 0.12, LEN - 0.4], [0, WALL + 0.31, MID], concrete);
+      // A balustrade: top rail, plinth rail and baluster blocks between
+      // pedestals, along a rectangle in this group's frame.
+      const balustrade = (x0: number, x1: number, z0: number, z1: number, y: number) => {
+        for (const [ax, az, bx, bz] of [[x0, z0, x1, z0], [x1, z0, x1, z1], [x1, z1, x0, z1], [x0, z1, x0, z0]] as const) {
+          const length = Math.hypot(bx - ax, bz - az);
+          const yaw = Math.atan2(bx - ax, bz - az);
+          const top = addBox(group, [0.42, 0.16, length + 0.42], [(ax + bx) / 2, y + 0.92, (az + bz) / 2], cream);
+          top.rotation.y = yaw;
+          const base = addBox(group, [0.36, 0.14, length], [(ax + bx) / 2, y + 0.07, (az + bz) / 2], cream);
+          base.rotation.y = yaw;
+          const count = Math.round(length / 0.75);
+          for (let index = 1; index < count; index++) {
+            const t = index / count;
+            const pedestal = index % 5 === 0;
+            const post = addBox(group, pedestal ? [0.5, 0.86, 0.5] : [0.2, 0.7, 0.2], [ax + (bx - ax) * t, y + (pedestal ? 0.5 : 0.49), az + (bz - az) * t], pedestal ? cream : stationCream);
+            post.rotation.y = yaw;
+          }
+        }
+      };
+      balustrade(-HW, HW, ZE, ZW, WALL + 0.37);
+      // Round-arched verandahs down both long sides, their own balustrades on top.
+      const arch = roundArch(1.7, 3.3);
+      for (const side of [-1, 1]) {
+        addBox(group, [2.6, 5, LEN - 3], [side * (HW + 1.3), 2.5, MID - 0.5], stationCream);
+        addBox(group, [2.9, 0.3, LEN - 2.7], [side * (HW + 1.35), 5.12, MID - 0.5], cream);
+        for (let bay = 0; bay < 8; bay++) {
+          const z = ZE + 2.4 + bay * 2.65;
+          const pane = new THREE.Mesh(arch, archDark);
+          pane.position.set(side * (HW + 2.62), 0.3, z);
+          pane.rotation.y = side * Math.PI / 2;
+          group.add(pane);
+        }
+        balustrade(side > 0 ? HW + 0.1 : -HW - 2.75, side > 0 ? HW + 2.75 : -HW - 0.1, ZE + 1.25, ZW - 2.25, 5.27);
+        // Tall windows in the nave wall above the verandah roof.
+        for (let bay = 0; bay < 5; bay++) {
+          const pane = new THREE.Mesh(rectPane(1.2, 2.2), archDark);
+          pane.position.set(side * (HW + 0.03), 5.9, ZE + 3.5 + bay * 4.4);
+          pane.rotation.y = side * Math.PI / 2;
+          group.add(pane);
+        }
+      }
+      // The round east apse, and its scroll gable with the oculus and cross.
+      const APSE_Z = ZE - 0.6;
+      addCylinder(group, 4.6, 4.6, 8.8, [0, 4.4, APSE_Z], stationCream, 14);
+      addCylinder(group, 4.85, 4.85, 0.4, [0, 9.0, APSE_Z], cream, 14);
+      const gable = new THREE.Shape();
+      gable.moveTo(-4.4, 0);
+      gable.lineTo(-4.4, 0.5);
+      gable.quadraticCurveTo(-2.3, 0.6, -2.0, 2.3);
+      gable.quadraticCurveTo(-1.9, 3.0, -1.3, 3.3);
+      gable.quadraticCurveTo(-1.0, 4.3, 0, 4.4);
+      gable.quadraticCurveTo(1.0, 4.3, 1.3, 3.3);
+      gable.quadraticCurveTo(1.9, 3.0, 2.0, 2.3);
+      gable.quadraticCurveTo(2.3, 0.6, 4.4, 0.5);
+      gable.lineTo(4.4, 0);
+      gable.lineTo(-4.4, 0);
+      const gableGeometry = new THREE.ExtrudeGeometry(gable, { depth: 0.8, bevelEnabled: false, curveSegments: 5 });
+      gableGeometry.translate(0, 0, -0.4);
+      const GABLE_Z = APSE_Z - 1.2;
+      const gableMesh = new THREE.Mesh(gableGeometry, stationCream);
+      gableMesh.position.set(0, 9.2, GABLE_Z);
+      group.add(gableMesh);
+      const ring = new THREE.Mesh(discPane(1.15, 14), cream);
+      ring.position.set(0, 9.2 + 0.6, GABLE_Z - 0.46);
+      ring.rotation.y = Math.PI;
+      group.add(ring);
+      const oculus = new THREE.Mesh(discPane(0.75, 12), archDark);
+      oculus.position.set(0, 9.2 + 1.0, GABLE_Z - 0.52);
+      oculus.rotation.y = Math.PI;
+      group.add(oculus);
+      addBox(group, [0.22, 1.7, 0.22], [0, 9.2 + 4.4 + 0.85, GABLE_Z], bronze);
+      addBox(group, [1.0, 0.2, 0.22], [0, 9.2 + 4.4 + 1.2, GABLE_Z], bronze);
+      // The west bell tower: square base over the door, octagonal belfry,
+      // pointed octagonal spire, oculus and cross.
+      const TZ = ZW - 2.6;
+      addBox(group, [6, 12, 6], [0, 6, TZ + 0.4], stationCream);
+      addBox(group, [6.5, 0.45, 6.5], [0, 12.1, TZ + 0.4], cream);
+      const door = new THREE.Mesh(roundArch(2.2, 4), archDark);
+      door.position.set(0, 0.2, TZ + 3.43);
+      group.add(door);
+      const loft = new THREE.Mesh(roundArch(1.8, 3), archDark);
+      loft.position.set(0, 7.2, TZ + 3.43);
+      group.add(loft);
+      const belfry = addCylinder(group, 2.6, 2.6, 3.8, [0, 12.3 + 1.9, TZ + 0.4], stationCream, 8);
+      belfry.rotation.y = -Math.PI / 8;
+      const opening = roundArch(1.1, 2.5);
+      for (let faceIndex = 0; faceIndex < 8; faceIndex += 2) {
+        const angle = (faceIndex * Math.PI) / 4;
+        const pane = new THREE.Mesh(opening, archDark);
+        pane.position.set(Math.sin(angle) * 2.43, 12.9, TZ + 0.4 + Math.cos(angle) * 2.43);
+        pane.rotation.y = angle;
+        group.add(pane);
+      }
+      const cornice = addCylinder(group, 2.95, 2.95, 0.4, [0, 16.3, TZ + 0.4], cream, 8);
+      cornice.rotation.y = -Math.PI / 8;
+      const spire = addLathe(group, [[2.55, 0], [2.6, 1.4], [2.3, 3.0], [1.6, 4.5], [0.7, 5.6], [0.06, 6.1]], 8, [0, 16.5, TZ + 0.4], cream, true);
+      spire.rotation.y = -Math.PI / 8;
+      const spireEye = new THREE.Mesh(discPane(0.45, 10), archDark);
+      spireEye.position.set(0, 18.0, TZ + 0.4 + 2.42);
+      spireEye.rotation.x = -0.12;
+      group.add(spireEye);
+      addBox(group, [0.2, 1.8, 0.2], [0, 22.6 + 0.9, TZ + 0.4], bronze);
+      addBox(group, [0.95, 0.2, 0.2], [0, 22.6 + 1.25, TZ + 0.4], bronze);
+      solid(0, TZ + 0.4, 3.3, 22.6);
+      colliderTop = WALL + 1.3;
+      perchTarget = [0, TZ + 0.4];
+      // The walled graveyard: paving, rows of flat white slabs, a low white
+      // wall, and its trees and palms.
+      const YARD: Array<[number, number, number, number]> = [[8.6, 22, -12, 21], [-8, 8.6, 15, 21]];
+      for (const [x0, x1, z0, z1] of YARD) {
+        addBox(group, [x1 - x0, 0.1, z1 - z0], [(x0 + x1) / 2, 0.05, (z0 + z1) / 2], concrete);
+        clearSite((x0 + x1) / 2, (z0 + z1) / 2, (x1 - x0) / 2, (z1 - z0) / 2);
+      }
+      for (const [ax, az, bx, bz] of [[22, -12, 22, 21], [22, 21, -8, 21], [-8, 21, -8, 15], [8.6, -12, 22, -12]] as const) {
+        const length = Math.hypot(bx - ax, bz - az);
+        const wall = addBox(group, [0.35, 1.8, length], [(ax + bx) / 2, 0.9, (az + bz) / 2], whiteStone);
+        wall.rotation.y = Math.atan2(bx - ax, bz - az);
+      }
+      for (let row = 0; row < 4; row++) {
+        for (let slot = 0; slot < 7; slot++) {
+          const z = -9 + slot * 3.3 + (row % 2) * 0.6;
+          const x = 10.5 + row * 2.6;
+          if (z > 15 && x < 13) continue;
+          addBox(group, [1.2, 0.35, 2.2], [x, 0.27, z], (row + slot) % 3 === 0 ? bronze : whiteStone);
+        }
+      }
+      for (let slot = 0; slot < 5; slot++) addBox(group, [2.2, 0.35, 1.2], [-5 + slot * 2.6, 0.27, 18.2], slot % 2 ? whiteStone : bronze);
+      addLandmarkTree(group, 19, -6, 4.4, 5.6, landmarkLightCanopy);
+      addLandmarkTree(group, 18.5, 14, 4.8, 6.0, landmarkLightCanopy);
+      addPalm(group, 12, 19, 11, 0.1, 0.6);
+      addPalm(group, 20.5, 4, 10, 0.12, 2.2);
+    } else if (landmark.kind === "bahadur-shah-park") {
+      // Bahadur Shah Park, Old Dhaka: a 101 × 53 m oval of dense old trees
+      // inside an iron railing, ringed by a roundabout (OSM way 34339923; the
+      // canopy is its DHAKA_PARKS row). The group sits on the 1857 Sepoy
+      // memorial (OSM 948448576) in the north half: a white pavilion on a
+      // grey plinth, a tall pointed arch in each face between chamfered corner
+      // piers with granite skirts, the piers leaning in above the cornice to
+      // a tapering spire capped by a small dome. The pink-grey Hafizullah
+      // obelisk stands 30 m south. Heading 0: local +Z is south.
+      colliderTop = 11.2;
+      const PLINTH = 1.2;
+      addBox(group, [13, PLINTH, 13], [0, PLINTH / 2, 0], concrete);
+      for (let side = 0; side < 4; side++) {
+        const angle = (side * Math.PI) / 2;
+        const step = addBox(group, [5, 0.45, 1.6], [Math.sin(angle) * 7.2, 0.22, Math.cos(angle) * 7.2], concrete);
+        step.rotation.y = angle;
+      }
+      // Packed-earth ground round the plinth, where the trees thin out.
+      addCylinder(group, 11, 11, 0.06, [0, 0.03, 0], packedEarth, 18);
+      // Four arched faces: a wall with a tall pointed opening cut from it.
+      const ARCH_W = 5.6;
+      const ARCH_H = 8.2;
+      const WALL_H = 9.6;
+      const face = new THREE.Shape();
+      const half = ARCH_W / 2;
+      const spring = ARCH_H - ARCH_W * 0.72;
+      face.moveTo(-5.2, 0);
+      face.lineTo(-half, 0);
+      face.lineTo(-half, spring);
+      face.quadraticCurveTo(-half, ARCH_H - ARCH_W * 0.2, 0, ARCH_H);
+      face.quadraticCurveTo(half, ARCH_H - ARCH_W * 0.2, half, spring);
+      face.lineTo(half, 0);
+      face.lineTo(5.2, 0);
+      face.lineTo(5.2, WALL_H);
+      face.lineTo(-5.2, WALL_H);
+      face.lineTo(-5.2, 0);
+      const faceGeometry = new THREE.ExtrudeGeometry(face, { depth: 0.9, bevelEnabled: false, curveSegments: 6 });
+      faceGeometry.translate(0, 0, -0.45);
+      for (let side = 0; side < 4; side++) {
+        const angle = (side * Math.PI) / 2;
+        const wall = new THREE.Mesh(faceGeometry, whiteStone);
+        wall.position.set(Math.sin(angle) * 4.55, PLINTH, Math.cos(angle) * 4.55);
+        wall.rotation.y = angle;
+        group.add(wall);
+      }
+      // Chamfered corner piers with their grey granite skirts, rising past
+      // the cornice and leaning in as the ribs of the spire.
+      for (const cx of [-1, 1]) {
+        for (const cz of [-1, 1]) {
+          addCylinder(group, 1.25, 1.35, WALL_H + 0.8, [cx * 4.7, PLINTH + (WALL_H + 0.8) / 2, cz * 4.7], whiteStone, 8);
+          addCylinder(group, 1.5, 1.5, 1.5, [cx * 4.7, PLINTH + 0.75, cz * 4.7], concrete, 8);
+          addBeam(group, [cx * 4.6, PLINTH + WALL_H + 0.6, cz * 4.6], [cx * 1.15, PLINTH + 15.2, cz * 1.15], 1.0, 1.0, whiteStone, 0.6);
+        }
+      }
+      addBox(group, [10.8, 0.6, 10.8], [0, PLINTH + WALL_H + 0.3, 0], whiteStone);
+      // The tapering spire, nearly round in plan as seen from the air, its
+      // small dome and finial.
+      addCylinder(group, 1.5, 4.5, 5.2, [0, PLINTH + WALL_H + 0.6 + 2.6, 0], whiteStone, 8);
+      addCylinder(group, 1.7, 1.7, 0.4, [0, PLINTH + 15.6, 0], whiteStone, 8);
+      addLathe(group, domeProfile(1.55, 1.7, 0.1, 7), 10, [0, PLINTH + 15.8, 0], whiteStone);
+      addFinial(group, [0, PLINTH + 17.4, 0], 0.4, whiteStone);
+      solid(0, 0, 2.2, PLINTH + 18.4);
+      clearSite(0, 0, 11, 11);
+      // The Khawja Hafizullah obelisk.
+      const OBZ = 30;
+      addBox(group, [2.6, 1.1, 2.6], [0, 0.55, OBZ], concrete);
+      addBox(group, [1.6, 0.8, 1.6], [0, 1.5, OBZ], roofTerrace);
+      const shaft = addCylinder(group, 0.42, 0.78, 5.2, [0, 1.9 + 2.6, OBZ], roofTerrace, 4);
+      shaft.rotation.y = Math.PI / 4;
+      const tip = addCone(group, 0.42, 0.7, [0, 7.85, OBZ], roofTerrace, 4);
+      tip.rotation.y = Math.PI / 4;
+      solid(0, OBZ, 1.4, 8.2);
+      clearSite(0, OBZ, 4, 4);
+      // The iron railing round the oval.
+      const oval = ([
+        [23.7096093, 90.4121417], [23.7096654, 90.4122219], [23.7096842, 90.4123056], [23.7096508, 90.4124704],
+        [23.7095872, 90.4125449], [23.7094792, 90.4126069], [23.7094064, 90.4126228], [23.709255, 90.4126106],
+        [23.7090742, 90.4125763], [23.7089328, 90.412542], [23.708807, 90.4124905], [23.7087677, 90.4123875],
+        [23.7087677, 90.4123102], [23.7087992, 90.41219], [23.7088542, 90.4121128], [23.708972, 90.4120871],
+        [23.7091685, 90.4120956], [23.7094593, 90.4121042],
+      ] as const).map(([lat, lon]) => toLocal(lat, lon));
+      addSweptBox(group, [...oval, oval[0]].map(([x, z]) => [x, 1.3, z] as QuadPoint), 0.06, 1.3, recess);
+      addSweptBox(group, [...oval, oval[0]].map(([x, z]) => [x, 0.35, z] as QuadPoint), 0.25, 0.35, concrete);
+    } else if (landmark.kind === "rose-garden-palace") {
+      // Rose Garden Palace, Tikatuli (1888; OSM 439770540, 26 × 15 m, long axis
+      // 174°). A brilliant white two-storey "wedding cake" villa: giant fluted
+      // pilasters run through both floors between green-shuttered arched
+      // windows, balconies hang on the first floor, and an urn-topped
+      // balustrade with curved pediments crowns the roof. Over the centre of
+      // the west front an open octagonal belvedere carries a small white dome.
+      // A twin stair climbs to the projecting centre bay, and a lawn with a
+      // round fountain and a statue runs west to the dark rectangular pond
+      // (OSM 439770165), with a bathing ghat on the palace axis. The masses
+      // are footprint-anchored, so the group is not turned; `frame` gives the
+      // palace's own axes, local +Z facing west (264°).
+      const PALACE = 439770540;
+      const palace = anchor(PALACE);
+      const H = palace?.height ?? 12.5;
+      const PARAPET = H + 1.1;
+      // Plinth, first-floor band, cornice, the balustrade and its rail, roof.
+      slab(PALACE, 0, 1.3, 1.03, whiteStone);
+      slab(PALACE, 5.85, 0.45, 1.02, whiteStone);
+      slab(PALACE, H - 0.6, 0.75, 1.04, whiteStone);
+      slab(PALACE, H + 0.15, 0.95, 1.005, marble);
+      slab(PALACE, PARAPET, 0.18, 1.03, whiteStone);
+      slab(PALACE, PARAPET + 0.18, 0.08, 0.93, roofGrey);
+      const palaceWalls = walls(PALACE);
+      // Green shutters under white arched surrounds on both floors, a giant
+      // pilaster between every bay, dark fanlights over the upper windows and
+      // the gaps of the roof balustrade.
+      addBays(group, palaceWalls, {
+        bay: 3.2,
+        margin: 0.9,
+        storeys: [
+          { y: 1.75, opening: roundArch(1.15, 2.7), surround: roundArch(1.6, 3.1) },
+          { y: 6.9, opening: rectPane(1.15, 2.1), surround: roundArch(1.6, 3.35) },
+        ],
+        opening: seatGreen,
+        surround: whiteStone,
+        pier: { width: 0.75, depth: 0.5, bottom: 1.3, top: H - 0.55, material: whiteStone },
+      });
+      addBays(group, palaceWalls, {
+        bay: 3.2,
+        margin: 0.9,
+        storeys: [{ y: 9.1, opening: roundArch(1.0, 0.5) }],
+        opening: archDark,
+      });
+      addBays(group, palaceWalls, { bay: 0.62, margin: 0.35, minEdge: 2, storeys: [{ y: H + 0.3, opening: rectPane(0.3, 0.62) }], opening: archDark });
+
+      const body = frame(PALACE, [-0.995, 0.105]);
+      if (body) {
+        const { g, hz } = body;
+        const FRONT = hz + 0.8;
+        // A first-floor balcony: slab, end posts, rails and balusters.
+        const balcony = (x: number, z: number, width: number, yaw = 0) => {
+          const holder = new THREE.Group();
+          holder.position.set(x, 0, z);
+          holder.rotation.y = yaw;
+          g.add(holder);
+          addBox(holder, [width, 0.32, 1.15], [0, 6.0, 0.55], whiteStone);
+          addBox(holder, [width * 0.8, 0.5, 0.5], [0, 5.6, 0.35], whiteStone);
+          addBox(holder, [width, 0.14, 0.2], [0, 6.24, 1.02], marble);
+          addBox(holder, [width + 0.1, 0.14, 0.24], [0, 7.08, 1.02], marble);
+          for (const side of [-1, 1]) addBox(holder, [0.24, 0.9, 1.0], [side * (width / 2 - 0.12), 6.6, 0.6], marble);
+          const count = Math.round(width / 0.36);
+          for (let index = 1; index < count; index++) addBox(holder, [0.12, 0.72, 0.12], [-width / 2 + (index * width) / count, 6.66, 1.02], marble);
+        };
+        // A curved pediment: a segmental hood standing on the balustrade.
+        const pediment = (x: number, z: number, width: number, height: number, depth: number) => {
+          const shape = new THREE.Shape();
+          shape.moveTo(-width / 2, 0);
+          shape.lineTo(width / 2, 0);
+          shape.lineTo(width / 2, height * 0.38);
+          shape.quadraticCurveTo(width * 0.36, height * 1.18, 0, height);
+          shape.quadraticCurveTo(-width * 0.36, height * 1.18, -width / 2, height * 0.38);
+          shape.lineTo(-width / 2, 0);
+          const geometry = new THREE.ExtrudeGeometry(shape, { depth, bevelEnabled: false, curveSegments: 5 });
+          geometry.translate(0, 0, -depth / 2);
+          const mesh = new THREE.Mesh(geometry, marble);
+          mesh.position.set(x, PARAPET, z);
+          g.add(mesh);
+          const shell = new THREE.Mesh(discPane(height * 0.24, 10), whiteStone);
+          shell.position.set(x, PARAPET + height * 0.22, z + depth / 2 + 0.03);
+          g.add(shell);
+        };
+        // An urn on a pedestal.
+        const urn = (x: number, z: number) => {
+          addBox(g, [0.62, 0.9, 0.62], [x, PARAPET + 0.45, z], marble);
+          addBox(g, [0.74, 0.12, 0.74], [x, PARAPET + 0.96, z], whiteStone);
+          addLathe(g, [[0.12, 0], [0.32, 0.18], [0.36, 0.45], [0.2, 0.72], [0.1, 0.78], [0.16, 0.9], [0.001, 1.25]], 6, [x, PARAPET + 1.02, z], marble);
+        };
+
+        // The projecting centre bay: paired round giant columns, triple-arched
+        // entrance, three arched windows over a bowed balcony, and the large
+        // curved pediment in front of the belvedere.
+        addBox(g, [7, H, 0.8], [0, H / 2, hz + 0.4], marble);
+        addBox(g, [7.5, 1.3, 1.3], [0, 0.65, hz + 0.45], whiteStone);
+        addBox(g, [7.6, 0.75, 1.3], [0, H - 0.22, hz + 0.45], whiteStone);
+        addBox(g, [7.2, 0.95, 0.95], [0, H + 0.62, hz + 0.45], marble);
+        addBox(g, [7.7, 0.18, 1.4], [0, PARAPET + 0.09, hz + 0.45], whiteStone);
+        for (const side of [-1, 1]) {
+          for (const x of [2.55, 3.3]) {
+            const cx = side * x;
+            addBox(g, [0.95, 0.55, 0.95], [cx, 1.57, FRONT + 0.4], whiteStone);
+            addCylinder(g, 0.34, 0.38, H - 2.6, [cx, 1.85 + (H - 2.6) / 2, FRONT + 0.4], marble, 8);
+            addBox(g, [1.0, 0.65, 1.0], [cx, H - 0.6, FRONT + 0.4], whiteStone);
+          }
+        }
+        for (const x of [-1.75, 0, 1.75]) {
+          const door = new THREE.Mesh(roundArch(1.25, 3.0), archDark);
+          door.position.set(x, 1.3, FRONT + 0.03);
+          g.add(door);
+          const frameArch = new THREE.Mesh(roundArch(1.6, 3.4), whiteStone);
+          frameArch.position.set(x, 6.55, FRONT + 0.02);
+          g.add(frameArch);
+          const shutter = new THREE.Mesh(roundArch(1.15, 3.0), seatGreen);
+          shutter.position.set(x, 6.75, FRONT + 0.05);
+          g.add(shutter);
+        }
+        addCylinder(g, 2.25, 1.6, 0.34, [0, 6.0, FRONT], whiteStone, 14);
+        addCylinder(g, 2.15, 2.15, 0.9, [0, 6.62, FRONT], marble, 14);
+        addCylinder(g, 2.3, 2.3, 0.14, [0, 7.13, FRONT], whiteStone, 14);
+        pediment(0, FRONT - 0.3, 7.4, 2.5, 0.6);
+
+        // Balconies on the flanking bays and the set-back wings.
+        for (const side of [-1, 1]) balcony(side * 5.6, hz, 3.2);
+        balcony(-10.3, 3.15, 3.4, 0.02);
+        balcony(10.45, 4.5, 3.4, -0.18);
+        for (const side of [-1, 1]) pediment(side * 5.6, hz + 0.05, 3.6, 1.45, 0.45);
+
+        // Twelve urns on the balustrade: the corners and the centre bay.
+        for (const [x, z] of [
+          [-8.2, hz + 0.2], [8.1, hz + 0.2], [-3.75, FRONT], [3.75, FRONT],
+          [-13.2, 3.2], [13.2, 5.0], [-13.2, -4.15], [13.2, -3.4],
+          [-6.4, -7.4], [8.8, -6.85], [-7.5, 3.05], [7.7, 4.0],
+        ] as const) urn(x, z);
+
+        // The octagonal belvedere: an open arcade on corner colonnettes, a
+        // cornice, a little balustrade, the white dome and its finial.
+        const BZ = hz - 1.9;
+        const base = PARAPET + 0.18;
+        addBox(g, [5.2, 0.7, 5.2], [0, base + 0.35, BZ], marble);
+        const drumBase = base + 0.7;
+        const DRUM = 3.4;
+        const core = addCylinder(g, 1.85, 1.85, DRUM, [0, drumBase + DRUM / 2, BZ], marble, 8);
+        core.rotation.y = Math.PI / 8;
+        const opening = roundArch(1.25, 2.6);
+        for (let face = 0; face < 8; face++) {
+          const angle = (face / 8) * Math.PI * 2;
+          const pane = new THREE.Mesh(opening, archDark);
+          pane.position.set(Math.sin(angle) * 1.73, drumBase + 0.25, BZ + Math.cos(angle) * 1.73);
+          pane.rotation.y = angle;
+          g.add(pane);
+          const corner = angle + Math.PI / 8;
+          addCylinder(g, 0.2, 0.22, DRUM, [Math.sin(corner) * 2.25, drumBase + DRUM / 2, BZ + Math.cos(corner) * 2.25], whiteStone, 6);
+        }
+        const cornice = addCylinder(g, 2.75, 2.45, 0.45, [0, drumBase + DRUM + 0.22, BZ], whiteStone, 8);
+        cornice.rotation.y = Math.PI / 8;
+        const rail = addCylinder(g, 2.45, 2.45, 0.55, [0, drumBase + DRUM + 0.72, BZ], marble, 8);
+        rail.rotation.y = Math.PI / 8;
+        const domeBase = drumBase + DRUM + 0.95;
+        addCylinder(g, 1.9, 2.0, 0.5, [0, domeBase + 0.1, BZ], marble, 12);
+        addLathe(g, domeProfile(1.95, 2.3, 0.1, 8), 12, [0, domeBase + 0.35, BZ], marble);
+        addCylinder(g, 0.3, 0.42, 0.6, [0, domeBase + 2.6, BZ], whiteStone, 6);
+        addFinial(g, [0, domeBase + 2.85, BZ], 0.42, marble);
+
+        // The twin stair: a landing at the centre door and two flights
+        // running out along the front to the lawn.
+        const STAIR_Z = FRONT + 1.5;
+        addBox(g, [3.6, 1.3, 1.6], [0, 0.65, STAIR_Z], whiteStone);
+        for (const side of [-1, 1]) {
+          for (let step = 0; step < 6; step++) {
+            const top = 1.3 * (1 - (step + 1) / 7);
+            addBox(g, [0.5, top, 1.6], [side * (2.05 + step * 0.48), top / 2, STAIR_Z], whiteStone);
+          }
+          const sideRail = addBox(g, [3.4, 0.18, 0.2], [side * 3.1, 1.45, STAIR_Z + 0.8], marble);
+          sideRail.rotation.z = side * -0.38;
+          addBox(g, [0.4, 1.1, 0.4], [side * 4.85, 0.55, STAIR_Z + 0.8], marble);
+        }
+
+        // Clipped hedges along the front, open at the stair, and a walk on the
+        // axis down to the bathing ghat on the pond's east bank.
+        for (const side of [-1, 1]) addBox(g, [8.5, 0.75, 0.9], [side * 9.5, 0.37, hz + 4.6], landmarkLightCanopy);
+        addBox(g, [3.2, 0.1, 29], [0, 0.1, hz + 4.6 + 14.2], whiteStone).castShadow = false;
+        addBox(g, [6.4, 0.45, 2.4], [0, 0.22, 33.6], whiteStone);
+        for (const side of [-1, 1]) addBox(g, [0.5, 1.0, 3.2], [side * 3.4, 0.5, 33.8], whiteStone);
+        addBox(g, [6.0, 0.18, 0.7], [0, 0.11, 35.1], whiteStone);
+
+        g.updateMatrix();
+        const tower = new THREE.Vector3(0, 0, BZ).applyMatrix4(g.matrix);
+        solid(tower.x, tower.z, 2.8, domeBase + 4.5);
+        perchTarget = [tower.x, tower.z];
+      }
+      colliderTop = PARAPET;
+
+      // The walled garden (OSM 439770049): one lawn under the whole open part
+      // (the pond's water stands 5 cm above it), the round fountain and the
+      // statue on the lawn, and palms round the pond. In group (world-aligned)
+      // metres from the palace's centre.
+      addBox(group, [105, 0.1, 64], [-20.5, 0.02, 4], lawn).castShadow = false;
+      addBox(group, [18, 0.1, 33], [41, 0.02, 13.5], lawn).castShadow = false;
+      clearSite(-20.5, 4, 52.5, 32);
+      // The garden's boundary wall, just inside the lawn's edge.
+      const WALL: Array<[number, number]> = [[-72.8, -27.8], [31.8, -27.8], [31.8, -2.8], [49.8, -2.8], [49.8, 29.8], [31.8, 29.8], [31.8, 35.8], [-72.8, 35.8]];
+      WALL.forEach(([ax, az], index) => {
+        const [bx, bz] = WALL[(index + 1) % WALL.length];
+        const length = Math.hypot(bx - ax, bz - az);
+        const wall = addBox(group, [0.35, 2.2, length + 0.35], [(ax + bx) / 2, 1.1, (az + bz) / 2], whiteStone);
+        wall.rotation.y = Math.atan2(bx - ax, bz - az);
+      });
+      clearSite(41, 13.5, 9, 16.5);
+      addCylinder(group, 1.45, 1.55, 0.55, [-15, 0.27, 7.6], whiteStone, 14);
+      addCylinder(group, 1.2, 1.2, 0.1, [-15, 0.5, 7.6], archDark, 14);
+      addCylinder(group, 0.25, 0.4, 0.9, [-15, 0.95, 7.6], marble, 6);
+      addBox(group, [1.4, 1.9, 1.4], [-17, 0.95, -10], whiteStone);
+      addBox(group, [1.7, 0.25, 1.7], [-17, 2.0, -10], whiteStone);
+      addCylinder(group, 0.26, 0.42, 1.7, [-17, 2.95, -10], marble, 6);
+      addLathe(group, domeProfile(0.24, 0.4, 0, 4), 6, [-17, 3.8, -10], marble);
+      for (const [x, z, height, lean, turn] of [
+        [-62, -11, 12, 0.1, 0.4], [-52, -10.5, 11, 0.06, 1.6], [-41, -11, 12.5, 0.12, 2.6], [-29, -13, 10.5, 0.08, 3.4],
+        [-69, 2, 11.5, 0.1, 4.2], [-69.5, 16, 12, 0.07, 5.1], [-69, 30, 10.5, 0.11, 0.9],
+        [-29.5, 28, 11, 0.09, 2.1], [-26, -21, 9.5, 0.05, 4.8], [14, -12, 10.5, 0.08, 1.2], [14, 14, 11.5, 0.1, 3.9],
+      ] as const) addPalm(group, x, z, height, lean, turn);
+      for (const [x, z, radius, trunk] of [
+        [-50, -22, 5.2, 5.8], [-35, -24, 4.6, 5.4], [-64, -22, 4.8, 5.6], [27, 10, 5.0, 5.6], [24, 26, 4.6, 5.2],
+        [42, 4, 4.4, 5.0], [44, 22, 4.8, 5.4], [-8, 30, 4.2, 5.0],
+      ] as const) addLandmarkTree(group, x, z, radius, trunk, landmarkLightCanopy);
     }
 
     bakeGroup(group);
     group.updateMatrixWorld(true);
     group.traverse((object) => { object.matrixAutoUpdate = false; });
     const bounds = allBounds.get(landmark.kind)!;
-    colliders.push({
-      x: (bounds.minX + bounds.maxX) / 2,
-      z: (bounds.minZ + bounds.maxZ) / 2,
-      halfWidth: Math.max(3, (bounds.maxX - bounds.minX) / 2),
-      halfDepth: Math.max(3, (bounds.maxZ - bounds.minZ) / 2),
-      top: colliderTop,
-    });
+    if (boundsCollider) {
+      colliders.push({
+        x: (bounds.minX + bounds.maxX) / 2,
+        z: (bounds.minZ + bounds.maxZ) / 2,
+        halfWidth: Math.max(3, (bounds.maxX - bounds.minX) / 2),
+        halfDepth: Math.max(3, (bounds.maxZ - bounds.minZ) / 2),
+        top: colliderTop,
+      });
+    }
+    // Generic plots keep a forecourt off every solid part of the landmark;
+    // sites that stand in a compound keep a wider one.
+    const plotGap = LANDMARK_PLOT_GAP[landmark.kind] ?? 16;
+    for (let index = colliderStart; index < colliders.length; index++) {
+      if (colliders[index].top > 0) colliders[index].gap = plotGap;
+    }
     const world = coordinatesToWorld(landmark.lat, landmark.lon);
     const perchWorldX = perchTarget[0] !== 0 || perchTarget[1] !== 0
       ? group.position.x + perchTarget[0] * cosH + perchTarget[1] * sinH
@@ -6221,6 +12144,13 @@ function addCity(scene: THREE.Scene) {
   });
   const turfGeometries: THREE.BufferGeometry[] = [];
   const pathGeometries: THREE.BufferGeometry[] = [];
+  // Open campus grounds read as one sweep of lawn under their park rows.
+  for (const ground of DHAKA_OPEN_GROUNDS) {
+    const groundGeo = new THREE.PlaneGeometry(ground.maxX - ground.minX, ground.maxZ - ground.minZ);
+    groundGeo.rotateX(-Math.PI / 2);
+    groundGeo.translate((ground.minX + ground.maxX) / 2, 0.19, (ground.minZ + ground.maxZ) / 2);
+    turfGeometries.push(groundGeo);
+  }
   DHAKA_PARKS.forEach((park, index) => {
     const lawnGeo = new THREE.CircleGeometry(1, 28);
     lawnGeo.scale(park.rx, park.rz, 1);
@@ -6639,11 +12569,16 @@ function addCity(scene: THREE.Scene) {
   const perchMaterial = new THREE.MeshStandardMaterial({ color: 0x4a5552, roughness: 0.72, metalness: 0.2 });
   const perchMarkers: THREE.Group[] = [];
   for (const [index, perch] of perches.entries()) {
-    const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.42, 17, 12), perchMaterial);
-    bar.position.copy(perch.position);
-    bar.rotation.x = Math.PI / 2;
-    bar.castShadow = true;
-    scene.add(bar);
+    // Area perches hang in the sky and need a bar to stand on; landmark
+    // perches sit on a built roof, dome or sculpture, so they keep only the
+    // glowing ring (a 17 m bar would spear through a small monument).
+    if (index < AREA_LANDMARKS.length) {
+      const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.42, 17, 12), perchMaterial);
+      bar.position.copy(perch.position);
+      bar.rotation.x = Math.PI / 2;
+      bar.castShadow = true;
+      scene.add(bar);
+    }
 
     const marker = new THREE.Group();
     marker.position.copy(perch.position).add(new THREE.Vector3(0, 3.2, 0));
@@ -6828,13 +12763,15 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
       waterAreas.push(geometry);
       continue;
     }
+    const ribbonWidth = waterLineWidth(feature.points);
+    if (ribbonWidth === 0) continue;
     for (let index = 1; index < feature.points.length; index++) {
       const [x1, z1] = feature.points[index - 1];
       const [x2, z2] = feature.points[index];
       const length = Math.hypot(x2 - x1, z2 - z1);
       if (length < 1) continue;
       // Top face only, staggered slightly per segment to avoid corner overlap z-fighting.
-      const geometry = new THREE.PlaneGeometry(length, 8);
+      const geometry = new THREE.PlaneGeometry(length, ribbonWidth);
       geometry.rotateX(-Math.PI / 2);
       geometry.rotateY(-Math.atan2(z2 - z1, x2 - x1));
       geometry.translate((x1 + x2) / 2, 0.64 + waterJitter + (index & 1) * 0.004, (z1 + z2) / 2);
@@ -6906,11 +12843,14 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
       const zs = feature.points.map(([, z]) => z);
       addToClearanceGrid(waterAreaClearanceGrid, feature.points, Math.min(...xs), Math.max(...xs), Math.min(...zs), Math.max(...zs));
     }
-    const waterEdgeCount = feature.area && feature.points.length >= 3 ? feature.points.length : feature.points.length - 1;
+    const waterIsArea = feature.area && feature.points.length >= 3;
+    const waterWidth = waterIsArea ? 8 : waterLineWidth(feature.points);
+    const waterRadius = waterWidth === 3 ? 3 : 6;
+    const waterEdgeCount = waterWidth === 0 ? 0 : waterIsArea ? feature.points.length : feature.points.length - 1;
     for (let index = 0; index < waterEdgeCount; index++) {
       const [x1, z1] = feature.points[index];
       const [x2, z2] = feature.points[(index + 1) % feature.points.length];
-      addToClearanceGrid(waterClearanceGrid, { x1, z1, x2, z2, radius: 6 }, Math.min(x1, x2) - 6, Math.max(x1, x2) + 6, Math.min(z1, z2) - 6, Math.max(z1, z2) + 6);
+      addToClearanceGrid(waterClearanceGrid, { x1, z1, x2, z2, radius: waterRadius }, Math.min(x1, x2) - waterRadius, Math.max(x1, x2) + waterRadius, Math.min(z1, z2) - waterRadius, Math.max(z1, z2) + waterRadius);
     }
     await yieldIfNeeded(isCancelled);
   }
@@ -7935,7 +13875,8 @@ export function BirdFlight() {
         textures: renderer.info.memory.textures,
         objects: scene.children.reduce((count, child) => count + 1 + child.children.length, 0),
         proceduralTiles: (scene.userData.proceduralDistrictTiles as ProceduralDistrictTile[] | undefined)?.length ?? 0,
-        visibleTiles: (scene.userData.proceduralDistrictTiles as ProceduralDistrictTile[] | undefined)?.filter((tile) => tile.group.visible).length ?? 0,
+        visibleTiles: (scene.userData.proceduralDistrictTiles as ProceduralDistrictTile[] | undefined)?.filter((tile) => tile.detail === 2).length ?? 0,
+        farTiles: (scene.userData.proceduralDistrictTiles as ProceduralDistrictTile[] | undefined)?.filter((tile) => tile.detail === 1).length ?? 0,
         maxFrameMs,
         longFrames,
         mapBuildMs: Number.parseFloat(renderer.domElement.dataset.mapBuildMs ?? "") || null,
@@ -8016,7 +13957,13 @@ export function BirdFlight() {
       if (!landmark) return false;
       const world = coordinatesToWorld(landmark.lat, landmark.lon);
       inspectionTarget = new THREE.Vector3(world.x, Math.max(6, landmark.altitude * 0.42), world.y);
-      inspectionCameraOffset = ["parliament", "lalbagh-fort", "ahsan-manzil"].includes(kind) ? 190 : Math.max(105, landmark.altitude * 1.45);
+      inspectionCameraOffset = kind === "airport"
+        ? 900 // the runway and both terminals span 1.3 × 3.2 km
+        : ["parliament", "lalbagh-fort", "ahsan-manzil", "zia-udyan", "dhaka-medical", "kamalapur-station", "military-museum", "bcfcc", "supreme-court", "sadarghat-terminal", "rayer-bazar-memorial", "shishu-park", "baldha-garden", "science-museum", "air-force-museum", "sonargaon-hotel", "pm-office"].includes(kind) ? 190
+          : kind === "jamuna-future-park" || kind === "national-zoo" || kind === "army-stadium" || kind === "national-stadium" || kind === "botanical-garden" ? 260
+          : kind === "kuril-flyover" ? 560
+          : kind === "hatirjheel-bridge" || kind === "gulshan-central-mosque" ? 170
+          : kind === "sher-e-bangla-stadium" ? 300 : Math.max(105, landmark.altitude * 1.45);
       return true;
     };
     focusLandmarkRef.current = focusLandmark;
@@ -8906,17 +14853,12 @@ export function BirdFlight() {
         const districtTiles = scene.userData.proceduralDistrictTiles as ProceduralDistrictTile[] | undefined;
         const tileVisibilityRadius = scene.userData.proceduralTileVisibilityRadius as number | undefined;
         if (districtTiles && tileVisibilityRadius) {
-          const visibilitySquared = tileVisibilityRadius ** 2;
           const visibilityAnchor = inspectionTarget ?? crow.position;
           let visibilityChanged = false;
           for (const tile of districtTiles) {
-            const dx = tile.centerX - visibilityAnchor.x;
-            const dz = tile.centerZ - visibilityAnchor.z;
-            const visible = dx * dx + dz * dz < visibilitySquared;
-            if (tile.group.visible !== visible) {
-              tile.group.visible = visible;
-              if (visible) scene.add(tile.group);
-              else scene.remove(tile.group);
+            const detail = proceduralTileDetailAt(tile, visibilityAnchor.x, visibilityAnchor.z, tileVisibilityRadius);
+            if (tile.detail !== detail) {
+              setProceduralTileDetail(scene, tile, detail);
               visibilityChanged = true;
             }
           }
