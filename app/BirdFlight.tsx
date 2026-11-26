@@ -133,6 +133,7 @@ type DhakaLandmark = AreaLandmark & {
     | "army-stadium"
     | "tsc-raju"
     | "doyel-chattar"
+    | "shapla-chattar"
     | "three-leaders-mausoleum"
     | "hussaini-dalan"
     | "sadarghat-terminal"
@@ -579,6 +580,8 @@ const DHAKA_LANDMARKS: DhakaLandmark[] = [
   { label: "TSC & Raju Memorial", shortLabel: "TSC", lat: 23.73225, lon: 90.3959, altitude: 16, heading: -2.985, kind: "tsc-raju" },
   // OSM 296816607, the magpie-robin pair in the roundabout basin; beaks to the NW.
   { label: "Doyel Chattar", shortLabel: "DOY", lat: 23.727996, lon: 90.400293, altitude: 9, heading: -2.356, kind: "doyel-chattar" },
+  // Centre of the Motijheel roundabout (OSM ways 15491646 and 1099855656).
+  { label: "Shapla Chattar", shortLabel: "SHP", lat: 23.726557, lon: 90.421619, altitude: 13, heading: 0, kind: "shapla-chattar" },
   // OSM 296802766, the 60 × 33 m plinth (long axis 167°) under three hypar
   // shells; the main stair faces WSW (257°) toward the Shahbag road.
   { label: "Mausoleum of Three Leaders", shortLabel: "TNM", lat: 23.729107, lon: 90.399921, altitude: 14, heading: -1.344, kind: "three-leaders-mausoleum" },
@@ -2760,6 +2763,7 @@ function addImmediateCityMass(scene: THREE.Scene, roads: OsmMapData["roads"]) {
     "army-stadium": 140,
     "gulshan-central-mosque": 95,
     "doyel-chattar": 28,
+    "shapla-chattar": 24,
     "tsc-raju": 70,
     "hatirjheel-bridge": 60,
     "three-leaders-mausoleum": 70,
@@ -5436,6 +5440,8 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
         "army-stadium": [76, 110],
         // The blue basin on its island.
         "doyel-chattar": [9.5, 9.5],
+        // The fountain basin on the roundabout island.
+        "shapla-chattar": [8, 8],
         // World half extents of the plinth (its 60 m side runs at 167°).
         "three-leaders-mausoleum": [23, 33],
         // These sites carry their own collision boxes; the extents only
@@ -5565,6 +5571,7 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
     "gulshan-central-mosque",
     "army-stadium",
     "doyel-chattar",
+    "shapla-chattar",
     "three-leaders-mausoleum",
     "hussaini-dalan",
     "sadarghat-terminal",
@@ -10383,6 +10390,60 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
       solid(0, 0, 4, 6.9);
       clearSite(0, 0, 14, 14);
       perchTarget = [2.4, 0.6];
+    } else if (landmark.kind === "shapla-chattar") {
+      // Shapla Chattar, Motijheel: a white water lily (shapla, the national
+      // flower) in three rings of pointed petals round a yellow heart, raised
+      // on a stem from a round fountain basin, on the lawn island of the
+      // roundabout. The roundabout's centreline radius is about 25 m.
+      colliderTop = 1.2;
+      addCylinder(group, 12.5, 12.5, 0.14, [0, 0.07, 0], lawn, 36).castShadow = false;
+      addLathe(group, [[8.2, 0.1], [8.2, 1.1], [7.5, 1.1], [7.5, 0.5]], 40, [0, 0, 0], whiteStone);
+      addCylinder(group, 7.55, 7.55, 0.2, [0, 0.75, 0], water, 36).castShadow = false;
+      // Lily pads floating round the stem.
+      for (let pad = 0; pad < 6; pad++) {
+        const angle = (pad / 6) * Math.PI * 2 + 0.4;
+        const reach = 4.4 + (pad % 2) * 1.5;
+        addCylinder(group, 1.25, 1.25, 0.08, [Math.cos(angle) * reach, 0.9, Math.sin(angle) * reach], lawn, 12).castShadow = false;
+      }
+      // Stem and calyx.
+      addCylinder(group, 0.55, 0.8, 4.6, [0, 3.1, 0], whiteStone, 12);
+      addLathe(group, [[0.55, 5.1], [1.9, 5.9], [2.1, 6.3], [0.01, 6.3]], 20, [0, 0, 0], lawn);
+      const petalGeometry = (length: number, width: number) => {
+        const shape = new THREE.Shape();
+        shape.moveTo(0, 0);
+        shape.quadraticCurveTo(width, length * 0.3, width * 0.72, length * 0.62);
+        shape.lineTo(0, length);
+        shape.lineTo(-width * 0.72, length * 0.62);
+        shape.quadraticCurveTo(-width, length * 0.3, 0, 0);
+        const geometry = new THREE.ExtrudeGeometry(shape, { depth: 0.22, bevelEnabled: false, curveSegments: 4 });
+        geometry.translate(0, 0, -0.11);
+        return geometry;
+      };
+      // [petals, length, half width, lean from vertical, root radius, phase]
+      for (const [count, length, width, lean, root, phase] of [
+        [10, 6.2, 1.25, 1.08, 1.5, 0],
+        [8, 5.6, 1.1, 0.68, 1.0, 0.39],
+        [6, 4.6, 0.9, 0.3, 0.55, 0.2],
+      ] as const) {
+        const geometry = petalGeometry(length, width);
+        for (let index = 0; index < count; index++) {
+          const holder = new THREE.Group();
+          holder.position.set(0, 6.2, 0);
+          holder.rotation.y = (index / count) * Math.PI * 2 + phase;
+          const petal = new THREE.Mesh(geometry, whiteStone);
+          petal.position.z = root;
+          petal.rotation.x = lean;
+          petal.castShadow = true;
+          holder.add(petal);
+          group.add(holder);
+        }
+      }
+      const heart = new THREE.Mesh(new THREE.SphereGeometry(0.95, 12, 8), accent);
+      heart.scale.y = 0.7;
+      heart.position.set(0, 6.9, 0);
+      group.add(heart);
+      solid(0, 0, 5, 11);
+      clearSite(0, 0, 12.5, 12.5);
     } else if (landmark.kind === "three-leaders-mausoleum") {
       // Mausoleum of Three Leaders (OSM 296802766): three white hyperbolic-
       // paraboloid shells in a row over the graves, each four tall pointed

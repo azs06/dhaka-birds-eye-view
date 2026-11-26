@@ -637,6 +637,7 @@ export const PLACE_NAMES_BN: Record<string, string> = {
   "Bangladesh Army Stadium": "বাংলাদেশ আর্মি স্টেডিয়াম",
   "TSC & Raju Memorial": "টিএসসি ও রাজু ভাস্কর্য",
   "Doyel Chattar": "দোয়েল চত্বর",
+  "Shapla Chattar": "শাপলা চত্বর",
   "Mausoleum of Three Leaders": "তিন নেতার মাজার",
   "Hussaini Dalan": "হোসেনী দালান",
   "Sadarghat Launch Terminal": "সদরঘাট লঞ্চ টার্মিনাল",
