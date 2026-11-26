@@ -305,6 +305,25 @@ kbd { display: inline-grid; place-items: center; min-width: 24px; height: 24px; 
 .menu-opt.selected small { color: #6a5d55; }
 .opt-check { grid-row: 1 / 3; grid-column: 3; width: 16px; height: 16px; margin-left: 10px; }
 
+/* Bird picker: compact species silhouettes; only the active bird expands its full note. */
+.tile-bird-glyph { width: 22px; height: 22px; flex: none; display: block; }
+.bird-opt { width: 100%; min-height: 44px; display: grid; grid-template-columns: 30px 1fr 16px; column-gap: 11px; align-items: center; padding: 7px 11px; border-radius: 11px; color: var(--chalk); transition: background .15s, padding .15s var(--ease), box-shadow .15s; }
+.bird-opt + .bird-opt { margin-top: 2px; }
+.bird-opt:hover { background: rgba(246,240,225,.06); }
+.bird-opt.selected { align-items: start; padding: 10px 11px; background: rgba(246,240,225,.11); box-shadow: inset 2.5px 0 0 var(--mist), inset 0 0 0 1px rgba(246,240,225,.16); }
+.bird-opt-icon { width: 30px; height: 30px; flex: none; display: grid; place-items: center; border-radius: 9px; background: rgba(246,240,225,.11); box-shadow: inset 0 0 0 1px rgba(246,240,225,.12); transition: background .15s, box-shadow .15s; }
+.bird-opt.selected .bird-opt-icon { margin-top: 1px; background: var(--paper); box-shadow: 0 2px 6px rgba(15,9,5,.25); }
+.bird-glyph { width: 22px; height: 22px; display: block; }
+.bird-opt-text { min-width: 0; display: flex; flex-direction: column; }
+.bird-opt-text b { overflow: hidden; font-size: 14.5px; font-weight: 600; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
+.flight-shell[lang="bn"] .bird-opt-text b { font-size: 15.5px; line-height: 1.38; }
+.bird-opt-note { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows .18s var(--ease), opacity .16s ease, margin-top .18s var(--ease); }
+.bird-opt.selected .bird-opt-note { grid-template-rows: 1fr; margin-top: 3px; opacity: 1; }
+.bird-opt-note small { overflow: hidden; color: var(--soft); font-size: 13px; line-height: 1.42; text-wrap: pretty; }
+.flight-shell[lang="bn"] .bird-opt-note small { font-size: 13.5px; line-height: 1.48; }
+.bird-opt .opt-check { grid-row: 1; grid-column: 3; margin-left: 0; margin-top: 2px; color: var(--mist); opacity: 0; transition: opacity .14s; }
+.bird-opt.selected .opt-check { opacity: 1; }
+
 /* ================= phone ================= */
 @media (max-width: 700px) {
   .hud-place { top: max(12px, env(safe-area-inset-top)); left: 12px; }
@@ -374,5 +393,5 @@ kbd { display: inline-grid; place-items: center; min-width: 24px; height: 24px; 
 @media (prefers-reduced-motion: reduce) {
   .title-sky, .title-any, .eq i, .perch-prompt[data-state="commit"], .title-live i { animation: none; }
   .title-sky { transform: scale(1.03); }
-  .flight-dynamics { transition: none; }
+  .flight-dynamics, .bird-opt, .bird-opt-note { transition: none; }
 }

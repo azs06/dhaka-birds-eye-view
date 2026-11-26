@@ -31,7 +31,7 @@ import {
   type Strings,
 } from "./i18n";
 import { BIRDS, DEFAULT_BIRD, birdById, chooseBird, readBird, subscribeToBird, type Bird, type BirdId } from "./birds";
-import { HudIcon, weatherIconName } from "./HudIcon";
+import { BirdGlyph, HudIcon, weatherIconName } from "./HudIcon";
 import soundClips from "./sound-clips.json";
 import { DHAKA_LANDMARK_FOOTPRINTS, type LandmarkFootprintPart } from "./dhaka-landmark-footprints";
 
@@ -276,6 +276,8 @@ type WeatherVfx = {
 type SkyPreset = { id: string; label: string; hour: number | null };
 type TrafficSimulation = {
   update: (dt: number, frameMs: number) => void;
+  /** Where the viewer is, so a share of the vehicles can keep to roads nearby. */
+  follow: (anchor: THREE.Vector3) => void;
   dispose: () => void;
   readonly vehicleCount: number;
   readonly tickHz: number;
@@ -345,12 +347,12 @@ const LANDING_CAPTURE_DISTANCE = 4.5;
 // touches the 3x3 cells around the bird instead of every tree in the city.
 const TREE_PERCH_CELL_SIZE = 160;
 const TRAFFIC_ROUTE_SAMPLE_RATIO = 0.5;
-const TRAFFIC_ROUTE_BUDGET = 160;
-const TRAFFIC_MAX_VEHICLES = 320;
+const TRAFFIC_ROUTE_BUDGET = 480;
+const TRAFFIC_MAX_VEHICLES = 1_800;
 const TRAFFIC_MIN_VEHICLES = 40;
 // Sparse ambient density: roughly one vehicle per this many metres of major road
 // (local streets count at a quarter rate). Raise it for lighter traffic, lower for denser.
-const TRAFFIC_METERS_PER_VEHICLE = 260;
+const TRAFFIC_METERS_PER_VEHICLE = 110;
 // Fraction of vehicles routed onto major roads (highway/primary/secondary).
 const TRAFFIC_MAJOR_SHARE = 0.75;
 const TRAFFIC_BASE_TICK_HZ = 10;
@@ -763,7 +765,9 @@ const DHAKA_PARKS = [
   // OSM 987024670: the zoo runs ≈1.3 km N–S between its North and South
   // lakes, from the Beribadh road on the west to the main gate on the east.
   { name: "Bangladesh National Zoo", lat: 23.812605, lon: 90.344937, rx: 285, rz: 690, angle: 0, hasLoop: false },
-  { name: "Kurmitola Golf Club", lat: 23.8165, lon: 90.4050, rx: 260, rz: 340, angle: -0.18, hasLoop: true },
+  // West of the Airport Road bend, round the course's three lakes (OSM
+  // 188564504–6): fairways under belts of old trees.
+  { name: "Kurmitola Golf Club", lat: 23.8190, lon: 90.4040, rx: 290, rz: 370, angle: -0.18, hasLoop: true, wooded: true },
   { name: "Sher-e-Bangla Nagar North Lawn", lat: 23.7642, lon: 90.3785, rx: 280, rz: 100, angle: 0, hasLoop: false },
   // One sweep of open lawn from the flanks of the Sangsad South Plaza down to Manik Mia Avenue.
   { name: "Sher-e-Bangla Nagar South Lawn", lat: 23.7590, lon: 90.3786, rx: 270, rz: 235, angle: 0, hasLoop: false },
@@ -810,6 +814,12 @@ const DHAKA_PARKS = [
   { name: "Shaheed Minar & Medical Grounds", lat: 23.7279, lon: 90.3958, rx: 170, rz: 120, angle: 0, hasLoop: false },
   { name: "BUET Campus", lat: 23.7262, lon: 90.3918, rx: 120, rz: 150, angle: 0, hasLoop: false },
   { name: "Dhaka University Halls", lat: 23.7306, lon: 90.3950, rx: 200, rz: 115, angle: 0, hasLoop: false },
+  // West of Airport Road from Banani up to Staff Road the Cantonment is
+  // fairways, ponds and woodland, not city blocks (the ponds are map water).
+  { name: "Army Golf Club", lat: 23.8010, lon: 90.3957, rx: 400, rz: 440, angle: 0, hasLoop: false, wooded: true },
+  // `understory` swaps the lawn for dark leaf litter, so the gaps between
+  // crowns read as more wood rather than as turf.
+  { name: "Cantonment Woods", lat: 23.8100, lon: 90.3975, rx: 370, rz: 470, angle: 0, hasLoop: false, wooded: true, understory: true },
 ].map((park) => {
   const world = coordinatesToWorld(park.lat, park.lon);
   return {
@@ -932,31 +942,42 @@ type UrbanStyle = {
   brick: number;
 };
 const DEFAULT_URBAN_STYLE: UrbanStyle = {
-  lotW: 14, lotD: 16, gap: 3, lane: 9, minFloors: 2, maxFloors: 5, tower: 0, towerMin: 10, towerMax: 14, organic: 0.08, brick: 0.2,
+  lotW: 12, lotD: 15, gap: 1.3, lane: 4.6, minFloors: 4, maxFloors: 7, tower: 0, towerMin: 10, towerMax: 14, organic: 0.08, brick: 0.1,
 };
 const URBAN_STYLE_KEYS = Object.keys(DEFAULT_URBAN_STYLE) as Array<keyof UrbanStyle>;
 const DHAKA_URBAN_ZONES = [
-  { lat: 23.7120, lon: 90.4050, radius: 1_600, style: { lotW: 9.5, lotD: 12.5, gap: 0.6, lane: 3.4, minFloors: 3, maxFloors: 7, tower: 0, towerMin: 8, towerMax: 10, organic: 0.1, brick: 0.42 } }, // Old Dhaka & Sadarghat
-  { lat: 23.7185, lon: 90.3880, radius: 1_100, style: { lotW: 10, lotD: 13, gap: 0.7, lane: 3.6, minFloors: 3, maxFloors: 6, tower: 0, towerMin: 8, towerMax: 10, organic: 0.1, brick: 0.4 } }, // Lalbagh & Chawkbazar
-  { lat: 23.7160, lon: 90.3655, radius: 1_000, style: { lotW: 8.5, lotD: 11, gap: 0.8, lane: 3.6, minFloors: 2, maxFloors: 5, tower: 0, towerMin: 6, towerMax: 8, organic: 0.12, brick: 0.46 } }, // Kamrangirchar
-  { lat: 23.7105, lon: 90.4350, radius: 1_100, style: { lotW: 11, lotD: 14, gap: 1, lane: 4, minFloors: 4, maxFloors: 8, tower: 0.01, towerMin: 10, towerMax: 13, organic: 0.06, brick: 0.34 } }, // Jatrabari
-  { lat: 23.7280, lon: 90.4190, radius: 1_000, style: { lotW: 19, lotD: 22, gap: 2.5, lane: 7, minFloors: 8, maxFloors: 16, tower: 0.32, towerMin: 16, towerMax: 30, organic: 0.02, brick: 0.12 } }, // Motijheel & Dilkusha
-  { lat: 23.7370, lon: 90.4130, radius: 900, style: { lotW: 14, lotD: 17, gap: 1.4, lane: 5, minFloors: 6, maxFloors: 12, tower: 0.08, towerMin: 13, towerMax: 20, organic: 0.03, brick: 0.2 } }, // Paltan, Kakrail & Shantinagar
-  { lat: 23.7510, lon: 90.3930, radius: 900, style: { lotW: 18, lotD: 21, gap: 2.5, lane: 7, minFloors: 7, maxFloors: 14, tower: 0.25, towerMin: 14, towerMax: 26, organic: 0.02, brick: 0.12 } }, // Karwan Bazar & Panthapath
-  { lat: 23.7590, lon: 90.3920, radius: 900, style: { lotW: 14, lotD: 17, gap: 1.4, lane: 5, minFloors: 6, maxFloors: 11, tower: 0.08, towerMin: 12, towerMax: 18, organic: 0.03, brick: 0.2 } }, // Farmgate & Tejgaon
-  { lat: 23.7500, lon: 90.4150, radius: 1_300, style: { lotW: 12.5, lotD: 15, gap: 1.2, lane: 4.5, minFloors: 5, maxFloors: 10, tower: 0.04, towerMin: 11, towerMax: 15, organic: 0.05, brick: 0.26 } }, // Moghbazar, Malibagh & Khilgaon
-  { lat: 23.7480, lon: 90.3720, radius: 1_300, style: { lotW: 15, lotD: 18, gap: 1.6, lane: 5, minFloors: 6, maxFloors: 10, tower: 0.04, towerMin: 11, towerMax: 15, organic: 0.02, brick: 0.12 } }, // Dhanmondi & Lalmatia
-  { lat: 23.7630, lon: 90.3600, radius: 1_300, style: { lotW: 12, lotD: 15, gap: 1.2, lane: 4.5, minFloors: 5, maxFloors: 9, tower: 0.02, towerMin: 10, towerMax: 13, organic: 0.05, brick: 0.28 } }, // Mohammadpur & Shyamoli
-  { lat: 23.8040, lon: 90.3650, radius: 2_300, style: { lotW: 12, lotD: 15, gap: 1, lane: 3.8, minFloors: 5, maxFloors: 9, tower: 0.03, towerMin: 10, towerMax: 14, organic: 0.05, brick: 0.24 } }, // Mirpur & Pallabi
-  { lat: 23.7930, lon: 90.4150, radius: 1_400, style: { lotW: 19, lotD: 22, gap: 3, lane: 8, minFloors: 7, maxFloors: 14, tower: 0.3, towerMin: 14, towerMax: 26, organic: 0.02, brick: 0.1 } }, // Gulshan & Baridhara
-  { lat: 23.7900, lon: 90.4020, radius: 1_000, style: { lotW: 17, lotD: 20, gap: 2.6, lane: 7, minFloors: 6, maxFloors: 13, tower: 0.2, towerMin: 13, towerMax: 24, organic: 0.02, brick: 0.12 } }, // Banani & Mohakhali
-  { lat: 23.7700, lon: 90.4300, radius: 1_700, style: { lotW: 11.5, lotD: 14.5, gap: 1.1, lane: 4.2, minFloors: 4, maxFloors: 8, tower: 0.01, towerMin: 9, towerMax: 12, organic: 0.06, brick: 0.3 } }, // Badda, Rampura & Banasree
-  { lat: 23.8700, lon: 90.3990, radius: 2_000, style: { lotW: 15, lotD: 18, gap: 2.2, lane: 6.5, minFloors: 6, maxFloors: 10, tower: 0.05, towerMin: 11, towerMax: 16, organic: 0.02, brick: 0.16 } }, // Uttara
-  { lat: 23.8190, lon: 90.4340, radius: 1_300, style: { lotW: 17, lotD: 20, gap: 2.6, lane: 7, minFloors: 6, maxFloors: 12, tower: 0.08, towerMin: 13, towerMax: 20, organic: 0.02, brick: 0.12 } }, // Bashundhara
-  { lat: 23.7222, lon: 90.3958, radius: 700, style: { lotW: 10, lotD: 13, gap: 0.8, lane: 3.8, minFloors: 3, maxFloors: 7, tower: 0, towerMin: 8, towerMax: 10, organic: 0.09, brick: 0.36 } }, // Bakshibazar & Chankharpul
-  { lat: 23.7300, lon: 90.3855, radius: 650, style: { lotW: 11, lotD: 14, gap: 1, lane: 4, minFloors: 4, maxFloors: 8, tower: 0.01, towerMin: 9, towerMax: 12, organic: 0.07, brick: 0.3 } }, // Azimpur & Nilkhet
-  { lat: 23.7395, lon: 90.3900, radius: 650, style: { lotW: 13, lotD: 16, gap: 1.3, lane: 4.6, minFloors: 5, maxFloors: 10, tower: 0.05, towerMin: 11, towerMax: 16, organic: 0.04, brick: 0.22 } }, // Shahbag, Elephant Road & Katabon
-  { lat: 23.7770, lon: 90.3740, radius: 800, style: { lotW: 30, lotD: 24, gap: 9, lane: 14, minFloors: 6, maxFloors: 12, tower: 0.15, towerMin: 13, towerMax: 20, organic: 0.02, brick: 0.08 } }, // Agargaon government offices
+  { lat: 23.7120, lon: 90.4050, radius: 1_600, style: { lotW: 9.5, lotD: 12.5, gap: 0.6, lane: 3.4, minFloors: 3, maxFloors: 7, tower: 0, towerMin: 8, towerMax: 10, organic: 0.1, brick: 0.14 } }, // Old Dhaka & Sadarghat
+  { lat: 23.7185, lon: 90.3880, radius: 1_100, style: { lotW: 10, lotD: 13, gap: 0.7, lane: 3.6, minFloors: 3, maxFloors: 6, tower: 0, towerMin: 8, towerMax: 10, organic: 0.1, brick: 0.13 } }, // Lalbagh & Chawkbazar
+  { lat: 23.7160, lon: 90.3655, radius: 1_000, style: { lotW: 8.5, lotD: 11, gap: 0.8, lane: 3.6, minFloors: 2, maxFloors: 5, tower: 0, towerMin: 6, towerMax: 8, organic: 0.12, brick: 0.15 } }, // Kamrangirchar
+  { lat: 23.7105, lon: 90.4350, radius: 1_100, style: { lotW: 11, lotD: 14, gap: 1, lane: 4, minFloors: 4, maxFloors: 8, tower: 0.01, towerMin: 10, towerMax: 13, organic: 0.06, brick: 0.11 } }, // Jatrabari
+  { lat: 23.7280, lon: 90.4190, radius: 1_000, style: { lotW: 19, lotD: 22, gap: 2.5, lane: 7, minFloors: 8, maxFloors: 16, tower: 0.3, towerMin: 16, towerMax: 34, organic: 0.02, brick: 0.04 } }, // Motijheel & Dilkusha
+  { lat: 23.7370, lon: 90.4130, radius: 900, style: { lotW: 14, lotD: 17, gap: 1.4, lane: 5, minFloors: 6, maxFloors: 12, tower: 0.08, towerMin: 13, towerMax: 20, organic: 0.03, brick: 0.07 } }, // Paltan, Kakrail & Shantinagar
+  { lat: 23.7510, lon: 90.3930, radius: 900, style: { lotW: 18, lotD: 21, gap: 2.5, lane: 7, minFloors: 7, maxFloors: 14, tower: 0.25, towerMin: 14, towerMax: 40, organic: 0.02, brick: 0.04 } }, // Karwan Bazar & Panthapath
+  { lat: 23.7590, lon: 90.3920, radius: 900, style: { lotW: 14, lotD: 17, gap: 1.4, lane: 5, minFloors: 6, maxFloors: 11, tower: 0.1, towerMin: 12, towerMax: 36, organic: 0.03, brick: 0.07 } }, // Farmgate & Tejgaon
+  { lat: 23.7500, lon: 90.4150, radius: 1_300, style: { lotW: 12.5, lotD: 15, gap: 1.2, lane: 4.5, minFloors: 5, maxFloors: 10, tower: 0.04, towerMin: 11, towerMax: 15, organic: 0.05, brick: 0.09 } }, // Moghbazar, Malibagh & Khilgaon
+  { lat: 23.7480, lon: 90.3720, radius: 1_300, style: { lotW: 15, lotD: 18, gap: 1.6, lane: 5, minFloors: 6, maxFloors: 10, tower: 0.04, towerMin: 11, towerMax: 15, organic: 0.02, brick: 0.04 } }, // Dhanmondi & Lalmatia
+  { lat: 23.7630, lon: 90.3600, radius: 1_300, style: { lotW: 12, lotD: 15, gap: 1.2, lane: 4.5, minFloors: 5, maxFloors: 9, tower: 0.02, towerMin: 10, towerMax: 13, organic: 0.05, brick: 0.09 } }, // Mohammadpur & Shyamoli
+  { lat: 23.8040, lon: 90.3650, radius: 2_300, style: { lotW: 12, lotD: 15, gap: 1, lane: 3.8, minFloors: 5, maxFloors: 9, tower: 0.03, towerMin: 10, towerMax: 14, organic: 0.05, brick: 0.08 } }, // Mirpur & Pallabi
+  { lat: 23.7930, lon: 90.4150, radius: 1_400, style: { lotW: 19, lotD: 22, gap: 2.2, lane: 6, minFloors: 7, maxFloors: 14, tower: 0.26, towerMin: 14, towerMax: 26, organic: 0.02, brick: 0.03 } }, // Gulshan & Baridhara
+  { lat: 23.7900, lon: 90.4020, radius: 1_000, style: { lotW: 17, lotD: 20, gap: 2, lane: 5.5, minFloors: 6, maxFloors: 13, tower: 0.18, towerMin: 13, towerMax: 24, organic: 0.02, brick: 0.04 } }, // Banani & Mohakhali
+  { lat: 23.7700, lon: 90.4300, radius: 1_700, style: { lotW: 11.5, lotD: 14.5, gap: 1.1, lane: 4.2, minFloors: 4, maxFloors: 8, tower: 0.01, towerMin: 9, towerMax: 12, organic: 0.06, brick: 0.1 } }, // Badda, Rampura & Banasree
+  { lat: 23.8700, lon: 90.3990, radius: 2_000, style: { lotW: 15, lotD: 18, gap: 2.2, lane: 6.5, minFloors: 6, maxFloors: 10, tower: 0.05, towerMin: 11, towerMax: 16, organic: 0.02, brick: 0.05 } }, // Uttara
+  { lat: 23.8190, lon: 90.4340, radius: 1_300, style: { lotW: 17, lotD: 20, gap: 2.6, lane: 7, minFloors: 6, maxFloors: 12, tower: 0.08, towerMin: 13, towerMax: 20, organic: 0.02, brick: 0.04 } }, // Bashundhara
+  { lat: 23.7222, lon: 90.3958, radius: 700, style: { lotW: 10, lotD: 13, gap: 0.8, lane: 3.8, minFloors: 3, maxFloors: 7, tower: 0, towerMin: 8, towerMax: 10, organic: 0.09, brick: 0.12 } }, // Bakshibazar & Chankharpul
+  { lat: 23.7300, lon: 90.3855, radius: 650, style: { lotW: 11, lotD: 14, gap: 1, lane: 4, minFloors: 4, maxFloors: 8, tower: 0.01, towerMin: 9, towerMax: 12, organic: 0.07, brick: 0.1 } }, // Azimpur & Nilkhet
+  { lat: 23.7395, lon: 90.3900, radius: 650, style: { lotW: 13, lotD: 16, gap: 1.3, lane: 4.6, minFloors: 5, maxFloors: 10, tower: 0.05, towerMin: 11, towerMax: 16, organic: 0.04, brick: 0.07 } }, // Shahbag, Elephant Road & Katabon
+  { lat: 23.7770, lon: 90.3740, radius: 800, style: { lotW: 30, lotD: 24, gap: 9, lane: 14, minFloors: 6, maxFloors: 12, tower: 0.15, towerMin: 13, towerMax: 20, organic: 0.02, brick: 0.03 } }, // Agargaon government offices
+  // Dense 5–9 storey walk-up fabric that used to fall to the default style.
+  { lat: 23.7320, lon: 90.4350, radius: 1_300, style: { lotW: 11, lotD: 14, gap: 1, lane: 4, minFloors: 5, maxFloors: 9, tower: 0.01, towerMin: 10, towerMax: 13, organic: 0.06, brick: 0.1 } }, // Mugda, Bashabo & Manda
+  { lat: 23.7215, lon: 90.4285, radius: 900, style: { lotW: 11, lotD: 14, gap: 1, lane: 4, minFloors: 5, maxFloors: 9, tower: 0.01, towerMin: 10, towerMax: 13, organic: 0.07, brick: 0.11 } }, // Shahjahanpur, Gopibagh & Kamalapur
+  { lat: 23.7470, lon: 90.4370, radius: 1_000, style: { lotW: 11.5, lotD: 14.5, gap: 1.1, lane: 4.2, minFloors: 5, maxFloors: 9, tower: 0.01, towerMin: 10, towerMax: 13, organic: 0.06, brick: 0.1 } }, // Khilgaon, Goran & Madartek
+  { lat: 23.6990, lon: 90.4290, radius: 1_100, style: { lotW: 10.5, lotD: 13.5, gap: 1, lane: 4, minFloors: 4, maxFloors: 8, tower: 0, towerMin: 9, towerMax: 12, organic: 0.07, brick: 0.12 } }, // Gendaria, Jurain & Postogola
+  { lat: 23.7810, lon: 90.3945, radius: 750, style: { lotW: 15, lotD: 18, gap: 1.8, lane: 5.5, minFloors: 5, maxFloors: 9, tower: 0.03, towerMin: 10, towerMax: 14, organic: 0.02, brick: 0.06 } }, // Mohakhali DOHS
+  { lat: 23.7680, lon: 90.4020, radius: 800, style: { lotW: 16, lotD: 19, gap: 1.8, lane: 5.5, minFloors: 5, maxFloors: 11, tower: 0.1, towerMin: 12, towerMax: 36, organic: 0.03, brick: 0.08 } }, // Tejgaon industrial area & Nakhalpara
+  { lat: 23.7935, lon: 90.3835, radius: 900, style: { lotW: 11.5, lotD: 14.5, gap: 1.1, lane: 4.2, minFloors: 5, maxFloors: 9, tower: 0.01, towerMin: 10, towerMax: 13, organic: 0.06, brick: 0.1 } }, // Kafrul & Ibrahimpur
+  { lat: 23.8300, lon: 90.4190, radius: 1_000, style: { lotW: 12, lotD: 15, gap: 1.2, lane: 4.4, minFloors: 5, maxFloors: 9, tower: 0.02, towerMin: 10, towerMax: 14, organic: 0.04, brick: 0.08 } }, // Nikunja & Khilkhet
+  { lat: 23.8560, lon: 90.4270, radius: 1_300, style: { lotW: 11.5, lotD: 14.5, gap: 1.2, lane: 4.4, minFloors: 4, maxFloors: 8, tower: 0, towerMin: 9, towerMax: 12, organic: 0.07, brick: 0.1 } }, // Dakshinkhan & Uttarkhan
+  { lat: 23.7400, lon: 90.3600, radius: 1_000, style: { lotW: 11, lotD: 14, gap: 1, lane: 4, minFloors: 4, maxFloors: 8, tower: 0.01, towerMin: 9, towerMax: 12, organic: 0.07, brick: 0.12 } }, // Rayerbazar & Hazaribagh
 ].map((zone) => {
   const world = coordinatesToWorld(zone.lat, zone.lon);
   return { x: world.x, z: world.y, radius: zone.radius, style: zone.style as UrbanStyle };
@@ -982,23 +1003,32 @@ function dhakaUrbanFabric(x: number, z: number) {
   return { style: sums as UrbanStyle, zoneInfluence: strongest };
 }
 
-// Dhaka masonry palette for procedural buildings: sun-bleached plaster and
-// concrete, the odd pastel repaint, bare terracotta brick, monsoon-weathered
-// grey, and blue-grey glass or white cladding on towers.
-const PLASTER_SHADES = [0xd6cec0, 0xc5bdb2, 0xd1b48f, 0xddd3c3, 0xcbc2b4];
-const PASTEL_SHADES = [0xd8b9a0, 0xc6cdb9, 0xbcc6c9, 0xdcc58e, 0xd2aeae];
-const BRICK_SHADES = [0xb97159, 0xa9654f];
-const WEATHERED_SHADES = [0x9d978c, 0x8c877e];
-const TOWER_SHADES = [0x969fa8, 0x8e9fac, 0xb4bcc2, 0xd6d6d0];
+// Dhaka masonry palette for procedural buildings, as the city reads from the
+// air: a grey-cream crust of sun-bleached plaster and rain-stained concrete,
+// the odd pastel repaint, a little dark bare brick, a few teal, sky-blue, mint
+// and pink facades, and blue glass or white cladding on towers. The glass
+// shades are blue enough for the facade shader to treat them as curtain wall.
+const PLASTER_SHADES = [0xd2ccc1, 0xc4beb4, 0xcbbfa8, 0xd9d3c8, 0xbdb8ae, 0xcfcac2, 0xb7b1a6];
+const PASTEL_SHADES = [0xd3bba6, 0xc3cab8, 0xbcc5c8, 0xd6c596, 0xcdb0ae];
+const ACCENT_SHADES = [0x4f9a96, 0x86b6d6, 0x9fd0b4, 0xdc9aa8, 0x5fa7a2, 0xd9a05f];
+const BRICK_SHADES = [0x8a5a4a, 0x7d5245, 0x94624f];
+const WEATHERED_SHADES = [0x9a958c, 0x8a867e, 0xa39f97, 0x7f7b74];
+const TOWER_SHADES = [0x4a6a80, 0x55788c, 0x3f5a6e, 0x648497, 0xd6d6d0, 0xc9c6bf, 0xe0ddd6, 0xb4b8ba, 0xcfc8b8, 0xa9adb0];
+// Corrugated tin over low buildings and plastic rooftop water tanks. These are
+// saturated (or near black) on purpose: the facade shader keeps such colours
+// and weathers every other roof to concrete grey.
+const TIN_ROOF_SHADES = [0x2a6fbf, 0x2366b0, 0x245fa6, 0x1a7040, 0xa8401f, 0x9a3a1c];
+const WATER_TANK_SHADES = [0x141416, 0x18181b, 0x1f5fae, 0x141416];
 
 function pickBuildingShade(target: THREE.Color, style: UrbanStyle, tower: boolean, height: number, random: () => number) {
   const pick = (shades: number[]) => shades[Math.floor(random() * shades.length)];
   const roll = random();
   let hex: number;
-  if (tower || (height > 40 && roll < 0.45)) hex = pick(TOWER_SHADES);
+  if (tower || (height > 40 && roll < 0.2)) hex = pick(TOWER_SHADES);
   else if (roll < style.brick) hex = pick(BRICK_SHADES);
-  else if (roll < style.brick + 0.11) hex = pick(PASTEL_SHADES);
-  else if (roll < style.brick + 0.11 + 0.06 + style.brick * 0.2) hex = pick(WEATHERED_SHADES);
+  else if (roll < style.brick + 0.09) hex = pick(PASTEL_SHADES);
+  else if (roll < style.brick + 0.09 + 0.045) hex = pick(ACCENT_SHADES);
+  else if (roll < style.brick + 0.135 + 0.2) hex = pick(WEATHERED_SHADES);
   else hex = pick(PLASTER_SHADES);
   return target.setHex(hex).offsetHSL(0, (random() - 0.5) * 0.04, (random() - 0.5) * 0.05);
 }
@@ -1438,7 +1468,7 @@ function createTrafficSimulation(
   };
 
   const renderVehicles = (alpha: number) => {
-    visibleVehicles = Math.min(vehicleTotal, Math.max(visibleVehicles, Math.floor(12 + simulationTime * 16)));
+    visibleVehicles = Math.min(vehicleTotal, Math.max(visibleVehicles, Math.floor(12 + simulationTime * 120)));
     bodies.count = visibleVehicles;
     cabins.count = visibleVehicles;
     for (let index = 0; index < visibleVehicles; index++) {
@@ -1460,8 +1490,68 @@ function createTrafficSimulation(
     cabins.instanceMatrix.needsUpdate = true;
   };
 
+  // A city-wide spread leaves only a handful of vehicles in view, so every
+  // third one roams: once it is far behind the haze it is put back on a major
+  // road near the viewer (never close enough to be seen appearing). The
+  // instance count and draw calls stay what they were.
+  const majorKindSet = new Set(["motorway", "trunk", "primary", "secondary"]);
+  const localRoads = roads.flatMap((road) => {
+    const points = road.points.filter(([x, z]) => Number.isFinite(x) && Number.isFinite(z));
+    if (!majorKindSet.has(road.kind) || points.length < 2) return [];
+    const middle = points[Math.floor(points.length / 2)];
+    return [{ points, x: middle[0], z: middle[1], width: road.kind === "motorway" || road.kind === "trunk" ? 17 : 14 }];
+  });
+  const ROAM_RADIUS = 1_700;
+  const ROAM_MIN_SPAWN = 520;
+  let anchorX = Number.NaN;
+  let anchorZ = Number.NaN;
+  let nearbyX = Infinity;
+  let nearbyZ = Infinity;
+  let nearbyRoads: typeof localRoads = [];
+  let roamCursor = 0;
+  const recallRoamingVehicles = () => {
+    if (!Number.isFinite(anchorX) || localRoads.length === 0) return;
+    if (Math.hypot(anchorX - nearbyX, anchorZ - nearbyZ) > 350) {
+      nearbyX = anchorX;
+      nearbyZ = anchorZ;
+      nearbyRoads = localRoads.filter((road) => Math.hypot(road.x - anchorX, road.z - anchorZ) < ROAM_RADIUS - 300);
+    }
+    if (nearbyRoads.length === 0) return;
+    for (let attempt = 0; attempt < 30; attempt++) {
+      roamCursor = (roamCursor + 3) % vehicleTotal;
+      const vehicle = vehicles[roamCursor];
+      if (Math.hypot(vehicle.position.x - anchorX, vehicle.position.z - anchorZ) < ROAM_RADIUS) continue;
+      const road = nearbyRoads[Math.floor(random() * nearbyRoads.length)];
+      const direction: 1 | -1 = random() > 0.5 ? 1 : -1;
+      const segmentIndex = direction === 1
+        ? Math.floor(random() * (road.points.length - 1))
+        : 1 + Math.floor(random() * (road.points.length - 1));
+      const start = road.points[segmentIndex];
+      const distance = Math.hypot(start[0] - anchorX, start[1] - anchorZ);
+      if (distance < ROAM_MIN_SPAWN || distance > ROAM_RADIUS - 100) continue;
+      vehicle.route = road.points;
+      vehicle.direction = direction;
+      vehicle.segmentIndex = segmentIndex;
+      vehicle.segmentProgress = 0;
+      vehicle.laneOffset = road.width * 0.24 + random() * 0.6;
+      const end = road.points[segmentIndex + direction];
+      vehicle.heading = Math.atan2(end[1] - start[1], end[0] - start[0]);
+      vehicle.previousHeading = vehicle.heading;
+      vehicle.position.set(
+        start[0] - Math.sin(vehicle.heading) * vehicle.laneOffset * direction,
+        2.25,
+        start[1] + Math.cos(vehicle.heading) * vehicle.laneOffset * direction,
+      );
+      vehicle.previousPosition.copy(vehicle.position);
+    }
+  };
+
   renderVehicles(1);
   return {
+    follow(anchor) {
+      anchorX = anchor.x;
+      anchorZ = anchor.z;
+    },
     update(dt, frameMs) {
       overloadCooldown = frameMs > TRAFFIC_LONG_FRAME_MS ? 2.5 : Math.max(0, overloadCooldown - dt);
       currentTickHz = overloadCooldown > 0 ? TRAFFIC_THROTTLED_TICK_HZ : TRAFFIC_BASE_TICK_HZ;
@@ -1470,6 +1560,7 @@ function createTrafficSimulation(
       let steps = 0;
       while (accumulator >= step && steps < TRAFFIC_MAX_CATCH_UP_STEPS) {
         simulationTime += step;
+        recallRoamingVehicles();
         for (const vehicle of vehicles) stepVehicle(vehicle, step);
         accumulator -= step;
         steps++;
@@ -1920,6 +2011,8 @@ function createWeatherVfx(
   const nightColor = new THREE.Color();
   const dayColor = new THREE.Color();
   const twilightColor = new THREE.Color(0xc47c68);
+  // Dust-laden air lit by a low sun: the colour of the haze at golden hour.
+  const lowSunHazeColor = new THREE.Color(0xe0b88c);
   const blendedBackground = new THREE.Color();
   const sunColor = new THREE.Color();
   const moonColor = new THREE.Color(0x9fc7ed);
@@ -1975,24 +2068,33 @@ function createWeatherVfx(
     const dayHex = mode === "fog" ? 0xc7bfb2
       : mode === "storm" ? 0x4e5964
         : mode === "rain" ? 0x7c8a94
-          : mode === "cloudy" ? 0xb0bac0
-            : 0xc9d2d8;
+          : mode === "cloudy" ? 0xaeb8bf
+            : 0xc2cdd5;
     nightColor.setHex(nightHex);
     dayColor.setHex(dayHex);
     blendedBackground.copy(nightColor).lerp(twilightColor, twilight * (1 - cloudAmount * 0.55)).lerp(dayColor, daylightStrength);
+    // The fog, the far ground and the sky's horizon all take this colour, so
+    // it has to follow the sun: blue-grey at noon, warm while the sun is low
+    // (the glow the bare sky dome used to give), unless cloud or rain hides it.
+    const lowSunWarmth = (1 - smoothRange(solarElevation, 4, 24)) * daylightStrength
+      * (1 - cloudAmount * 0.75) * (mode === "clear" || mode === "cloudy" ? 1 : 0);
+    blendedBackground.lerp(lowSunHazeColor, lowSunWarmth * 0.72);
     scene.background = blendedBackground;
     if (scene.fog instanceof THREE.FogExp2) {
       scene.fog.color.copy(blendedBackground);
+      // Dhaka's dry-season haze: buildings lose their contrast by 3–4 km even
+      // on a clear day, which also hides where the detailed tiles end. Rain,
+      // storm and fog each stay thicker than the mode before them.
       const weatherFogDensity = mode === "fog"
-        ? 0.00135
+        ? 0.0015
         : mode === "storm"
-          ? 0.00082
+          ? 0.00105
           : mode === "rain"
-            ? 0.00064
-            : 0.00024 + cloudAmount * 0.00018;
+            ? 0.00086
+            : 0.00046 + cloudAmount * 0.00014;
       // At night, dense same-colour fog erases the ground before the player can
       // read it. Games retain aerial perspective but extend the useful sightline.
-      scene.fog.density = weatherFogDensity * THREE.MathUtils.lerp(0.72, 1, daylightStrength);
+      scene.fog.density = weatherFogDensity * THREE.MathUtils.lerp(0.45, 1, daylightStrength);
     }
 
     const horizontal = Math.cos(solar.elevation);
@@ -2019,6 +2121,14 @@ function createWeatherVfx(
     skyUniforms.rayleigh.value = 3.4 - cloudAmount * 2.35;
     skyUniforms.mieCoefficient.value = 0.0035 + cloudAmount * 0.016;
     skyUniforms.mieDirectionalG.value = 0.82;
+    // The horizon always matches the fog exactly. Overhead the dome is washed
+    // about half-way with the sun high (more under cloud); a low sun keeps
+    // most of the dome's own colour, so golden hour and dawn still glow.
+    // Fog reaches its shaders in the output colour space, so the haze must too.
+    blendedBackground.getRGB(skyUniforms.bevHazeColor.value as THREE.Color, THREE.SRGBColorSpace);
+    const highSun = smoothRange(solarElevation, 5, 30);
+    const hazeWash = THREE.MathUtils.lerp(0.1, 0.5, highSun) + cloudAmount * 0.3;
+    skyUniforms.bevHazeAmount.value = THREE.MathUtils.lerp(0.1, hazeWash, daylightStrength);
 
     const nightExposure = mode === "storm" ? 0.88 : mode === "rain" ? 0.92 : 0.98;
     renderer.toneMappingExposure = THREE.MathUtils.lerp(
@@ -2359,7 +2469,7 @@ async function addRoadNetworkMeshes(
     parent,
     shoulders,
     new THREE.MeshStandardMaterial({
-      color: 0xb4aa9e,
+      color: 0x9c978e,
       roughness: 0.96,
       polygonOffset: true,
       polygonOffsetFactor: -1,
@@ -2369,9 +2479,11 @@ async function addRoadNetworkMeshes(
     isCancelled,
   );
   const roadMaterials = [
-    { color: 0x373739, offset: -4 },
-    { color: 0x4d4b48, offset: -3 },
-    { color: 0x6b665e, offset: -2 },
+    // Sun-bleached concrete and worn bitumen: mid grey, lighter than the
+    // shadowed ground between buildings.
+    { color: 0x6b6b6a, offset: -4 },
+    { color: 0x74726f, offset: -3 },
+    { color: 0x7c7973, offset: -2 },
   ].map(({ color, offset }) => new THREE.MeshStandardMaterial({
     color,
     roughness: 0.96,
@@ -2434,8 +2546,15 @@ async function addRoadNetworkMeshes(
 const NIGHT_WINDOW_GLOW = { value: 0 };
 const NIGHT_WINDOW_TINT = { value: new THREE.Color(0xffc074) };
 
-function applyNightWindows(material: THREE.MeshStandardMaterial, density = 0.5) {
+/**
+ * `dayFacade` also dresses generic city buildings for daylight: darker window
+ * bands and a floor line per storey on walls, curtain-wall mullions and a sky
+ * sheen on blue glass, and upward faces weathered to concrete grey so a cream
+ * building does not carry a cream roof. Landmark glass leaves it off.
+ */
+function applyNightWindows(material: THREE.MeshStandardMaterial, density = 0.5, dayFacade = false) {
   const densityUniform = { value: density };
+  if (dayFacade) material.defines = { ...material.defines, BEV_DAY_FACADE: "" };
   material.onBeforeCompile = (shader) => {
     shader.uniforms.bevNightGlow = NIGHT_WINDOW_GLOW;
     shader.uniforms.bevWindowTint = NIGHT_WINDOW_TINT;
@@ -2468,7 +2587,60 @@ varying vec3 bevWorldPos;
 varying vec3 bevWorldNormal;
 uniform float bevNightGlow;
 uniform float bevWindowDensity;
-uniform vec3 bevWindowTint;`,
+uniform vec3 bevWindowTint;
+#ifdef BEV_DAY_FACADE
+float bevGlass = 0.0;
+#endif`,
+      )
+      // `diffuseColor` now holds the material colour times the instance colour.
+      .replace(
+        "#include <color_fragment>",
+        `#include <color_fragment>
+#ifdef BEV_DAY_FACADE
+{
+  float bevMaxC = max( diffuseColor.r, max( diffuseColor.g, diffuseColor.b ) );
+  float bevMinC = min( diffuseColor.r, min( diffuseColor.g, diffuseColor.b ) );
+  float bevSat = ( bevMaxC - bevMinC ) / max( bevMaxC, 0.001 );
+  float bevLum = dot( diffuseColor.rgb, vec3( 0.2126, 0.7152, 0.0722 ) );
+  // Tin sheets and plastic tanks (saturated or near black) keep their colour.
+  float bevKeep = max( smoothstep( 0.86, 0.93, bevSat ), 1.0 - smoothstep( 0.012, 0.03, bevLum ) );
+  bevGlass = smoothstep( 0.42, 0.6, ( diffuseColor.b - diffuseColor.r ) / max( diffuseColor.b, 0.001 ) ) * ( 1.0 - bevKeep );
+  float bevUpD = smoothstep( 0.55, 0.85, bevWorldNormal.y );
+  float bevWallD = 1.0 - smoothstep( 0.30, 0.58, abs( bevWorldNormal.y ) );
+  // Roofs: rain-stained concrete, a little lighter over pale buildings, in
+  // broad patches so neighbouring slabs differ.
+  float bevPatch = fract( sin( dot( floor( bevWorldPos.xz / 9.0 ), vec2( 12.9898, 78.233 ) ) ) * 43758.5453 );
+  float bevRoofShade = 0.13 + 0.15 * bevLum + 0.05 * bevPatch;
+  vec3 bevRoofColor = bevRoofShade * vec3( 1.0, 0.985, 0.95 );
+  diffuseColor.rgb = mix( diffuseColor.rgb, bevRoofColor, bevUpD * ( 1.0 - bevKeep ) * 0.92 );
+  // Walls: the same facade cells the night windows use, filtered the same way.
+  float bevAcrossD = abs( bevWorldNormal.x ) > abs( bevWorldNormal.z ) ? bevWorldPos.z : bevWorldPos.x;
+  vec2 bevCellD = vec2( bevAcrossD / 4.6, bevWorldPos.y / 3.75 );
+  vec2 bevFwD = max( fwidth( bevCellD ), vec2( 0.001 ) );
+  vec2 bevUvD = fract( bevCellD );
+  float bevMipD = smoothstep( 0.28, 1.1, max( bevFwD.x, bevFwD.y ) );
+  float bevPaneXD = smoothstep( 0.2 - bevFwD.x, 0.2 + bevFwD.x, bevUvD.x )
+    * ( 1.0 - smoothstep( 0.74 - bevFwD.x, 0.74 + bevFwD.x, bevUvD.x ) );
+  float bevPaneYD = smoothstep( 0.3 - bevFwD.y, 0.3 + bevFwD.y, bevUvD.y )
+    * ( 1.0 - smoothstep( 0.72 - bevFwD.y, 0.72 + bevFwD.y, bevUvD.y ) );
+  float bevBand = mix( bevPaneYD * ( 0.14 + 0.86 * bevPaneXD ), 0.25, bevMipD );
+  float bevFloorLine = mix( 1.0 - smoothstep( 0.07 - bevFwD.y, 0.07 + bevFwD.y, bevUvD.y ), 0.07, bevMipD );
+  float bevMasonry = 1.0 - bevWallD * ( 0.36 * bevBand + 0.14 * bevFloorLine );
+  // Curtain wall: thin dark mullions on panes that brighten toward the sky.
+  float bevMullionLine = 1.0 - smoothstep( 0.1 - bevFwD.x, 0.1 + bevFwD.x, bevUvD.x );
+  float bevMullion = mix( max( bevMullionLine, bevFloorLine ), 0.16, bevMipD );
+  float bevSheen = 0.82 + 0.5 * smoothstep( 8.0, 110.0, bevWorldPos.y );
+  float bevCurtain = mix( 1.0, bevSheen * ( 1.0 - 0.42 * bevMullion ), bevWallD );
+  diffuseColor.rgb *= mix( bevMasonry, bevCurtain, bevGlass );
+}
+#endif`,
+      )
+      .replace(
+        "#include <roughnessmap_fragment>",
+        `#include <roughnessmap_fragment>
+#ifdef BEV_DAY_FACADE
+  roughnessFactor = mix( roughnessFactor, 0.24, bevGlass * ( 1.0 - smoothstep( 0.55, 0.85, bevWorldNormal.y ) ) );
+#endif`,
       )
       // `totalEmissiveRadiance` is already declared and populated at this point,
       // so window light adds on top of whatever emissive the material had.
@@ -2507,7 +2679,7 @@ if ( bevNightGlow > 0.001 ) {
       );
   };
   // Patched and unpatched standard materials must not share a compiled program.
-  material.customProgramCacheKey = () => `bev-night-windows-${density}`;
+  material.customProgramCacheKey = () => `bev-night-windows-${density}-${dayFacade}`;
   return material;
 }
 
@@ -2565,8 +2737,8 @@ function addImmediateCityMass(scene: THREE.Scene, roads: OsmMapData["roads"]) {
   group.name = "Immediate Greater Dhaka city mass";
   const metroCorridor = createMetroCorridor();
   const geometry = new THREE.BoxGeometry(1, 1, 1);
-  const materials = [0xd4ccc0, 0xc3bab0, 0xb66e56].map(
-    (color) => applyNightWindows(new THREE.MeshStandardMaterial({ color, roughness: 0.92, metalness: 0.01 }), 0.46),
+  const materials = [0xd2ccc1, 0xc1bbb1, 0xa39f97].map(
+    (color) => applyNightWindows(new THREE.MeshStandardMaterial({ color, roughness: 0.92, metalness: 0.01 }), 0.46, true),
   );
   const transforms: THREE.Matrix4[][] = [[], [], []];
   const districtCenters = AREA_LANDMARKS.map((landmark) => {
@@ -2696,7 +2868,7 @@ function addImmediateCityMass(scene: THREE.Scene, roads: OsmMapData["roads"]) {
   // Dhaka's parks and leafy avenues read green on frame 1 while OSM builds.
   const canopyGeometry = new THREE.IcosahedronGeometry(1, 0);
   const canopyMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.88 });
-  const canopyPalette = [0x2d5a36, 0x3b6d3a, 0x4d7c3f, 0x618b44].map((color) => new THREE.Color(color));
+  const canopyPalette = [0x1f4027, 0x254a2b, 0x2d532e, 0x375c33].map((color) => new THREE.Color(color));
   const krishnachura = new THREE.Color(0xc84628);
   const canopyTransforms: THREE.Matrix4[] = [];
   const canopyColors: THREE.Color[] = [];
@@ -2719,7 +2891,7 @@ function addImmediateCityMass(scene: THREE.Scene, roads: OsmMapData["roads"]) {
       scale.set(r, r * 0.72, r);
       canopyTransforms.push(matrix.compose(position, quaternion, scale).clone());
       canopyColors.push(
-        canopyRng() < 0.07
+        canopyRng() < 0.015
           ? krishnachura.clone()
           : canopyPalette[Math.floor(canopyRng() * canopyPalette.length)].clone(),
       );
@@ -2749,7 +2921,7 @@ function addImmediateCityMass(scene: THREE.Scene, roads: OsmMapData["roads"]) {
         scale.set(r, r * 0.72, r);
         canopyTransforms.push(matrix.compose(position, quaternion, scale).clone());
         canopyColors.push(
-          canopyRng() < 0.04
+          canopyRng() < 0.01
             ? krishnachura.clone()
             : canopyPalette[Math.floor(canopyRng() * canopyPalette.length)].clone(),
         );
@@ -2777,7 +2949,9 @@ function addImmediateCityMass(scene: THREE.Scene, roads: OsmMapData["roads"]) {
 // District tiles within the visibility radius draw everything; a ring beyond
 // it keeps only the tile's one building mesh (no trees, no shadow casting), so
 // the city carries on toward the haze instead of ending in bare ground.
-const PROCEDURAL_FAR_RING_FACTOR = 1.45;
+// Clear-day haze has taken ~90% of a building's contrast by 3 km, so the
+// ring stops there, and its tiles drop their rooftop furniture.
+const PROCEDURAL_FAR_RING_FACTOR = 1.35;
 
 function proceduralTileDetailAt(tile: ProceduralDistrictTile, x: number, z: number, visibilityRadius: number): 0 | 1 | 2 {
   const distanceSquared = (tile.centerX - x) ** 2 + (tile.centerZ - z) ** 2;
@@ -2792,7 +2966,13 @@ function setProceduralTileDetail(scene: THREE.Scene, tile: ProceduralDistrictTil
   if (detail > 0) scene.add(tile.group);
   else scene.remove(tile.group);
   for (const child of tile.group.children) child.visible = detail === 2 || child === tile.buildings;
-  if (tile.buildings) tile.buildings.castShadow = detail === 2;
+  if (tile.buildings) {
+    tile.buildings.castShadow = detail === 2;
+    // Stair heads, tanks and tin sheets follow the buildings in the instance list.
+    tile.buildings.count = detail === 2
+      ? tile.buildings.instanceMatrix.count
+      : tile.buildings.userData.buildingCount as number;
+  }
 }
 
 async function addProceduralDistrictTiles(
@@ -2816,7 +2996,7 @@ async function addProceduralDistrictTiles(
   const trunkGeometry = new THREE.CylinderGeometry(0.5, 0.72, 1, 6);
   // One white, night-windowed material for every procedural building; the
   // colour comes per instance from the Dhaka masonry palette below.
-  const buildingMaterial = applyNightWindows(new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.9, metalness: 0.01 }), 0.5);
+  const buildingMaterial = applyNightWindows(new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.9, metalness: 0.01 }), 0.5, true);
   const landmarkColliders = (scene.userData.landmarkColliders as BuildingCollider[] | undefined) ?? [];
   const areaPerches = AREA_LANDMARKS.map((landmark) => {
     const world = coordinatesToWorld(landmark.lat, landmark.lon);
@@ -2827,7 +3007,7 @@ async function addProceduralDistrictTiles(
   const foliageMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.86 });
   // Tropical Dhaka canopy palette: mango/banyan shade, mahogany, kadam, koroi,
   // roadside olive, plus flowering Krishnachura, Radhachura, Jarul, and rooftop plants.
-  const foliagePalette = [0x2d5a36, 0x3b6d3a, 0x4d7c3f, 0x618b44, 0x466844].map((color) => new THREE.Color(color));
+  const foliagePalette = [0x1f4027, 0x254a2b, 0x2d532e, 0x375c33, 0x284830].map((color) => new THREE.Color(color));
   const krishnachuraColor = new THREE.Color(0xc84628);
   const radhachuraColor = new THREE.Color(0xd49b2a);
   const jarulColor = new THREE.Color(0x865494);
@@ -2884,7 +3064,7 @@ async function addProceduralDistrictTiles(
   };
   for (const road of roads) {
     const isMajor = majorRoads.has(road.kind);
-    const radius = isMajor ? 15 : road.kind === "service" ? 6 : 9;
+    const radius = isMajor ? 13 : road.kind === "service" ? 5 : 7.5;
     const asphaltHalf = isMajor
       ? (road.kind === "motorway" || road.kind === "trunk" ? 8.5 : 7.0)
       : road.kind === "service" ? 2.1 : 3.75;
@@ -3053,6 +3233,8 @@ async function addProceduralDistrictTiles(
       const roofMatrices: number[] = [];
       const roofColors: number[] = [];
       const vacantLots: number[] = [];
+      // Share of low buildings under a tin sheet; each block sets its own.
+      let tinRoofChance = 0.08;
       const greenWeight = dhakaGreenWeight(centerX, centerZ);
       const tileMinX = centerX - tileSize / 2;
       const tileMinZ = centerZ - tileSize / 2;
@@ -3126,7 +3308,12 @@ async function addProceduralDistrictTiles(
       // One plot: clearance tests in rising cost order, then the box, its
       // collider (the axis-aligned bounds of the turned footprint, so a bird
       // can never clip a corner) and an optional stair head.
-      const placeBuilding = (x: number, z: number, yaw: number, width: number, depth: number, height: number, gap: number, color: THREE.Color, roofChance: number) => {
+      // `shaft` turns the plot into a tower: the plot footprint becomes a 3–5
+      // storey podium and a narrower shaft rises through it to `height`.
+      const placeBuilding = (
+        x: number, z: number, yaw: number, width: number, depth: number, height: number, gap: number, color: THREE.Color, roofChance: number,
+        shaft?: { width: number; depth: number; podium: number },
+      ) => {
         const cos = Math.cos(yaw);
         const sin = Math.sin(yaw);
         const halfWidth = width / 2;
@@ -3161,6 +3348,31 @@ async function addProceduralDistrictTiles(
           if (gapX * gapX + gapZ * gapZ < 50 * 50) top = Math.min(top, perch.altitude - 8);
         }
         if (top < 6) return false;
+        const footprintIndex = footprints.length;
+        footprints.push(x, z, cos, sin, halfWidth, halfDepth);
+        footprintCells(x - reachX, x + reachX, z - reachZ, z + reachZ, (bucket, key) => {
+          if (bucket) bucket.push(footprintIndex);
+          else footprintGrid.set(key, [footprintIndex]);
+        });
+        if (shaft && top > shaft.podium + 14) {
+          // Podium over the whole plot, in a darker tone of the tower's cladding.
+          buildingMatrices.push(
+            cos * width, 0, -sin * width, 0,
+            0, shaft.podium, 0, 0,
+            sin * depth, 0, cos * depth, 0,
+            x, shaft.podium / 2 + 0.92, z, 1,
+          );
+          buildingColors.push(color.r * 0.8, color.g * 0.8, color.b * 0.8);
+          const podiumCollider = { x, z, halfWidth: reachX, halfDepth: reachZ, top: shaft.podium + 0.92 };
+          tileColliders.push(podiumCollider);
+          colliders.push(podiumCollider);
+        }
+        if (shaft) {
+          width = shaft.width;
+          depth = shaft.depth;
+        }
+        const bodyReachX = shaft ? Math.abs(cos) * width / 2 + Math.abs(sin) * depth / 2 : reachX;
+        const bodyReachZ = shaft ? Math.abs(sin) * width / 2 + Math.abs(cos) * depth / 2 : reachZ;
         buildingMatrices.push(
           cos * width, 0, -sin * width, 0,
           0, top, 0, 0,
@@ -3168,15 +3380,35 @@ async function addProceduralDistrictTiles(
           x, top / 2 + 0.92, z, 1,
         );
         buildingColors.push(color.r, color.g, color.b);
-        const footprintIndex = footprints.length;
-        footprints.push(x, z, cos, sin, halfWidth, halfDepth);
-        footprintCells(x - reachX, x + reachX, z - reachZ, z + reachZ, (bucket, key) => {
-          if (bucket) bucket.push(footprintIndex);
-          else footprintGrid.set(key, [footprintIndex]);
-        });
-        const collider = { x, z, halfWidth: reachX, halfDepth: reachZ, top: top + 0.92 };
+        const collider = { x, z, halfWidth: bodyReachX, halfDepth: bodyReachZ, top: top + 0.92 };
         tileColliders.push(collider);
         colliders.push(collider);
+        // Roof furniture shares the stair heads' instance list. A corrugated
+        // tin sheet covers a share of the low buildings; taller roofs carry a
+        // black or blue plastic water tank beside the stair head.
+        if (!shaft && top < 15 && random() < tinRoofChance) {
+          const sheet = 0.55;
+          roofMatrices.push(
+            cos * (width + 0.7), 0, -sin * (width + 0.7), 0,
+            0, sheet, 0, 0,
+            sin * (depth + 0.7), 0, cos * (depth + 0.7), 0,
+            x, top + sheet / 2 + 0.92, z, 1,
+          );
+          shadeColor.setHex(TIN_ROOF_SHADES[Math.floor(random() * TIN_ROOF_SHADES.length)]).offsetHSL(0, 0, (random() - 0.5) * 0.06);
+          roofColors.push(shadeColor.r, shadeColor.g, shadeColor.b);
+        } else if (top >= 11 && random() < 0.34) {
+          const tankSize = 1.3 + random() * 0.8;
+          const tankX = (random() < 0.5 ? -1 : 1) * width * (0.26 + random() * 0.12);
+          const tankZ = (random() < 0.5 ? -1 : 1) * depth * (0.26 + random() * 0.12);
+          roofMatrices.push(
+            cos * tankSize, 0, -sin * tankSize, 0,
+            0, tankSize * 1.15, 0, 0,
+            sin * tankSize, 0, cos * tankSize, 0,
+            x + tankX * cos + tankZ * sin, top + tankSize * 0.575 + 0.92, z - tankX * sin + tankZ * cos, 1,
+          );
+          shadeColor.setHex(WATER_TANK_SHADES[Math.floor(random() * WATER_TANK_SHADES.length)]);
+          roofColors.push(shadeColor.r, shadeColor.g, shadeColor.b);
+        }
         let stairX = 0;
         let stairZ = 0;
         if (top > 14 && random() < roofChance) {
@@ -3220,9 +3452,13 @@ async function addProceduralDistrictTiles(
           }
           const urban = clamp(Math.max(districtProximity, zoneInfluence > 0 ? 0.4 + 0.6 * zoneInfluence : 0), 0.12, 1);
           const blockGreen = dhakaGreenWeight(blockCenterX, blockCenterZ);
-          const plotBlockVacancy = 0.78 * (1 - urban) ** 1.3;
-          const lotVacancy = 0.02 + 0.2 * (1 - urban) + clamp((blockGreen - 0.95) * 0.2, 0, 0.16);
+          // Built-up districts are a continuous crust: empty plot groups and
+          // lots fall away steeply once a district claims the block, while the
+          // unclaimed fringe (urban ≈ 0.12) stays mostly fields.
+          const plotBlockVacancy = Math.min(0.9, 0.95 * (1 - urban) ** 2.6);
+          const lotVacancy = 0.01 + 0.13 * (1 - urban) ** 1.5 + clamp((blockGreen - 0.95) * 0.16, 0, 0.1);
           const roofChance = 0.32 + 0.2 * (1 - urban);
+          tinRoofChance = 0.05 + 0.1 * (1 - urban) + style.organic * 0.5;
           const heading = roadHeadingAt(blockCenterX, blockCenterZ);
           const headingCos = Math.cos(heading);
           const headingSin = Math.sin(heading);
@@ -3236,7 +3472,13 @@ async function addProceduralDistrictTiles(
               const plotsInBlock = 3 + Math.floor(random() * 3);
               const emptyBlock = random() < plotBlockVacancy;
               for (let plot = 0; plot < plotsInBlock && u < reach; plot++) {
-                const span = !emptyBlock && plot + 1 < plotsInBlock && random() < 0.1 ? 2 : 1;
+                // Towers stand on two or three amalgamated plots where the row has them.
+                const tower = !emptyBlock && random() < style.tower;
+                const span = emptyBlock
+                  ? 1
+                  : tower
+                    ? Math.max(1, Math.min(random() < 0.35 ? 3 : 2, plotsInBlock - plot))
+                    : plot + 1 < plotsInBlock && random() < 0.1 ? 2 : 1;
                 plot += span - 1;
                 const plotCenter = u + (pitchU * span) / 2;
                 u += pitchU * span;
@@ -3247,24 +3489,28 @@ async function addProceduralDistrictTiles(
                   vacantLots.push(lotX, lotZ);
                   continue;
                 }
-                const tower = random() < style.tower;
+                // Squaring the roll keeps most towers near the district's lower
+                // bound and lets only a few reach its tallest storeys.
                 const floors = tower
-                  ? Math.round(style.towerMin + random() * (style.towerMax - style.towerMin))
+                  ? Math.round(style.towerMin + random() ** 2 * (style.towerMax - style.towerMin))
                   : Math.floor(style.minFloors + random() ** 1.25 * (style.maxFloors - style.minFloors + 1));
                 const height = floors * (2.95 + random() * 0.38);
-                let width = (pitchU * span - style.gap) * (0.88 + random() * 0.12);
-                let depth = (pitchV - style.gap) * (0.85 + random() * 0.15);
-                if (tower) {
-                  width *= 0.88;
-                  depth *= 0.88;
-                }
+                let width = (pitchU * span - style.gap) * (tower ? 0.97 : 0.88 + random() * 0.12);
+                let depth = (pitchV - style.gap) * (tower ? 0.97 : 0.85 + random() * 0.15);
+                const shaft = tower
+                  ? {
+                    width: Math.min(width, 38) * (0.72 + random() * 0.14),
+                    depth: depth * (0.74 + random() * 0.14),
+                    podium: (3 + Math.floor(random() * 3)) * 3.6,
+                  }
+                  : undefined;
                 // Back-to-back rows: each building hugs the lane its row faces.
                 const shift = ((pitchV - style.gap - depth) / 2) * (row % 2 === 0 ? -1 : 1);
                 const x = lotX + headingSin * shift;
                 const z = lotZ + headingCos * shift;
                 const yaw = heading + (random() - 0.5) * 2 * style.organic;
                 pickBuildingShade(shadeColor, style, tower, height, random);
-                if (!placeBuilding(x, z, yaw, width, depth, height, style.gap, shadeColor, roofChance)) {
+                if (!placeBuilding(x, z, yaw, width, depth, height, style.gap, shadeColor, roofChance, shaft)) {
                   // Squeeze a smaller building into what the neighbours, roads
                   // and water leave of the plot.
                   width *= 0.64;
@@ -3282,28 +3528,39 @@ async function addProceduralDistrictTiles(
       // Structured Dhaka urban greenery: park groves, lakeside embankments,
       // tree-lined avenues, courtyard pockets, and rooftop chhad-bagan gardens.
       const treeSpots: Array<{ x: number; z: number; minSep: number }> = [];
-      const pickCanopyShade = (tier: "park" | "lakeside" | "avenue" | "courtyard") => {
+      // "wood" is a park tree for woodland rows: one broad crown standing
+      // close enough to its neighbours to close the canopy, at half the
+      // triangles of a two-blob park tree.
+      type TreeTier = "park" | "wood" | "lakeside" | "avenue" | "courtyard";
+      const pickCanopyShade = (tier: TreeTier) => {
         const flowerRoll = vegRandom();
-        if (tier === "park" || tier === "lakeside") {
-          if (flowerRoll < 0.07) return krishnachuraColor;
-          if (flowerRoll < 0.105) return radhachuraColor;
-          if (flowerRoll < 0.125) return jarulColor;
+        if (tier === "wood") {
+          if (flowerRoll < 0.008) return krishnachuraColor;
+        } else if (tier === "park" || tier === "lakeside") {
+          if (flowerRoll < 0.014) return krishnachuraColor;
+          if (flowerRoll < 0.021) return radhachuraColor;
+          if (flowerRoll < 0.026) return jarulColor;
         } else if (tier === "avenue") {
-          if (flowerRoll < 0.045) return krishnachuraColor;
-          if (flowerRoll < 0.07) return radhachuraColor;
-        } else if (flowerRoll < 0.02) {
+          if (flowerRoll < 0.012) return krishnachuraColor;
+          if (flowerRoll < 0.018) return radhachuraColor;
+        } else if (flowerRoll < 0.006) {
           return krishnachuraColor;
         }
         return foliagePalette[Math.floor(vegRandom() * foliagePalette.length)];
       };
 
-      const placeTree = (x: number, z: number, tier: "park" | "lakeside" | "avenue" | "courtyard") => {
-        const canopyRadius = tier === "park"
+      const placeTree = (x: number, z: number, tier: TreeTier) => {
+        const canopyRadius = tier === "wood"
+          ? 5.2 + vegRandom() * 3.4
+          : tier === "park"
           ? 4.0 + vegRandom() * 3.0
           : tier === "lakeside" || tier === "avenue"
             ? 3.2 + vegRandom() * 2.2
             : 2.7 + vegRandom() * 1.9;
-        const minSep = tier === "park" ? canopyRadius * 1.35 : canopyRadius * 1.45;
+        // Park and bank crowns overlap into one mass; street trees stand apart.
+        const minSep = tier === "wood"
+          ? canopyRadius * 0.95
+          : tier === "park" || tier === "lakeside" ? canopyRadius * 1.05 : canopyRadius * 1.45;
         if (treeSpots.some((spot) => {
           const sep = Math.max(minSep, spot.minSep) * 0.85;
           return (x - spot.x) ** 2 + (z - spot.z) ** 2 < sep * sep;
@@ -3312,19 +3569,21 @@ async function addProceduralDistrictTiles(
         if (nearFootprint(x, z, Math.max(1.4, canopyRadius * 0.42))) return false;
 
         treeSpots.push({ x, z, minSep });
-        const trunkHeight = tier === "park"
+        const trunkHeight = tier === "park" || tier === "wood"
           ? 6.2 + vegRandom() * 4.0
           : tier === "lakeside" || tier === "avenue"
             ? 5.4 + vegRandom() * 3.2
             : 4.8 + vegRandom() * 3.0;
-        const trunkThickness = tier === "park" ? 0.62 + vegRandom() * 0.36 : 0.5 + vegRandom() * 0.3;
+        const trunkThickness = tier === "park" || tier === "wood" ? 0.62 + vegRandom() * 0.36 : 0.5 + vegRandom() * 0.3;
         quaternion.setFromEuler(new THREE.Euler((vegRandom() - 0.5) * 0.08, vegRandom() * Math.PI, (vegRandom() - 0.5) * 0.08));
         position.set(x, trunkHeight / 2 + 0.92, z);
         scale.set(trunkThickness, trunkHeight, trunkThickness);
         trunkTransforms.push(matrix.compose(position, quaternion, scale).clone());
         const crownBase = trunkHeight + 0.92;
         const shade = pickCanopyShade(tier);
-        const blobCount = tier === "park"
+        const blobCount = tier === "wood"
+          ? 1
+          : tier === "park"
           ? 2 + Math.floor(vegRandom() * 2)
           : tier === "courtyard"
             ? (canopyRadius > 3.5 ? 2 : 1)
@@ -3365,7 +3624,10 @@ async function addProceduralDistrictTiles(
           || Math.abs(centerZ - park.z) > tileSize * 0.65 + park.rz
         ) continue;
         const pRng = seededRandom(41_017 + parkIndex * 977);
-        const parkTreeTotal = clamp(Math.round((Math.PI * park.rx * park.rz) / 440), 28, 175);
+        // Woodland rows are planted about twice as thick, to a higher cap.
+        const parkTreeTotal = park.wooded
+          ? clamp(Math.round((Math.PI * park.rx * park.rz) / 620), 28, 760)
+          : clamp(Math.round((Math.PI * park.rx * park.rz) / 440), 28, 175);
         const hasLoop = park.hasLoop;
         for (let i = 0; i < parkTreeTotal; i++) {
           const radial = Math.sqrt(pRng()) * 0.96;
@@ -3376,9 +3638,9 @@ async function addProceduralDistrictTiles(
           const px = park.x + lx * park.fwdCos - lz * park.fwdSin;
           const pz = park.z + lx * park.fwdSin + lz * park.fwdCos;
           if (Math.round(px / tileSize) !== tileX || Math.round(pz / tileSize) !== tileZ) continue;
-          placeTree(px, pz, "park");
+          placeTree(px, pz, park.wooded ? "wood" : "park");
         }
-        const parkBushTotal = Math.round(parkTreeTotal * 0.35);
+        const parkBushTotal = park.wooded ? 0 : Math.round(parkTreeTotal * 0.35);
         for (let i = 0; i < parkBushTotal; i++) {
           const radial = Math.sqrt(pRng()) * 0.95;
           const angle = pRng() * Math.PI * 2;
@@ -3406,8 +3668,11 @@ async function addProceduralDistrictTiles(
       const shoreSegments = tileShoreSegments.get(tileKey);
       if (shoreSegments && shoreSegments.length > 0) {
         let shoreTreesPlaced = 0;
-        const shoreCap = Math.round(26 * outerTaper);
-        const shoreStep = 23 / clamp(greenWeight, 0.6, 1.4);
+        // Leafy districts (Gulshan, Banani, Dhanmondi, the Cantonment) get a
+        // continuous belt along the bank; elsewhere the line stays broken.
+        const leafyBank = greenWeight > 1.05;
+        const shoreCap = Math.round((leafyBank ? 46 : 28) * outerTaper);
+        const shoreStep = (leafyBank ? 10.5 : 20) / clamp(greenWeight, 0.6, 1.4);
         for (const seg of shoreSegments) {
           if (shoreTreesPlaced >= shoreCap) break;
           const nx = -(seg.z2 - seg.z1) / seg.length;
@@ -3470,7 +3735,7 @@ async function addProceduralDistrictTiles(
       // Old Dhaka and Motijheel while keeping treetop perches available citywide.
       // Open plots left by the lot layout come first, since the packed blocks
       // leave few random gaps wide enough for a canopy.
-      const targetCourtyardTrees = Math.max(2, Math.round((9 + vegRandom() * 5) * greenWeight * outerTaper));
+      const targetCourtyardTrees = Math.max(2, Math.round((9 + vegRandom() * 5) * greenWeight * (greenWeight > 1.05 ? 1.5 : 1) * outerTaper));
       let courtyardTrees = 0;
       for (let lot = 0; lot < vacantLots.length && courtyardTrees < targetCourtyardTrees; lot += 2) {
         if (vegRandom() > 0.5) continue;
@@ -4369,7 +4634,7 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
   const recess = new THREE.MeshStandardMaterial({ color: 0x202625, roughness: 0.98 });
   const accent = new THREE.MeshStandardMaterial({ color: 0xcaa24c, roughness: 0.56, metalness: 0.22 });
   const lawn = new THREE.MeshStandardMaterial({ color: 0x688652, roughness: 1 });
-  const water = new THREE.MeshPhysicalMaterial({ color: 0x407e8a, roughness: 0.2, metalness: 0.04, clearcoat: 0.7 });
+  const water = new THREE.MeshPhysicalMaterial({ color: 0x48665a, roughness: 0.26, metalness: 0.04, clearcoat: 0.7 });
   const monumentRed = new THREE.MeshStandardMaterial({ color: 0xb92d32, roughness: 0.76 });
   const marble = new THREE.MeshStandardMaterial({ color: 0xf5f2ea, roughness: 0.58 });
   const terracotta = new THREE.MeshStandardMaterial({ color: 0xa9604b, roughness: 0.94 });
@@ -12038,19 +12303,21 @@ function addCity(scene: THREE.Scene) {
     const context = canvas.getContext("2d");
     if (!context) return null;
     const size = canvas.width;
-    // Warm sun-baked Dhaka concrete & dusty paved ground — no green lawn wash.
-    context.fillStyle = "#9d968b";
+    // What shows between Dhaka's buildings from the air is shadowed lane,
+    // worn asphalt and dust: a dark warm grey with only faint plot marks, so
+    // gaps in the crust read as lanes instead of a tan tiled floor.
+    context.fillStyle = "#5f5d59";
     context.fillRect(0, 0, size, size);
 
     // Dense urban city blocks, courtyards, and low-rise concrete/brick lots.
     const lotPalette = [
-      "#aba498",
-      "#9f988d",
-      "#938c81",
-      "#b3aba0",
-      "#8b857c",
-      "#a89382",
-      "#9d7f6f",
+      "#66635e",
+      "#615f5a",
+      "#5c5a56",
+      "#6a6761",
+      "#585652",
+      "#67605a",
+      "#625a54",
     ];
     const grid = 8;
     const cell = size / grid;
@@ -12059,7 +12326,7 @@ function addCity(scene: THREE.Scene) {
         const bx = col * cell;
         const by = row * cell;
         // Narrow asphalt/concrete lane framing each urban block.
-        context.fillStyle = (row + col) % 3 === 0 ? "#686560" : "#76716a";
+        context.fillStyle = (row + col) % 3 === 0 ? "#52504d" : "#585653";
         context.fillRect(bx, by, cell, cell);
         const pad = 2.5 + random() * 2;
         context.fillStyle = lotPalette[Math.floor(random() * lotPalette.length)];
@@ -12094,7 +12361,7 @@ function addCity(scene: THREE.Scene) {
 
     // Subtle dusty concrete & brick-grit speckle across the urban surface.
     for (let i = 0; i < 4200; i++) {
-      const shade = 44 + Math.floor(random() * 26);
+      const shade = 28 + Math.floor(random() * 20);
       const hue = 24 + random() * 16;
       context.fillStyle = `hsla(${hue}, 10%, ${shade}%, ${0.06 + random() * 0.08})`;
       const s = 1 + random() * 3;
@@ -12109,10 +12376,31 @@ function addCity(scene: THREE.Scene) {
     return texture;
   };
 
+  // Beyond the districts the ground is field and wetland, not asphalt: a
+  // coarse vertex tint turns the grey olive where no district claims it.
+  const groundGeometry = new THREE.PlaneGeometry(34_000, 34_000, 112, 112);
+  const groundPositions = groundGeometry.getAttribute("position");
+  const groundTints = new Float32Array(groundPositions.count * 3);
+  const groundDistricts = AREA_LANDMARKS.map((landmark) => coordinatesToWorld(landmark.lat, landmark.lon));
+  for (let index = 0; index < groundPositions.count; index++) {
+    // The plane is laid flat below, which maps its local +Y to world −Z.
+    const x = groundPositions.getX(index);
+    const z = -groundPositions.getY(index);
+    let built = dhakaUrbanFabric(x, z).zoneInfluence;
+    for (const district of groundDistricts) {
+      built = Math.max(built, 1 - Math.hypot(x - district.x, z - district.y) / 1_800);
+    }
+    const fringe = 1 - smoothRange(built, 0, 0.3);
+    groundTints[index * 3] = 1 + 0.04 * fringe;
+    groundTints[index * 3 + 1] = 1 + 0.26 * fringe;
+    groundTints[index * 3 + 2] = 1 - 0.14 * fringe;
+  }
+  groundGeometry.setAttribute("color", new THREE.BufferAttribute(groundTints, 3));
   const ground = new THREE.Mesh(
-    new THREE.PlaneGeometry(34_000, 34_000),
+    groundGeometry,
     new THREE.MeshStandardMaterial({
       color: 0xeae4da,
+      vertexColors: true,
       map: makeGroundTexture(),
       roughness: 1,
       polygonOffset: true,
@@ -12143,6 +12431,7 @@ function addCity(scene: THREE.Scene) {
     polygonOffsetUnits: 2,
   });
   const turfGeometries: THREE.BufferGeometry[] = [];
+  const understoryGeometries: THREE.BufferGeometry[] = [];
   const pathGeometries: THREE.BufferGeometry[] = [];
   // Open campus grounds read as one sweep of lawn under their park rows.
   for (const ground of DHAKA_OPEN_GROUNDS) {
@@ -12157,7 +12446,7 @@ function addCity(scene: THREE.Scene) {
     lawnGeo.rotateZ(-park.angle);
     lawnGeo.rotateX(-Math.PI / 2);
     lawnGeo.translate(park.x, 0.22 + (index % 5) * 0.006, park.z);
-    turfGeometries.push(lawnGeo);
+    (park.understory ? understoryGeometries : turfGeometries).push(lawnGeo);
     if (park.hasLoop) {
       const loopGeo = new THREE.RingGeometry(0.66, 0.71, 28);
       loopGeo.scale(park.rx, park.rz, 1);
@@ -12175,6 +12464,17 @@ function addCity(scene: THREE.Scene) {
     turfMesh.receiveShadow = true;
     turfMesh.matrixAutoUpdate = false;
     parksGroup.add(turfMesh);
+  }
+  const mergedUnderstory = understoryGeometries.length > 0 ? mergeGeometries(understoryGeometries, false) : null;
+  understoryGeometries.forEach((geometry) => geometry.dispose());
+  if (mergedUnderstory) {
+    const understoryMaterial = parkTurfMaterial.clone();
+    understoryMaterial.color.setHex(0x34492f);
+    const understoryMesh = new THREE.Mesh(mergedUnderstory, understoryMaterial);
+    understoryMesh.name = "Dhaka woodland understory";
+    understoryMesh.receiveShadow = true;
+    understoryMesh.matrixAutoUpdate = false;
+    parksGroup.add(understoryMesh);
   }
   const mergedPaths = pathGeometries.length > 0 ? mergeGeometries(pathGeometries, false) : null;
   pathGeometries.forEach((geometry) => geometry.dispose());
@@ -12203,7 +12503,7 @@ function addCity(scene: THREE.Scene) {
   const water = new THREE.Mesh(
     new THREE.ShapeGeometry(waterShape),
     new THREE.MeshPhysicalMaterial({
-      color: 0x397f88,
+      color: 0x48665a,
       roughness: 0.24,
       metalness: 0.02,
       clearcoat: 0.7,
@@ -12246,7 +12546,7 @@ function addCity(scene: THREE.Scene) {
   }
   scene.userData.waterRibbons = waterRibbons;
 
-  const roadMaterial = new THREE.MeshStandardMaterial({ color: 0x373739, roughness: 0.97 });
+  const roadMaterial = new THREE.MeshStandardMaterial({ color: 0x6b6b6a, roughness: 0.97 });
   const lineMaterial = new THREE.MeshStandardMaterial({
     color: 0xd9c277,
     roughness: 0.9,
@@ -12319,7 +12619,7 @@ function addCity(scene: THREE.Scene) {
     fallbackWorld.add(bridge);
   }
 
-  const buildingColors = [0xd6cec0, 0xc5bdb2, 0xb97159, 0xd1b48f, 0xdfd8cc, 0xa5624e];
+  const buildingColors = [0xd2ccc1, 0xc4beb4, 0x8a5a4a, 0xcbbfa8, 0xd9d3c8, 0x9a958c];
   const buildingMaterials = buildingColors.map((color) => new THREE.MeshStandardMaterial({ color, roughness: 0.88, metalness: 0.01 }));
   const facadeMaterials = buildingColors.map((color) => new THREE.MeshStandardMaterial({ color: new THREE.Color(color).multiplyScalar(0.84), roughness: 0.93 }));
   const rooftopMaterial = new THREE.MeshStandardMaterial({ color: 0x7c7770, roughness: 0.94 });
@@ -12754,12 +13054,41 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
 
   const waterAreas: THREE.BufferGeometry[] = [];
   const waterLines: THREE.BufferGeometry[] = [];
+  // Dhaka's water is not one clean teal. City lakes are dull algae green, the
+  // Buriganga, Turag and Balu round the edge run grey-brown, and the hundreds
+  // of small ponds are pale and murky. Tint each polygon by size and place
+  // through vertex colours, so the merged batches stay one material.
+  // (Kept darker and greyer than park turf, or a lake reads as a lawn.)
+  const lakeTint = new THREE.Color(0x445e57);
+  const riverTint = new THREE.Color(0x555a50);
+  const pondTint = new THREE.Color(0x6c7a68);
+  const waterTint = new THREE.Color();
+  const cityCoreSouthWest = coordinatesToWorld(23.7150, 90.3500);
+  const cityCoreNorthEast = coordinatesToWorld(23.8800, 90.4560);
   for (const feature of data.water) {
     const waterJitter = (Math.abs(feature.id) % 7) * 0.008;
     if (feature.area && feature.points.length >= 3) {
       const geometry = new THREE.ShapeGeometry(polygonShape(feature.points));
       geometry.rotateX(-Math.PI / 2);
       geometry.translate(0, 0.48 + waterJitter, 0);
+      const area = polygonArea2D(feature.points);
+      let centerX = 0;
+      let centerZ = 0;
+      for (const [x, z] of feature.points) {
+        centerX += x;
+        centerZ += z;
+      }
+      centerX /= feature.points.length;
+      centerZ /= feature.points.length;
+      const inCityCore = centerX > cityCoreSouthWest.x && centerX < cityCoreNorthEast.x
+        && centerZ > cityCoreNorthEast.y && centerZ < cityCoreSouthWest.y;
+      if (area >= 60_000 && !inCityCore) waterTint.copy(riverTint);
+      else waterTint.copy(pondTint).lerp(lakeTint, smoothRange(area, 2_500, 30_000));
+      waterTint.offsetHSL(0, 0, ((Math.abs(feature.id) % 5) - 2) * 0.012);
+      const vertexCount = geometry.getAttribute("position").count;
+      const tints = new Float32Array(vertexCount * 3);
+      for (let index = 0; index < vertexCount; index++) waterTint.toArray(tints, index * 3);
+      geometry.setAttribute("color", new THREE.BufferAttribute(tints, 3));
       waterAreas.push(geometry);
       continue;
     }
@@ -12780,8 +13109,9 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
     await yieldIfNeeded(isCancelled);
   }
   const waterAreaMaterial = new THREE.MeshPhysicalMaterial({
-    color: 0x397f88,
-    roughness: 0.24,
+    color: 0xffffff,
+    vertexColors: true,
+    roughness: 0.22,
     metalness: 0.02,
     clearcoat: 0.7,
     clearcoatRoughness: 0.28,
@@ -12790,8 +13120,8 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
     polygonOffsetUnits: 0,
   });
   const waterLineMaterial = new THREE.MeshPhysicalMaterial({
-    color: 0x397f88,
-    roughness: 0.24,
+    color: 0x566355,
+    roughness: 0.22,
     metalness: 0.02,
     clearcoat: 0.7,
     clearcoatRoughness: 0.28,
@@ -12921,8 +13251,8 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
   }
   // These five merged batches are the real Dhaka the player flies over, so they
   // carry the window lighting that makes the city legible after dark.
-  const buildingMaterials = [0xd6cec0, 0xc5bdb2, 0xb97159, 0xd1b48f, 0x969fa8].map(
-    (color) => applyNightWindows(new THREE.MeshStandardMaterial({ color, roughness: 0.88, metalness: 0.01 }), 0.54),
+  const buildingMaterials = [0xd2ccc1, 0xc4beb4, 0xa39f97, 0xcbbfa8, 0x9a958c].map(
+    (color) => applyNightWindows(new THREE.MeshStandardMaterial({ color, roughness: 0.88, metalness: 0.01 }), 0.54, true),
   );
   // Nearby procedural towers and landmarks provide local shadows. Keeping the
   // four citywide merged meshes out of the shadow pass avoids redrawing the
@@ -12939,12 +13269,12 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
   const horizonPos = new THREE.Vector3();
   const horizonQuat = new THREE.Quaternion();
   const horizonScale = new THREE.Vector3();
-  const horizonPalette = [0x2d5a36, 0x3b6d3a, 0x4d7c3f, 0x618b44].map((color) => new THREE.Color(color));
+  const horizonPalette = [0x1f4027, 0x254a2b, 0x2d532e, 0x375c33].map((color) => new THREE.Color(color));
   const horizonKrishnachura = new THREE.Color(0xc84628);
   const horizonTransforms: THREE.Matrix4[] = [];
   const horizonColors: THREE.Color[] = [];
   for (const park of DHAKA_PARKS) {
-    const count = clamp(Math.round((Math.PI * park.rx * park.rz) / 1_150), 14, 72);
+    const count = clamp(Math.round((Math.PI * park.rx * park.rz) / 1_150), 14, park.wooded ? 260 : 72);
     for (let i = 0; i < count; i++) {
       const radial = Math.sqrt(horizonRng()) * 0.94;
       const angle = horizonRng() * Math.PI * 2;
@@ -12961,7 +13291,7 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
       horizonScale.set(r, r * 0.65, r);
       horizonTransforms.push(horizonMatrix.compose(horizonPos, horizonQuat, horizonScale).clone());
       horizonColors.push(
-        horizonRng() < 0.06
+        horizonRng() < 0.015
           ? horizonKrishnachura.clone()
           : horizonPalette[Math.floor(horizonRng() * horizonPalette.length)].clone(),
       );
@@ -12999,7 +13329,7 @@ async function addOpenStreetMapWorld(scene: THREE.Scene, data: OsmMapData, isCan
         horizonScale.set(r, r * 0.65, r);
         horizonTransforms.push(horizonMatrix.compose(horizonPos, horizonQuat, horizonScale).clone());
         horizonColors.push(
-          horizonRng() < 0.05
+          horizonRng() < 0.012
             ? horizonKrishnachura.clone()
             : horizonPalette[Math.floor(horizonRng() * horizonPalette.length)].clone(),
         );
@@ -13245,6 +13575,24 @@ function MenuOption({ selected, name, note, swatch, onChoose }: { selected: bool
   );
 }
 
+/** One bird choice: a species silhouette and name, expanding its full note when selected. */
+function BirdOption({ bird, selected, name, note, onChoose }: { bird: Bird; selected: boolean; name: string; note: string; onChoose: () => void }) {
+  return (
+    <button type="button" className={`bird-opt${selected ? " selected" : ""}`} aria-pressed={selected} onClick={onChoose}>
+      <span className="bird-opt-icon" aria-hidden="true">
+        <BirdGlyph bird={bird} selected={selected} />
+      </span>
+      <span className="bird-opt-text">
+        <b>{name}</b>
+        <span className="bird-opt-note" aria-hidden={!selected}>
+          <small>{note}</small>
+        </span>
+      </span>
+      <HudIcon name="check" className="opt-check" />
+    </button>
+  );
+}
+
 export function BirdFlight() {
   const mountRef = useRef<HTMLDivElement>(null);
   const speedRef = useRef<HTMLSpanElement>(null);
@@ -13466,7 +13814,7 @@ export function BirdFlight() {
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0xc3ced6);
-    scene.fog = new THREE.FogExp2(0xc5ccd2, 0.00028);
+    scene.fog = new THREE.FogExp2(0xc5ccd2, 0.0005);
     // A 2 m near plane quadruples 24-bit depth-buffer precision across the city
     // compared to 0.5 m while staying well clear of every camera mode.
     const camera = new THREE.PerspectiveCamera(58, mount.clientWidth / mount.clientHeight, 2, 8000);
@@ -13506,6 +13854,25 @@ export function BirdFlight() {
     // The sky cube scale and camera-follow below preserve the clipping fix;
     // live weather applies the solar vector and atmosphere after setup.
     skyUniforms.sunPosition.value.set(0, 1, 0);
+    // The Preetham dome ignores scene fog, so the hazed ground met it in a hard
+    // line under a near-white noon sky. Blend the dome into the fog colour at
+    // the horizon (at the stage standard materials apply fog) and wash the
+    // rest of it part-way, so the sky reads as pale haze over the city.
+    skyUniforms.bevHazeColor = { value: new THREE.Color(0xc5ccd2).convertLinearToSRGB() };
+    skyUniforms.bevHazeAmount = { value: 0.5 };
+    sky.material.fragmentShader = sky.material.fragmentShader
+      .replace(
+        "void main() {",
+        `uniform vec3 bevHazeColor;
+uniform float bevHazeAmount;
+void main() {`,
+      )
+      .replace(
+        "#include <colorspace_fragment>",
+        `#include <colorspace_fragment>
+  float bevHorizon = 1.0 - smoothstep( -0.01, 0.34, normalize( vWorldPosition - cameraPosition ).y );
+  gl_FragColor.rgb = mix( gl_FragColor.rgb, bevHazeColor, clamp( bevHazeAmount + ( 1.0 - bevHazeAmount ) * bevHorizon * bevHorizon, 0.0, 1.0 ) );`,
+      );
     scene.add(sky);
 
     const hemisphere = new THREE.HemisphereLight(0xf1efe9, 0x7a7064, 1.8);
@@ -13542,18 +13909,19 @@ export function BirdFlight() {
     scene.userData.proceduralRoadFallback = immediateRoadFallback;
     void addRoadNetworkMeshes(immediateRoadFallback, fallbackRoads, "Immediate fallback", () => disposed, scene);
     const mapRequestStartedAt = performance.now();
-    // Live Overpass data first, but never hang on it: the deployed worker can stall
-    // upstream indefinitely, so time the request out and fall back to the bundled
-    // snapshot before resorting to the sparse procedural grid.
+    // The bundled snapshot first: it is a static file, so the real city appears
+    // as soon as it is built instead of waiting on Overpass, which the worker
+    // can stall on for tens of seconds. The live route is only the fallback
+    // if the snapshot is missing, before the sparse procedural grid.
     const fetchMapData = async (): Promise<OsmMapData> => {
       try {
-        const response = await fetch("/api/osm", { signal: AbortSignal.timeout(35_000) });
-        if (!response.ok) throw new Error(`Map request failed with ${response.status}`);
-        return await response.json() as OsmMapData;
-      } catch (liveError) {
         const snapshot = await fetch("/dhaka-map.json", { signal: AbortSignal.timeout(20_000) });
-        if (!snapshot.ok) throw liveError;
+        if (!snapshot.ok) throw new Error(`Map snapshot failed with ${snapshot.status}`);
         return await snapshot.json() as OsmMapData;
+      } catch (snapshotError) {
+        const response = await fetch("/api/osm", { signal: AbortSignal.timeout(35_000) });
+        if (!response.ok) throw snapshotError;
+        return await response.json() as OsmMapData;
       }
     };
     let pendingOsmWorld: Awaited<ReturnType<typeof addOpenStreetMapWorld>> = null;
@@ -14646,6 +15014,7 @@ export function BirdFlight() {
         const updateMetroRail = scene.userData.metroRailUpdate as ((time: number) => void) | undefined;
         updateMetroRail?.(elapsedTime);
         const trafficSimulation = scene.userData.trafficSimulation as TrafficSimulation | null | undefined;
+        trafficSimulation?.follow(crow.position);
         trafficSimulation?.update(dt, frameMs);
         for (const cloud of scene.userData.clouds as THREE.Group[]) {
           cloud.position.x += (cloud.userData.weatherSpeed ?? cloud.userData.speed) * dt;
@@ -15280,10 +15649,10 @@ export function BirdFlight() {
               {menuTile(
                 "bird",
                 t.menuBird,
-                <><i className="tile-swatch" style={{ background: selectedBird.swatch[0] }} />{t[selectedBird.name]}</>,
+                <><BirdGlyph bird={selectedBird} className="tile-bird-glyph" />{t[selectedBird.name]}</>,
                 STRINGS[otherLocale][selectedBird.name],
                 BIRDS.map((bird) => (
-                  <MenuOption key={bird.id} selected={bird.id === birdId} name={t[bird.name]} note={t[bird.note]} swatch={bird.swatch[0]} onChoose={() => {
+                  <BirdOption key={bird.id} bird={bird} selected={bird.id === birdId} name={t[bird.name]} note={t[bird.note]} onChoose={() => {
                     chooseBird(bird.id);
                     setMenuOpen("");
                   }} />

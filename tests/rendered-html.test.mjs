@@ -178,7 +178,7 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(mapRoute, /missingRequiredTiles\.length > 0/);
   assert.match(mapRoute, /required tiles missing/);
   assert.match(component, /TRAFFIC_ROUTE_SAMPLE_RATIO = 0\.5/);
-  assert.match(component, /TRAFFIC_MAX_VEHICLES = 320/);
+  assert.match(component, /TRAFFIC_MAX_VEHICLES = 1_800/);
   assert.match(component, /TRAFFIC_BASE_TICK_HZ = 10/);
   assert.match(component, /TRAFFIC_THROTTLED_TICK_HZ = 5/);
   assert.match(component, /createTrafficSimulation/);
