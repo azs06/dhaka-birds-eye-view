@@ -750,9 +750,19 @@ export function fill(template: string, values: Record<string, string | number>) 
   return template.replace(/\{(\w+)\}/g, (match, key: string) => (key in values ? String(values[key]) : match));
 }
 
+// Landmarks kept in their own files (app/landmarks) carry their Bengali name
+// with them. The scene registers those here at load, so this file stays free
+// of imports and the lookup below covers them like any name in the table.
+const REGISTERED_PLACE_NAMES_BN: Record<string, string> = {};
+
+/** Add Bengali names for places defined outside this file (English label → name). */
+export function registerPlaceNames(names: Record<string, string>) {
+  Object.assign(REGISTERED_PLACE_NAMES_BN, names);
+}
+
 /** The name to show for a place whose data label is English. */
 export function placeName(locale: Locale, label: string) {
-  return locale === "bn" ? PLACE_NAMES_BN[label] ?? label : label;
+  return locale === "bn" ? PLACE_NAMES_BN[label] ?? REGISTERED_PLACE_NAMES_BN[label] ?? label : label;
 }
 
 /** Text for a floating 3D label: a place name, or a station on the metro line. */
