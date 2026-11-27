@@ -42,6 +42,7 @@ import {
   localDigits,
   placeName,
   readLocale,
+  registerPlaceNames,
   stationText,
   subscribeToLocale,
   weatherLabel,
@@ -53,6 +54,8 @@ import { BIRDS, DEFAULT_BIRD, birdById, chooseBird, readBird, subscribeToBird, t
 import { BirdGlyph, HudIcon, weatherIconName } from "./HudIcon";
 import soundClips from "./sound-clips.json";
 import { DHAKA_LANDMARK_FOOTPRINTS, type LandmarkFootprintPart } from "./dhaka-landmark-footprints";
+import { LANDMARK_MODULES, type LandmarkModuleKey } from "./landmarks";
+import type { LandmarkKit, LandmarkModule } from "./landmarks/kit";
 
 type CameraMode = "CHASE" | "BIRD'S EYE";
 // Discrete flight verbs, shared by the keyboard handler and the touch HUD so both
@@ -167,7 +170,9 @@ type DhakaLandmark = AreaLandmark & {
     | "rose-garden-palace"
     | "tejgaon-airport"
     | "sayedabad-bus-terminal"
-    | "gabtoli-bus-terminal";
+    | "gabtoli-bus-terminal"
+    // Landmarks that live in their own files: app/landmarks/<key>.ts.
+    | LandmarkModuleKey;
 };
 type ProceduralDistrictTile = {
   group: THREE.Group;
@@ -211,6 +216,7 @@ type OsmMapData = {
   metroLines?: MapPoint[][];
   metroStations?: Array<{ id: number; name: string | null; point: MapPoint }>;
 };
+type LandmarkModuleStats = { triangles: number; drawCalls: number; budget: number; error?: string };
 type BirdFlightWindow = Window & {
   __birdFlightDiagnostics?: () => {
     calls: number;
@@ -224,6 +230,8 @@ type BirdFlightWindow = Window & {
     maxFrameMs: number;
     longFrames: number;
     mapBuildMs: number | null;
+    /** Per landmark module (app/landmarks): triangles and draw calls after baking. */
+    landmarkModules: Record<string, LandmarkModuleStats>;
     trafficVehicles: number;
     trafficTickHz: number;
     /** Live landing-approach state, for tuning the flare without a debugger. */
@@ -649,6 +657,32 @@ const DHAKA_LANDMARKS: DhakaLandmark[] = [
   { label: "Sayedabad Bus Terminal", shortLabel: "SBT", lat: SAYEDABAD_BUS_TERMINAL.centre[0], lon: SAYEDABAD_BUS_TERMINAL.centre[1], altitude: 8, heading: 0, kind: "sayedabad-bus-terminal" },
   { label: "Gabtoli Bus Terminal", shortLabel: "GBT", lat: GABTOLI_BUS_TERMINAL.centre[0], lon: GABTOLI_BUS_TERMINAL.centre[1], altitude: 8, heading: 0, kind: "gabtoli-bus-terminal" },
 ];
+// Landmarks that live in their own files (app/landmarks/<kind>.ts) join the
+// table here. Everything a built-in kind keeps in a per-kind table or branch
+// (clearing radius, extents, heading, colliders, names, parks, inspection
+// distance) a module carries itself, looked up through this map.
+const LANDMARK_MODULE_BY_KIND = new Map<DhakaLandmark["kind"], LandmarkModule>();
+{
+  const builtInKinds = new Set<string>(DHAKA_LANDMARKS.map((landmark) => landmark.kind));
+  for (const landmarkModule of LANDMARK_MODULES) {
+    if (builtInKinds.has(landmarkModule.key)) {
+      console.error(`Landmark module "${landmarkModule.key}" duplicates a built-in landmark kind. Skipped.`);
+      continue;
+    }
+    LANDMARK_MODULE_BY_KIND.set(landmarkModule.key, landmarkModule);
+    DHAKA_LANDMARKS.push({
+      label: landmarkModule.label,
+      shortLabel: landmarkModule.shortLabel,
+      lat: landmarkModule.lat,
+      lon: landmarkModule.lon,
+      altitude: landmarkModule.altitude,
+      heading: landmarkModule.heading,
+      kind: landmarkModule.key,
+      minimap: landmarkModule.minimap,
+    });
+  }
+  registerPlaceNames(Object.fromEntries([...LANDMARK_MODULE_BY_KIND.values()].map((landmarkModule) => [landmarkModule.label, landmarkModule.labelBn])));
+}
 
 // Launch sites offered on the title screen. Picking one moves the attract-mode
 // bird immediately, so the choice previews itself behind the panel.
@@ -871,7 +905,8 @@ function inAirportClearance(x: number, z: number, pad = 0) {
 // Major real Dhaka green parks & urban lungs. Anchoring greenery to actual
 // Dhaka parks lets the rest of the ground read as dense concrete/brick urban
 // fabric instead of a forest.
-const DHAKA_PARKS = [
+type DhakaParkRow = { name: string; lat: number; lon: number; rx: number; rz: number; angle: number; hasLoop: boolean; wooded?: boolean; understory?: boolean };
+const DHAKA_PARKS = ([
   { name: "Ramna Park", lat: 23.7378, lon: 90.4007, rx: 225, rz: 260, angle: 0.12, hasLoop: false },
   { name: "Suhrawardy Udyan", lat: 23.7332, lon: 90.3992, rx: 155, rz: 255, angle: 0.08, hasLoop: false },
   // OSM 24448418 (838 × 374 m, centroid 23.7658, 90.3797): woodland round the
@@ -936,7 +971,18 @@ const DHAKA_PARKS = [
   // `understory` swaps the lawn for dark leaf litter, so the gaps between
   // crowns read as more wood rather than as turf.
   { name: "Cantonment Woods", lat: 23.8100, lon: 90.3975, rx: 370, rz: 470, angle: 0, hasLoop: false, wooded: true, understory: true },
-].map((park) => {
+  // The grounds of landmark modules (app/landmarks), after every row above.
+  ...[...LANDMARK_MODULE_BY_KIND.values()].flatMap((landmarkModule) => (landmarkModule.park ? [{
+    name: landmarkModule.park.name ?? `${landmarkModule.label} Grounds`,
+    lat: landmarkModule.park.lat,
+    lon: landmarkModule.park.lon,
+    rx: landmarkModule.park.rx,
+    rz: landmarkModule.park.rz,
+    angle: landmarkModule.park.angle ?? 0,
+    hasLoop: false,
+    wooded: landmarkModule.park.wooded,
+  }] : [])),
+] as DhakaParkRow[]).map((park) => {
   const world = coordinatesToWorld(park.lat, park.lon);
   return {
     ...park,
@@ -2958,7 +3004,7 @@ function addImmediateCityMass(scene: THREE.Scene, roads: OsmMapData["roads"]) {
   };
   const landmarkClearings = DHAKA_LANDMARKS.map((landmark) => {
     const world = coordinatesToWorld(landmark.lat, landmark.lon);
-    return { x: world.x, z: world.y, radius: clearingRadius[landmark.kind] ?? 105 };
+    return { x: world.x, z: world.y, radius: LANDMARK_MODULE_BY_KIND.get(landmark.kind)?.clearingRadius ?? clearingRadius[landmark.kind] ?? 105 };
   });
   const roadCellSize = 180;
   const roadGrid = new Map<string, Array<{ x1: number; z1: number; x2: number; z2: number; radius: number }>>();
@@ -4802,6 +4848,10 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
   const perches: Perch[] = [];
   const footprintByKind = new Map(DHAKA_LANDMARK_FOOTPRINTS.map((footprint) => [footprint.kind, footprint]));
   const landmarkOsmIds = new Set(DHAKA_LANDMARK_FOOTPRINTS.flatMap((footprint) => footprint.parts.map((part) => part.osmId)));
+  // Map buildings a landmark module stands in for are never drawn either.
+  for (const landmarkModule of LANDMARK_MODULE_BY_KIND.values()) {
+    for (const osmId of landmarkModule.replacesOsmBuildingIds ?? []) landmarkOsmIds.add(osmId);
+  }
 
   const concrete = new THREE.MeshStandardMaterial({ color: 0xc8c1ad, roughness: 0.88 });
   const paleConcrete = new THREE.MeshStandardMaterial({ color: 0xe2dece, roughness: 0.82 });
@@ -5654,7 +5704,15 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
         // The memorial on its plinth.
         "bahadur-shah-park": [6.5, 6.5],
       };
-      const [halfWidth, halfDepth] = defaultExtents[landmark.kind] ?? [28, 22];
+      // A module's extents are local to its heading; these bounds are their
+      // world-axis box, centred on its lat/lon.
+      const moduleExtents = LANDMARK_MODULE_BY_KIND.get(landmark.kind)?.extents;
+      const [halfWidth, halfDepth] = moduleExtents
+        ? [
+          Math.abs(Math.cos(landmark.heading)) * moduleExtents[0] + Math.abs(Math.sin(landmark.heading)) * moduleExtents[1],
+          Math.abs(Math.sin(landmark.heading)) * moduleExtents[0] + Math.abs(Math.cos(landmark.heading)) * moduleExtents[1],
+        ]
+        : defaultExtents[landmark.kind] ?? [28, 22];
       allBounds.set(landmark.kind, {
         minX: center.x - halfWidth,
         maxX: center.x + halfWidth,
@@ -5782,12 +5840,69 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
     "bahadur-shah-park",
   ]);
 
+  // What a landmark module (app/landmarks) builds with: the same helpers and
+  // materials the branches below use, plus flat colours cached by value so
+  // modules never make a material of their own.
+  const moduleMaterials: LandmarkKit["materials"] = {
+    concrete, paleConcrete, agedConcrete, boardConcrete, sageConcrete,
+    whiteStone, marble, cream, stationCream, oliveBuff, fadedPaint,
+    brick, redBrick, deepBrick, brickTrim, terracotta, plazaBrick, plazaRed, tileRoof,
+    peach, salmon, pink, pinkTrim, roseBeige, monumentRed, canopyBeige,
+    glass, darkGlass, ribbonGlass, atriumGlass, skyGlass, archDark, recess,
+    accent, bronze, copperDark, silverPanel, tinRoof, roofGrey, plantGrey, roofTerrace, stoneStep,
+    lawn, packedEarth, water, poolTurquoise, tealArch, seatGreen,
+    wornAsphalt, yardPaving,
+    bark: landmarkBark, canopy: landmarkCanopy, lightCanopy: landmarkLightCanopy, krishnachura: landmarkKrishnachura,
+  };
+  const moduleColours = new Map<string, THREE.MeshStandardMaterial>();
+  const moduleMaterial: LandmarkKit["material"] = (color, options = {}) => {
+    const roughness = options.roughness ?? 0.85;
+    const metalness = options.metalness ?? 0;
+    const key = `${color}:${roughness}:${metalness}`;
+    let material = moduleColours.get(key);
+    if (!material) {
+      material = new THREE.MeshStandardMaterial({ color, roughness, metalness });
+      moduleColours.set(key, material);
+    }
+    return material;
+  };
+  const moduleLitMaterial: LandmarkKit["litMaterial"] = (color, strength = 0.5, tint = 0xffc27a) => {
+    const key = `lit:${color}:${strength}:${tint}`;
+    let material = moduleColours.get(key);
+    if (!material) {
+      material = nightLit(new THREE.MeshStandardMaterial({ color, roughness: 0.5, metalness: 0.1 }), strength, tint);
+      moduleColours.set(key, material);
+    }
+    return material;
+  };
+  const addMesh: LandmarkKit["addMesh"] = (parent, geometry, material, position = [0, 0, 0], rotationY = 0) => {
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.position.set(...position);
+    mesh.rotation.y = rotationY;
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    parent.add(mesh);
+    return mesh;
+  };
+  const addPrism: LandmarkKit["addPrism"] = (parent, points, y, height, material) => {
+    const geometry = new THREE.ExtrudeGeometry(polygonShape(points), { depth: height, bevelEnabled: false, curveSegments: 1 });
+    geometry.rotateX(-Math.PI / 2);
+    return addMesh(parent, geometry, material, [0, y, 0]);
+  };
+  const landmarkModuleStats: Record<string, LandmarkModuleStats> = {};
+  scene.userData.landmarkModuleStats = landmarkModuleStats;
+  // A module that throws or overruns its triangle budget must not take the
+  // rest of the city down with it. It is only logged (an uncaught error would
+  // raise the dev overlay over everyone's view) and kept in the diagnostics:
+  // `__birdFlightDiagnostics().landmarkModules[key]`.
+  const reportLandmarkModule = (message: string) => console.error(message);
+
   const detailGroup = (landmark: DhakaLandmark) => {
     const bounds = allBounds.get(landmark.kind)!;
     const group = new THREE.Group();
     group.name = `${landmark.label} signature architecture`;
     group.position.set((bounds.minX + bounds.maxX) / 2, 0.9, (bounds.minZ + bounds.maxZ) / 2);
-    if (proceduralKinds.has(landmark.kind)) group.rotation.y = landmark.heading;
+    if (proceduralKinds.has(landmark.kind) || LANDMARK_MODULE_BY_KIND.has(landmark.kind)) group.rotation.y = landmark.heading;
     root.add(group);
     const anchor = (osmId: number) => {
       const part = partBounds.get(osmId);
@@ -12469,11 +12584,94 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
       bodies.castShadow = true;
       bodies.receiveShadow = true;
       group.add(bodies, windows);
+    } else {
+      // Every other landmark lives in its own file under app/landmarks/ and
+      // builds itself with the kit (see the guide in app/landmarks/kit.ts).
+      const landmarkModule = LANDMARK_MODULE_BY_KIND.get(landmark.kind);
+      if (landmarkModule) {
+        // Its extents are local to its heading, so its default collider is a
+        // turned box added below rather than the world-axis bounds box.
+        boundsCollider = false;
+        colliderTop = landmark.altitude;
+        let extentsCollider = true;
+        const kit: LandmarkKit = {
+          THREE,
+          group,
+          materials: moduleMaterials,
+          material: moduleMaterial,
+          litMaterial: moduleLitMaterial,
+          addBox,
+          addCylinder,
+          addCone,
+          addLathe,
+          domeProfile,
+          addFinial,
+          addChhatri,
+          addArcSlab,
+          addBeam,
+          addQuads,
+          addSweptBox,
+          addPrism,
+          addGeodesicDome,
+          addMesh,
+          addTree: addLandmarkTree,
+          addPalm,
+          roundArch,
+          pointedArch,
+          rectPane,
+          discPane,
+          trianglePane,
+          offsetPolygon,
+          wallEdges,
+          addOnWall,
+          addBays,
+          solid,
+          solidBox,
+          solidTiles,
+          clearSite,
+          clearOval,
+          setColliderTop: (value) => { colliderTop = value; },
+          setBoundsCollider: (enabled) => { extentsCollider = enabled; },
+          setPerchTarget: (x, z) => { perchTarget = [x, z]; },
+          toLocal,
+          worldToLocal: (x, z) => {
+            const dx = x - group.position.x;
+            const dz = z - group.position.z;
+            return [dx * cosH - dz * sinH, dx * sinH + dz * cosH];
+          },
+        };
+        const stats: LandmarkModuleStats = { triangles: 0, drawCalls: 0, budget: landmarkModule.triangleBudget ?? 4000 };
+        landmarkModuleStats[landmarkModule.key] = stats;
+        try {
+          landmarkModule.build(kit);
+          if (extentsCollider) solidBox(0, 0, landmarkModule.extents[0], landmarkModule.extents[1], colliderTop);
+        } catch (error) {
+          // Leave a bare, collider-free site rather than half a landmark.
+          group.clear();
+          colliders.length = colliderStart;
+          perchTarget = [0, 0];
+          stats.error = error instanceof Error ? error.message : String(error);
+          reportLandmarkModule(`Landmark module "${landmarkModule.key}" failed to build: ${stats.error}`);
+        }
+      }
     }
 
     bakeGroup(group);
     group.updateMatrixWorld(true);
     group.traverse((object) => { object.matrixAutoUpdate = false; });
+    const moduleStats = landmarkModuleStats[landmark.kind];
+    if (moduleStats) {
+      group.traverse((object) => {
+        if (!(object instanceof THREE.Mesh)) return;
+        const geometry = object.geometry as THREE.BufferGeometry;
+        const faces = (geometry.index ? geometry.index.count : geometry.getAttribute("position").count) / 3;
+        moduleStats.triangles += Math.round(faces * (object instanceof THREE.InstancedMesh ? object.count : 1));
+        moduleStats.drawCalls += 1;
+      });
+      if (moduleStats.triangles > moduleStats.budget) {
+        reportLandmarkModule(`Landmark module "${landmark.kind}" is ${moduleStats.triangles} triangles, over its budget of ${moduleStats.budget}.`);
+      }
+    }
     const bounds = allBounds.get(landmark.kind)!;
     if (boundsCollider) {
       colliders.push({
@@ -12486,7 +12684,7 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
     }
     // Generic plots keep a forecourt off every solid part of the landmark;
     // sites that stand in a compound keep a wider one.
-    const plotGap = LANDMARK_PLOT_GAP[landmark.kind] ?? 16;
+    const plotGap = LANDMARK_MODULE_BY_KIND.get(landmark.kind)?.plotGap ?? LANDMARK_PLOT_GAP[landmark.kind] ?? 16;
     for (let index = colliderStart; index < colliders.length; index++) {
       if (colliders[index].top > 0) colliders[index].gap = plotGap;
     }
@@ -15088,6 +15286,7 @@ void main() {`,
         maxFrameMs,
         longFrames,
         mapBuildMs: Number.parseFloat(renderer.domElement.dataset.mapBuildMs ?? "") || null,
+        landmarkModules: (scene.userData.landmarkModuleStats as Record<string, LandmarkModuleStats> | undefined) ?? {},
         trafficVehicles: trafficSimulation?.vehicleCount ?? 0,
         trafficTickHz: trafficSimulation?.tickHz ?? 0,
         landing: {
@@ -15165,7 +15364,10 @@ void main() {`,
       if (!landmark) return false;
       const world = coordinatesToWorld(landmark.lat, landmark.lon);
       inspectionTarget = new THREE.Vector3(world.x, Math.max(6, landmark.altitude * 0.42), world.y);
-      inspectionCameraOffset = kind === "airport"
+      const landmarkModule = LANDMARK_MODULE_BY_KIND.get(kind);
+      inspectionCameraOffset = landmarkModule
+        ? landmarkModule.inspectDistance ?? Math.max(105, landmark.altitude * 1.45, Math.max(...landmarkModule.extents) * 2.4)
+        : kind === "airport"
         ? 900 // the runway and both terminals span 1.3 × 3.2 km
         : kind === "tejgaon-airport" ? 700
         : kind === "sayedabad-bus-terminal" || kind === "gabtoli-bus-terminal" ? 230
