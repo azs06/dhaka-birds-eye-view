@@ -600,3 +600,25 @@ test("climb and dive orientation pitches the bird nose-up on ascent and nose-dow
   assert.match(component, /const diveSuppression = clamp\(/);
   assert.match(component, /swoopMomentum/);
 });
+
+test("horizontal bird picker ships portrait cards, sky sprites and per-bird animations", async () => {
+  const [component, css] = await Promise.all([
+    readFile(new URL("../app/BirdFlight.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(component, /className="bird-card-media"/);
+  assert.match(component, /className="title-sky-stage"/);
+  assert.match(css, /\.menu-bird \.menu-list \{[^}]*grid-template-columns: repeat\(6,/);
+
+  for (const plate of ["sky-dawn-clean", "sky-dusk-clean", "sky-dawn-phone-clean"]) {
+    await access(new URL(`../public/title/${plate}.jpg`, import.meta.url));
+  }
+  for (const bird of BIRDS) {
+    await access(new URL(`../public/title/card-${bird.id}.jpg`, import.meta.url));
+    await access(new URL(`../public/title/bird-sky-dawn-${bird.id}.png`, import.meta.url));
+    await access(new URL(`../public/title/bird-sky-dusk-${bird.id}.png`, import.meta.url));
+    assert.match(css, new RegExp(`@keyframes bird-enter-${bird.id}\\b`), `${bird.id} missing entrance animation`);
+    assert.match(css, new RegExp(`@keyframes bird-flap-${bird.id}\\b`), `${bird.id} missing wing animation`);
+  }
+});

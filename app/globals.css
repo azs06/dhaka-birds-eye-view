@@ -30,6 +30,7 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
    page pan, but it inherits, so scrollable panels and real text have to opt back in. */
 .flight-shell { position: fixed; inset: 0; width: 100%; height: 100%; overflow: hidden; isolation: isolate; touch-action: none; -webkit-user-select: none; user-select: none; }
 .hud-panel, .pause-overlay, .title-screen, .menu-list { touch-action: pan-y; }
+.menu-bird .menu-list { touch-action: pan-x; }
 .share-fallback input, .map-source { -webkit-user-select: text; user-select: text; }
 .num, kbd { font-family: var(--font-mono), ui-monospace, monospace; font-variant-numeric: tabular-nums; }
 .flight-shell[lang="bn"] .num { font-family: var(--font-bangla), sans-serif; }
@@ -234,15 +235,130 @@ kbd { display: inline-grid; place-items: center; min-width: 24px; height: 24px; 
    thirds of the sky stay clear. */
 .title-screen { position: absolute; inset: 0; z-index: 6; overflow: hidden; color: var(--chalk); transition: opacity .9s ease; }
 .title-screen.leaving { opacity: 0; pointer-events: none; }
-/* The painted sky carries the chosen bird: one set of art per bird, picked by data-bird.
-   The crow's art sits underneath, so a bird still loading never uncovers the scene. */
-.title-sky { --sky-dawn: url("/title/sky-dawn.jpg"); --sky-dusk: url("/title/sky-dusk.jpg"); --sky-phone: url("/title/sky-dawn-phone.jpg"); position: absolute; inset: -4%; z-index: -2; background: var(--sky-dawn) center / cover, url("/title/sky-dawn.jpg") center / cover; animation: title-drift 38s ease-in-out infinite alternate; }
-.title-sky[data-bird="doel"] { --sky-dawn: url("/title/sky-dawn-doel.jpg"); --sky-dusk: url("/title/sky-dusk-doel.jpg"); --sky-phone: url("/title/sky-dawn-phone-doel.jpg"); }
-.title-sky[data-bird="shalik"] { --sky-dawn: url("/title/sky-dawn-shalik.jpg"); --sky-dusk: url("/title/sky-dusk-shalik.jpg"); --sky-phone: url("/title/sky-dawn-phone-shalik.jpg"); }
-.title-sky[data-bird="chil"] { --sky-dawn: url("/title/sky-dawn-chil.jpg"); --sky-dusk: url("/title/sky-dusk-chil.jpg"); --sky-phone: url("/title/sky-dawn-phone-chil.jpg"); }
-.title-sky[data-bird="tiya"] { --sky-dawn: url("/title/sky-dawn-tiya.jpg"); --sky-dusk: url("/title/sky-dusk-tiya.jpg"); --sky-phone: url("/title/sky-dawn-phone-tiya.jpg"); }
-.title-sky[data-bird="machhranga"] { --sky-dawn: url("/title/sky-dawn-machhranga.jpg"); --sky-dusk: url("/title/sky-dusk-machhranga.jpg"); --sky-phone: url("/title/sky-dawn-phone-machhranga.jpg"); }
-.title-sky[data-art="dusk"] { background-image: var(--sky-dusk), url("/title/sky-dusk.jpg"); }
+/* Clean painted sky plate + independent bird sprite layer, so each species can
+   fly into the sky along its own path while drifting together with the clouds. */
+.title-sky { position: absolute; inset: -4%; z-index: -2; overflow: hidden; container-type: size; animation: title-drift 38s ease-in-out infinite alternate; }
+.title-sky-stage { position: absolute; left: 50%; top: 50%; width: max(100cqw, 160cqh); height: max(100cqh, 62.5cqw); transform: translate(-50%, -50%); background: url("/title/sky-dawn-clean.jpg") center / 100% 100% no-repeat, url("/title/sky-dawn.jpg") center / 100% 100% no-repeat; }
+.title-sky[data-art="dusk"] .title-sky-stage { background-image: url("/title/sky-dusk-clean.jpg"), url("/title/sky-dusk.jpg"); }
+.sky-bird { --bird-dawn: url("/title/bird-sky-dawn-crow.png"); --bird-dusk: url("/title/bird-sky-dusk-crow.png"); position: absolute; left: 58.25%; top: 34.8%; width: 19.5%; height: 15.2%; pointer-events: none; will-change: transform, opacity; }
+.title-sky[data-art="dusk"] .sky-bird { left: 61.125%; top: 29.6%; width: 15.375%; height: 10.2%; }
+.sky-bird[data-bird="doel"] { --bird-dawn: url("/title/bird-sky-dawn-doel.png"); --bird-dusk: url("/title/bird-sky-dusk-doel.png"); }
+.sky-bird[data-bird="shalik"] { --bird-dawn: url("/title/bird-sky-dawn-shalik.png"); --bird-dusk: url("/title/bird-sky-dusk-shalik.png"); }
+.sky-bird[data-bird="chil"] { --bird-dawn: url("/title/bird-sky-dawn-chil.png"); --bird-dusk: url("/title/bird-sky-dusk-chil.png"); }
+.sky-bird[data-bird="tiya"] { --bird-dawn: url("/title/bird-sky-dawn-tiya.png"); --bird-dusk: url("/title/bird-sky-dusk-tiya.png"); }
+.sky-bird[data-bird="machhranga"] { --bird-dawn: url("/title/bird-sky-dawn-machhranga.png"); --bird-dusk: url("/title/bird-sky-dusk-machhranga.png"); }
+.sky-bird-wing { display: block; width: 100%; height: 100%; transform-origin: 48% 54%; animation: sky-bird-soar 5.4s ease-in-out infinite; will-change: transform; }
+.sky-bird-sprite { display: block; width: 100%; height: 100%; background: var(--bird-dawn) center / contain no-repeat; }
+.title-sky[data-art="dusk"] .sky-bird-sprite { background-image: var(--bird-dusk); }
+.sky-bird.leaving { animation: sky-bird-leave .62s cubic-bezier(.32, 0, .67, 0) forwards; }
+@keyframes sky-bird-leave {
+  from { opacity: 1; transform: translate3d(0, 0, 0) scale(1) rotate(0deg); }
+  to { opacity: 0; transform: translate3d(-115%, -75%, 0) scale(.52) rotate(-14deg); }
+}
+@keyframes sky-bird-soar {
+  0%, 100% { transform: translate3d(0, 0, 0) rotate(0deg); }
+  50% { transform: translate3d(-1.4%, -2.6%, 0) rotate(-1.4deg); }
+}
+/* 1. House crow: steady rooftop climb from lower-right foreground with 4 deliberate strokes. */
+.sky-bird:is(.entering, .initial)[data-bird="crow"] { animation: bird-enter-crow 1.35s cubic-bezier(.18, .82, .22, 1) both; }
+.sky-bird:is(.entering, .initial)[data-bird="crow"] .sky-bird-wing { animation: bird-flap-crow 1.35s ease-in-out, sky-bird-soar 5.4s ease-in-out 1.35s infinite; }
+@keyframes bird-enter-crow {
+  0% { opacity: 0; transform: translate3d(165%, 275%, 0) scale(1.95) rotate(-10deg); }
+  16% { opacity: 1; }
+  52% { transform: translate3d(52%, 78%, 0) scale(1.32) rotate(7deg); }
+  82% { transform: translate3d(-8%, 8%, 0) scale(1.04) rotate(-4deg); }
+  100% { opacity: 1; transform: translate3d(0, 0, 0) scale(1) rotate(0deg); }
+}
+@keyframes bird-flap-crow {
+  0%, 100% { transform: scaleY(1); }
+  14% { transform: scaleY(.72) translateY(3%); }
+  28% { transform: scaleY(1.07) translateY(-2%); }
+  44% { transform: scaleY(.75) translateY(2.5%); }
+  58% { transform: scaleY(1.05) translateY(-1.5%); }
+  74% { transform: scaleY(.84) translateY(1.5%); }
+  88% { transform: scaleY(1.02); }
+}
+/* 2. Magpie-robin: classic passerine flap-and-bound undulating wave arcs. */
+.sky-bird:is(.entering, .initial)[data-bird="doel"] { animation: bird-enter-doel 1.48s cubic-bezier(.2, .8, .2, 1) both; }
+.sky-bird:is(.entering, .initial)[data-bird="doel"] .sky-bird-wing { animation: bird-flap-doel 1.48s ease-in-out, sky-bird-soar 4.8s ease-in-out 1.48s infinite; }
+@keyframes bird-enter-doel {
+  0% { opacity: 0; transform: translate3d(205%, 135%, 0) scale(1.55) rotate(14deg); }
+  14% { opacity: 1; }
+  32% { transform: translate3d(132%, 22%, 0) scale(1.34) rotate(18deg); }
+  54% { transform: translate3d(74%, 78%, 0) scale(1.2) rotate(-12deg); }
+  78% { transform: translate3d(20%, -18%, 0) scale(1.07) rotate(12deg); }
+  100% { opacity: 1; transform: translate3d(0, 0, 0) scale(1) rotate(0deg); }
+}
+@keyframes bird-flap-doel {
+  0%, 100% { transform: scale(1, 1); }
+  10%, 24% { transform: scale(1, .68); }
+  17%, 30% { transform: scale(1, 1.08); }
+  40%, 50% { transform: scale(.88, .8); }
+  62%, 74% { transform: scale(1, .72); }
+  68%, 82% { transform: scale(1, 1.06); }
+}
+/* 3. Common myna: bold upward street-mist burst with an energetic S-bank. */
+.sky-bird:is(.entering, .initial)[data-bird="shalik"] { animation: bird-enter-shalik 1.24s cubic-bezier(.18, .86, .22, 1) both; }
+.sky-bird:is(.entering, .initial)[data-bird="shalik"] .sky-bird-wing { animation: bird-flap-shalik 1.24s linear, sky-bird-soar 5s ease-in-out 1.24s infinite; }
+@keyframes bird-enter-shalik {
+  0% { opacity: 0; transform: translate3d(75%, 320%, 0) scale(2.15) rotate(16deg); }
+  15% { opacity: 1; }
+  44% { transform: translate3d(62%, 118%, 0) scale(1.48) rotate(22deg); }
+  76% { transform: translate3d(-22%, 24%, 0) scale(1.1) rotate(-15deg); }
+  100% { opacity: 1; transform: translate3d(0, 0, 0) scale(1) rotate(0deg); }
+}
+@keyframes bird-flap-shalik {
+  0%, 100% { transform: scaleY(1); }
+  10%, 30%, 50%, 70% { transform: scaleY(.7); }
+  20%, 40%, 60%, 82% { transform: scaleY(1.07); }
+}
+/* 4. Black kite: wide high-altitude thermal circle on motionless outstretched wings. */
+.sky-bird:is(.entering, .initial)[data-bird="chil"] { animation: bird-enter-chil 1.85s cubic-bezier(.22, .74, .18, 1) both; }
+.sky-bird:is(.entering, .initial)[data-bird="chil"] .sky-bird-wing { animation: bird-flap-chil 1.85s ease-in-out, sky-bird-soar 6.8s ease-in-out 1.85s infinite; }
+@keyframes bird-enter-chil {
+  0% { opacity: 0; transform: translate3d(175%, -155%, 0) scale(.68) rotate(-28deg); }
+  18% { opacity: 1; }
+  48% { transform: translate3d(58%, 74%, 0) scale(1.22) rotate(-12deg); }
+  78% { transform: translate3d(-24%, 26%, 0) scale(1.06) rotate(9deg); }
+  100% { opacity: 1; transform: translate3d(0, 0, 0) scale(1) rotate(0deg); }
+}
+@keyframes bird-flap-chil {
+  0%, 100% { transform: scale(1, 1); }
+  38% { transform: scale(.93, .97) skewX(-3deg); }
+  74% { transform: scale(1.02, 1.01) skewX(2deg); }
+}
+/* 5. Rose-ringed parakeet: fast emerald arrow streak from far right + tight whip-turn. */
+.sky-bird:is(.entering, .initial)[data-bird="tiya"] { animation: bird-enter-tiya 1.04s cubic-bezier(.14, .9, .22, 1) both; }
+.sky-bird:is(.entering, .initial)[data-bird="tiya"] .sky-bird-wing { animation: bird-flap-tiya 1.04s linear, sky-bird-soar 4.4s ease-in-out 1.04s infinite; }
+@keyframes bird-enter-tiya {
+  0% { opacity: 0; transform: translate3d(235%, 58%, 0) scale(1.5) rotate(9deg); }
+  12% { opacity: 1; }
+  66% { transform: translate3d(-28%, -22%, 0) scale(.94) rotate(-20deg); }
+  86% { transform: translate3d(-4%, -3%, 0) scale(.99) rotate(5deg); }
+  100% { opacity: 1; transform: translate3d(0, 0, 0) scale(1) rotate(0deg); }
+}
+@keyframes bird-flap-tiya {
+  0%, 100% { transform: scaleY(1); }
+  8%, 22%, 36%, 50%, 64% { transform: scaleY(.68); }
+  15%, 29%, 43%, 57%, 72% { transform: scaleY(1.08); }
+}
+/* 6. White-throated kingfisher: steep river-hunter stoop followed by a sharp J-curve hover pull-up. */
+.sky-bird:is(.entering, .initial)[data-bird="machhranga"] { animation: bird-enter-machhranga 1.42s cubic-bezier(.18, .82, .2, 1) both; }
+.sky-bird:is(.entering, .initial)[data-bird="machhranga"] .sky-bird-wing { animation: bird-flap-machhranga 1.42s ease-in-out, sky-bird-soar 5.2s ease-in-out 1.42s infinite; }
+@keyframes bird-enter-machhranga {
+  0% { opacity: 0; transform: translate3d(145%, -245%, 0) scale(.82) rotate(-42deg); }
+  14% { opacity: 1; }
+  50% { transform: translate3d(34%, 98%, 0) scale(1.32) rotate(-8deg); }
+  74% { transform: translate3d(-12%, 16%, 0) scale(1.06) rotate(16deg); }
+  100% { opacity: 1; transform: translate3d(0, 0, 0) scale(1) rotate(0deg); }
+}
+@keyframes bird-flap-machhranga {
+  0% { transform: scale(.86, .82); }
+  44% { transform: scale(.88, .84); }
+  54%, 68%, 80% { transform: scale(1.02, .68); }
+  61%, 74%, 88% { transform: scale(1, 1.08); }
+  100% { transform: scale(1, 1); }
+}
 @keyframes title-drift { from { transform: scale(1.02) translate(0, 0); } to { transform: scale(1.09) translate(-2.2%, -1.2%); } }
 .title-shade { position: absolute; inset: 0; z-index: -1; pointer-events: none; background: linear-gradient(180deg, rgba(20,12,8,.28), transparent 22%, transparent 58%, rgba(20,12,8,.55)); }
 .title-top { position: absolute; top: 22px; left: 28px; right: 16px; display: flex; align-items: center; gap: 8px; }
@@ -272,8 +388,10 @@ kbd { display: inline-grid; place-items: center; min-width: 24px; height: 24px; 
 .menu-title p { margin: 6px 0 0; font-size: 16px; font-weight: 500; opacity: .92; }
 .menu-bar { position: absolute; left: 28px; right: 28px; bottom: 28px; display: grid; grid-template-columns: 1.25fr 1fr 1fr 1fr; gap: 10px; opacity: 0; transform: translateY(40px); pointer-events: none; transition: opacity .4s, transform .6s var(--ease); }
 .beat-menu :is(.menu-title, .menu-bar) { opacity: 1; transform: none; }
+.beat-menu .title-menu[data-menu-open="bird"] .menu-title { opacity: 0; transform: translateY(-10px); pointer-events: none; transition: opacity .16s, transform .22s var(--ease); }
 .beat-menu .menu-bar { pointer-events: auto; }
 .menu-w { position: relative; }
+.menu-w.menu-bird { position: static; }
 .menu-tile { position: relative; width: 100%; height: 124px; display: flex; flex-direction: column; justify-content: space-between; padding: 16px 18px; border-radius: 14px; background: var(--glass); -webkit-backdrop-filter: blur(16px) saturate(1.15); backdrop-filter: blur(16px) saturate(1.15); box-shadow: inset 0 0 0 1px var(--line); color: var(--paper); transition: background .15s, transform .15s; }
 .menu-tile:hover { background: var(--glass-solid); transform: translateY(-2px); }
 .tile-k { color: var(--soft); font-size: 12.5px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
@@ -290,7 +408,7 @@ kbd { display: inline-grid; place-items: center; min-width: 24px; height: 24px; 
 .menu-tile.go .tile-v { font-size: 30px; letter-spacing: -.6px; }
 .menu-tile.go kbd { position: absolute; top: 14px; right: 14px; border-color: rgba(251,245,232,.6); }
 .menu-list { position: absolute; left: 0; right: 0; bottom: 134px; z-index: 3; max-height: calc(100vh - 220px); overflow-y: auto; padding: 8px; border-radius: 16px; background: rgba(38,31,28,.95); -webkit-backdrop-filter: blur(18px); backdrop-filter: blur(18px); box-shadow: inset 0 0 0 1px var(--line), 0 18px 48px rgba(20,10,6,.34); opacity: 0; visibility: hidden; transform: scale(.96); transform-origin: 50% calc(100% + 20px); transition: opacity .16s, transform .22s var(--ease), visibility 0s .22s; }
-.menu-bird .menu-list { right: auto; width: 340px; }
+.menu-bird .menu-list { left: 0; right: 0; width: auto; max-height: none; overflow-x: auto; overflow-y: hidden; padding: 10px; display: grid; grid-template-columns: repeat(6, minmax(170px, 1fr)); gap: 10px; scroll-snap-type: x mandatory; transform-origin: 38% calc(100% + 16px); }
 .menu-sky .menu-list { left: auto; width: max(100%, 300px); }
 .menu-w.open .menu-list { opacity: 1; visibility: visible; transform: none; transition: opacity .16s, transform .22s var(--ease); }
 .menu-opt { width: 100%; min-height: 52px; display: grid; grid-template-columns: 12px 1fr auto; column-gap: 12px; align-items: center; padding: 6px 12px; border-radius: 10px; color: var(--paper); }
@@ -305,24 +423,23 @@ kbd { display: inline-grid; place-items: center; min-width: 24px; height: 24px; 
 .menu-opt.selected small { color: #6a5d55; }
 .opt-check { grid-row: 1 / 3; grid-column: 3; width: 16px; height: 16px; margin-left: 10px; }
 
-/* Bird picker: compact species silhouettes; only the active bird expands its full note. */
+/* Horizontal bird gallery: painted portrait cards across the take-off bar. */
 .tile-bird-glyph { width: 22px; height: 22px; flex: none; display: block; }
-.bird-opt { width: 100%; min-height: 44px; display: grid; grid-template-columns: 30px 1fr 16px; column-gap: 11px; align-items: center; padding: 7px 11px; border-radius: 11px; color: var(--chalk); transition: background .15s, padding .15s var(--ease), box-shadow .15s; }
-.bird-opt + .bird-opt { margin-top: 2px; }
-.bird-opt:hover { background: rgba(246,240,225,.06); }
-.bird-opt.selected { align-items: start; padding: 10px 11px; background: rgba(246,240,225,.11); box-shadow: inset 2.5px 0 0 var(--mist), inset 0 0 0 1px rgba(246,240,225,.16); }
-.bird-opt-icon { width: 30px; height: 30px; flex: none; display: grid; place-items: center; border-radius: 9px; background: rgba(246,240,225,.11); box-shadow: inset 0 0 0 1px rgba(246,240,225,.12); transition: background .15s, box-shadow .15s; }
-.bird-opt.selected .bird-opt-icon { margin-top: 1px; background: var(--paper); box-shadow: 0 2px 6px rgba(15,9,5,.25); }
-.bird-glyph { width: 22px; height: 22px; display: block; }
-.bird-opt-text { min-width: 0; display: flex; flex-direction: column; }
-.bird-opt-text b { overflow: hidden; font-size: 14.5px; font-weight: 600; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
-.flight-shell[lang="bn"] .bird-opt-text b { font-size: 15.5px; line-height: 1.38; }
-.bird-opt-note { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows .18s var(--ease), opacity .16s ease, margin-top .18s var(--ease); }
-.bird-opt.selected .bird-opt-note { grid-template-rows: 1fr; margin-top: 3px; opacity: 1; }
-.bird-opt-note small { overflow: hidden; color: var(--soft); font-size: 13px; line-height: 1.42; text-wrap: pretty; }
-.flight-shell[lang="bn"] .bird-opt-note small { font-size: 13.5px; line-height: 1.48; }
-.bird-opt .opt-check { grid-row: 1; grid-column: 3; margin-left: 0; margin-top: 2px; color: var(--mist); opacity: 0; transition: opacity .14s; }
-.bird-opt.selected .opt-check { opacity: 1; }
+.bird-card { display: flex; flex-direction: column; gap: 9px; padding: 7px 7px 11px; border-radius: 12px; background: rgba(246,240,225,.05); box-shadow: inset 0 0 0 1px rgba(246,240,225,.09); color: var(--chalk); scroll-snap-align: start; transition: background .16s, transform .18s var(--ease), box-shadow .16s; }
+.bird-card:hover { background: rgba(246,240,225,.1); transform: translateY(-2px); }
+.bird-card.selected { background: var(--paper); color: var(--kohl); box-shadow: 0 8px 22px rgba(15,8,4,.32); }
+.bird-card-media { position: relative; width: 100%; aspect-ratio: 480 / 340; overflow: hidden; border-radius: 8px; background: #352a27; box-shadow: inset 0 0 0 1px rgba(246,240,225,.14); }
+.bird-card.selected .bird-card-media { box-shadow: inset 0 0 0 1px rgba(42,35,32,.14); }
+.bird-card-art { display: block; width: 100%; height: 100%; background: center / cover no-repeat; transition: transform .32s var(--ease); }
+.bird-card:hover .bird-card-art { transform: scale(1.05); }
+.bird-card-check { position: absolute; top: 7px; right: 7px; width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; background: var(--paper); color: var(--kohl); box-shadow: 0 2px 8px rgba(18,10,6,.36); }
+.bird-card-check .opt-check { width: 14px; height: 14px; margin: 0; }
+.bird-card-body { min-width: 0; display: flex; flex-direction: column; gap: 3px; padding: 0 4px; }
+.bird-card-body b { overflow: hidden; font-size: 14.5px; font-weight: 700; line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; }
+.flight-shell[lang="bn"] .bird-card-body b { font-size: 15.5px; line-height: 1.35; }
+.bird-card-body small { color: var(--soft); font-size: 12.5px; line-height: 1.36; text-wrap: pretty; }
+.flight-shell[lang="bn"] .bird-card-body small { font-size: 13px; line-height: 1.45; }
+.bird-card.selected .bird-card-body small { color: #675a52; }
 
 /* ================= phone ================= */
 @media (max-width: 700px) {
@@ -370,12 +487,14 @@ kbd { display: inline-grid; place-items: center; min-width: 24px; height: 24px; 
   .menu-tile.go .tile-k, .menu-tile.go kbd { display: none; }
   .menu-tile.go .tile-v { font-size: 24px; }
   .menu-sky { grid-column: 1 / 3; }
-  .menu-list, .menu-bird .menu-list, .menu-sky .menu-list { position: fixed; top: calc(max(16px, env(safe-area-inset-top)) + 60px); left: 12px; right: 12px; bottom: auto; width: auto; max-height: 55vh; }
+  .menu-list, .menu-sky .menu-list { position: fixed; top: calc(max(16px, env(safe-area-inset-top)) + 60px); left: 12px; right: 12px; bottom: auto; width: auto; max-height: 55vh; }
+  .menu-bird .menu-list { position: fixed; top: auto; left: 12px; right: 12px; bottom: calc(max(14px, env(safe-area-inset-bottom)) + 262px); width: auto; max-height: none; grid-template-columns: none; grid-auto-flow: column; grid-auto-columns: 168px; -webkit-overflow-scrolling: touch; transform-origin: 50% 100%; }
 }
 @media (max-width: 700px) and (orientation: portrait) {
-  .title-sky[data-art="dawn"] { background-image: var(--sky-phone), url("/title/sky-dawn-phone.jpg"); }
+  .title-sky[data-art="dawn"] .title-sky-stage { width: max(100cqw, 46.1538cqh); height: max(100cqh, 216.6667cqw); background-image: url("/title/sky-dawn-phone-clean.jpg"), url("/title/sky-dawn-phone.jpg"); }
+  .title-sky[data-art="dawn"] .sky-bird { left: 41.2%; top: 17.6%; width: 15.7%; height: 3.55%; }
   /* The dusk art is landscape; slide it so the bird, right of centre, stays on screen. */
-  .title-sky[data-art="dusk"] { background-position: 73% center; }
+  .title-sky[data-art="dusk"] .title-sky-stage { left: 73%; transform: translate(-73%, -50%); }
 }
 /* Short screens: keep the bar and its lists clear of the title. */
 @media (max-height: 640px) {
@@ -384,14 +503,17 @@ kbd { display: inline-grid; place-items: center; min-width: 24px; height: 24px; 
   .menu-title .title-name { font-size: 40px; }
   .menu-tile { height: 110px; }
   .menu-list { bottom: 120px; max-height: calc(100vh - 150px); }
+  .menu-bird .menu-list { max-height: none; }
 }
 @media (max-width: 700px) and (max-height: 640px) {
   .menu-tile { height: 72px; }
   .menu-title { bottom: 250px; }
+  .menu-bird .menu-list { bottom: calc(max(14px, env(safe-area-inset-bottom)) + 236px); }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .title-sky, .title-any, .eq i, .perch-prompt[data-state="commit"], .title-live i { animation: none; }
+  .title-sky, .title-any, .eq i, .perch-prompt[data-state="commit"], .title-live i, .sky-bird, .sky-bird-wing { animation: none !important; }
   .title-sky { transform: scale(1.03); }
-  .flight-dynamics, .bird-opt, .bird-opt-note { transition: none; }
+  .sky-bird.leaving { display: none; }
+  .flight-dynamics, .bird-card, .bird-card-art { transition: none; }
 }
