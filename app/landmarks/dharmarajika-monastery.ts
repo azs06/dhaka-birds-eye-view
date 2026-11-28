@@ -68,7 +68,9 @@ const landmark: LandmarkModule = {
     const orange = kit.material(0xe0873a, { roughness: 0.9 });
     const marble = materials.marble;
     const paving = materials.yardPaving;
-    const dark = materials.archDark;
+    // Window rows: a shaded ochre rather than black, so the yellow walls are
+    // not striped by thick dark bands; it still lights up after dark.
+    const dark = kit.litMaterial(0x7c6942, 0.55);
 
     const en = (east: number, north: number): PlanPoint =>
       kit.toLocal(NODE_LAT + north / METRES_PER_DEG_LAT, NODE_LON + east / METRES_PER_DEG_LON);
@@ -219,7 +221,7 @@ const landmark: LandmarkModule = {
       kit.addPrism(group, kit.offsetPolygon(plan, -0.3), top, 0.06, marble);
       kit.addPrism(group, kit.offsetPolygon(plan, 0.1), top - 0.7, 0.7, orange);
       for (let storey = 0; storey < Math.round(top / 3.3); storey++) {
-        kit.addPrism(group, kit.offsetPolygon(plan, 0.06), 1.3 + storey * 3.3, 0.9, dark);
+        kit.addPrism(group, kit.offsetPolygon(plan, 0.06), 1.55 + storey * 3.3, 0.5, dark);
       }
       const xs = plan.map((p) => p[0]);
       const zs = plan.map((p) => p[1]);

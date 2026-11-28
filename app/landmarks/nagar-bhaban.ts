@@ -54,6 +54,8 @@ const landmark: LandmarkModule = {
     const trim = kit.material(0xd8d1bd, { roughness: 0.88 });
     const shade = kit.material(0xa59d8a, { roughness: 0.92 });
     const dark = materials.archDark;
+    // Eight materials: the clock rims share the openings' dark, the faces the
+    // trim, the porch walk the roof grey, and every tree the palms' canopy.
 
     // A rectangle of the plan from two opposite OSM corners (world metres).
     const rect = (ax: number, az: number, bx: number, bz: number): Rect => {
@@ -170,8 +172,8 @@ const landmark: LandmarkModule = {
     const clockFace = kit.discPane(2.7, 20);
     const clockRim = kit.discPane(3.2, 20);
     for (const [turn, dx, dz] of [[0, 0, 1], [Math.PI, 0, -1], [Math.PI / 2, 1, 0], [-Math.PI / 2, -1, 0]]) {
-      addMesh(group, clockRim, materials.recess, [slab.x + dx * 6.32, ROOF + 4.7, slab.z + dz * 6.32], turn);
-      addMesh(group, clockFace, materials.whiteStone, [slab.x + dx * 6.4, ROOF + 5.2, slab.z + dz * 6.4], turn);
+      addMesh(group, clockRim, dark, [slab.x + dx * 6.32, ROOF + 4.7, slab.z + dz * 6.32], turn);
+      addMesh(group, clockFace, trim, [slab.x + dx * 6.4, ROOF + 5.2, slab.z + dz * 6.4], turn);
     }
 
     // The lawn, the drive up its middle, and the gateway on Phoenix Road.
@@ -182,10 +184,10 @@ const landmark: LandmarkModule = {
     const lawnSx = Math.abs(lawnX1 - lawnX0);
     const lawnSz = Math.abs(lawnZ1 - lawnZ0);
     addBox(group, [lawnSx, 0.1, lawnSz], [lawnX, 0.05, lawnZ], materials.lawn);
-    addBox(group, [9, 0.16, lawnSz + 6], [porch.x, 0.08, lawnZ], materials.roofTerrace);
+    addBox(group, [9, 0.16, lawnSz + 6], [porch.x, 0.08, lawnZ], materials.roofGrey);
     for (const side of [-1, 1]) {
       for (const along of [-0.3, 0.05, 0.4]) kit.addPalm(group, porch.x + side * 9, lawnZ + along * lawnSz, 13, 0.03, side + along);
-      kit.addTree(group, porch.x + side * 52, lawnZ + 4, 6, 7);
+      kit.addTree(group, porch.x + side * 52, lawnZ + 4, 6, 7, materials.lightCanopy);
       kit.addTree(group, porch.x + side * 34, lawnZ - 6, 5, 6.5, materials.lightCanopy);
     }
     kit.clearSite(lawnX, lawnZ, lawnSx / 2 + 2, lawnSz / 2 + 2);

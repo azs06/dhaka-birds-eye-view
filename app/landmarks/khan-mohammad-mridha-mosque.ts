@@ -47,7 +47,9 @@ const landmark: LandmarkModule = {
     const plaster = kit.material(0xe08c64, { roughness: 0.9 });
     const trim = kit.material(0xc9764f, { roughness: 0.9 });
     const aged = kit.material(0xd6a086, { roughness: 0.95 });
-    const terrace = kit.material(0xb04f3c, { roughness: 0.9 });
+    // Eight materials: the terrace floor and doors share the trim, the stair
+    // the platform's aged plaster, and the trees the palms' canopy.
+    const terrace = trim;
     const recess = kit.material(0xf1e6da, { roughness: 0.9 });
     const P = PLATFORM_TOP;
     const platformX = (PLATFORM_X0 + PLATFORM_X1) / 2;
@@ -57,15 +59,15 @@ const landmark: LandmarkModule = {
 
     // GARDEN: lawn over the whole plot, a path to the stair, a low wall.
     addBox(group, [36, 0.1, 39], [1, 0.05, 0], materials.lawn);
-    addBox(group, [3.4, 0.08, 3.6], [0, 0.12, 17.6], materials.stoneStep);
+    addBox(group, [3.4, 0.08, 3.6], [0, 0.12, 17.6], aged);
     const boundary: Array<[number, number, number, number]> = [
       [36.6, 0.4, 1, -19.6], [0.4, 39.2, -17.2, 0], [0.4, 39.2, 19.2, 0], [15.6, 0.4, -9.2, 19.6], [15.6, 0.4, 11.2, 19.6],
     ];
     for (const [sx, sz, x, z] of boundary) addBox(group, [sx, 1.7, sz], [x, 0.85, z], aged);
     kit.addPalm(group, -9, 14.5, 9, 0.1, 0.4);
     kit.addPalm(group, 12, 15, 10, 0.12, 2.1);
-    kit.addTree(group, -12.5, 15.5, 2.6, 3.2);
-    kit.addTree(group, 7, 16, 2.2, 2.8);
+    kit.addTree(group, -12.5, 15.5, 2.6, 3.2, materials.lightCanopy);
+    kit.addTree(group, 7, 16, 2.2, 2.8, materials.lightCanopy);
 
     // PLATFORM (tahkhana): a plain mass with a moulded edge, the red-painted
     // terrace on top and the vault openings along its sides.
@@ -99,7 +101,7 @@ const landmark: LandmarkModule = {
     for (let i = 0; i < STEPS; i++) {
       const stepTop = P * (1 - i / STEPS);
       const depth = STAIR_RUN / STEPS;
-      addBox(group, [3.2, stepTop, depth], [0, stepTop / 2, PLATFORM_Z1 + depth * (i + 0.5)], materials.stoneStep);
+      addBox(group, [3.2, stepTop, depth], [0, stepTop / 2, PLATFORM_Z1 + depth * (i + 0.5)], aged);
     }
     for (const x of [-1.95, 1.95]) {
       kit.addBeam(group, [x, P + 0.15, PLATFORM_Z1], [x, 0.75, PLATFORM_Z1 + STAIR_RUN + 0.3], 0.7, 1.5, aged);

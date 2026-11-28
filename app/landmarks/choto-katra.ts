@@ -46,11 +46,55 @@ const landmark: LandmarkModule = {
   build(kit) {
     const { group, addBox, addMesh, addPrism, pointedArch, roundArch, rectPane, materials } = kit;
     // Old, soot-darkened brick and grimy limewash, as in the photographs.
-    const brick = kit.material(0x86563f, { roughness: 0.95 });
-    const darkBrick = kit.material(0x5c392a, { roughness: 1 });
-    const plaster = kit.material(0xa89c84, { roughness: 0.95 });
-    const limewash = kit.material(0xbcb39c, { roughness: 0.9 });
-    const weeds = materials.canopy;
+    const brick = kit.material(0x5a4036, { roughness: 1 });
+    const darkBrick = kit.material(0x3a2c26, { roughness: 1 });
+    const plaster = kit.material(0x807a6e, { roughness: 0.95 });
+    const limewash = kit.material(0x948e80, { roughness: 0.95 });
+    const grime = kit.material(0x3b3631, { roughness: 1 });
+
+    // Weathering: a seeded scatter of surviving lime plaster, soot streaks
+    // hanging from the coping and damp-dark brick, a few centimetres proud of
+    // the wall face (under the arches, which stand further out). `rotationY`
+    // turns the patches to face the wall's outward normal.
+    let seed = 1663;
+    const random = () => {
+      seed = (seed * 16807) % 2147483647;
+      return (seed - 1) / 2147483646;
+    };
+    const weather = (cx: number, cz: number, length: number, bottom: number, top: number, rotationY: number, count: number) => {
+      const nx = Math.sin(rotationY);
+      const nz = Math.cos(rotationY);
+      for (let i = 0; i < count; i++) {
+        const roll = random();
+        const u = (random() - 0.5) * (length - 1.6);
+        let width: number;
+        let height: number;
+        let y: number;
+        let material: typeof brick;
+        if (roll < 0.4) {
+          // A soot or rain streak down from the coping.
+          width = 0.6 + random() * 1.6;
+          height = Math.min(top - bottom - 0.3, 1.5 + random() * 4);
+          y = top - height - 0.05;
+          material = grime;
+        } else if (roll < 0.72) {
+          // A surviving patch of grey lime plaster.
+          width = 1 + random() * 3.2;
+          height = 0.7 + random() * 2.2;
+          y = bottom + random() * Math.max(0.1, top - bottom - height - 0.4);
+          material = plaster;
+        } else {
+          // Damp, darker brick near the ground and under the string course.
+          width = 1.2 + random() * 3;
+          height = 0.6 + random() * 1.8;
+          y = bottom + (random() < 0.6 ? 0 : random() * Math.max(0.1, top - bottom - height));
+          material = darkBrick;
+        }
+        const proud = 0.025 + (i % 2) * 0.012;
+        addMesh(group, rectPane(width, height), material, [cx + nz * u + nx * proud, y, cz - nx * u + nz * proud], rotationY);
+      }
+    };
+    const weeds = kit.material(0x4b5733, { roughness: 1 });
     const dark = materials.archDark;
 
     // A coarse pointed arch for the cells of the range.
@@ -106,6 +150,7 @@ const landmark: LandmarkModule = {
           addMesh(group, rectPane(1.0, 1.3), dark, [x, 5.4, -RANGE_DEPTH - 0.1], Math.PI);
         }
       }
+      weather(cx, 0, sx, 0.2, top - 0.4, 0, Math.round(sx * 0.9));
       kit.solidBox(cx, cz, sx / 2, RANGE_DEPTH / 2, top + 0.8);
     }
     // Growth along the coping of the full-height stubs.
@@ -146,6 +191,9 @@ const landmark: LandmarkModule = {
       addMesh(group, pointedArch(1.0, 1.6), dark, [cx + side * 0.15, 6.2, cz + 0.15], turn);
       addMesh(group, roundArch(1.2, 2.0), dark, [side * (GATE_HALF + 0.1), 11.5, -5], side * Math.PI / 2);
     }
+    weather(0, GATE_FRONT, 2 * GATE_HALF - 4, 0.2, 10.4, 0, 12);
+    weather(0, GATE_FRONT + 0.07, 2 * GATE_HALF - 4, 10.7, GATE_TOP - 0.3, 0, 5);
+    for (const side of [-1, 1]) weather(side * GATE_HALF, -RANGE_DEPTH / 2, RANGE_DEPTH, 8.6, 10.4, side * Math.PI / 2, 3);
     // Court side: the inner arch of the passage.
     addMesh(group, pointedArch(5.6, 7.4), darkBrick, [0, 0, GATE_BACK - 0.08], Math.PI);
     addMesh(group, pointedArch(3.4, 4.8), dark, [0, 0, GATE_BACK - 0.14], Math.PI);

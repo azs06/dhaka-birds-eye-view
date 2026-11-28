@@ -44,6 +44,10 @@ import type { MetroCorridorIndex, MetroPoint } from "./metro-corridor";
  *                  structure's deckHalfWidth (ramps are narrower).
  *     lanes        this chain's lane count where it differs from the
  *                  structure's (a single-lane ramp off a four-lane bridge).
+ *     twoWay       true where one chain carries both directions (a river
+ *                  bridge drawn as the midline of its pair); chains are
+ *                  one-way, in the order of their points, by default. Used
+ *                  by the deck traffic.
  *     atGrade      true for a link road on the ground at a ramp foot that the
  *                  map data lacks: drawn as a plain strip of road with no
  *                  parapets, piers or collision.
@@ -94,6 +98,8 @@ export type ElevatedRoad = {
     halfWidth?: number;
     lanes?: number;
     atGrade?: boolean;
+    /** Traffic runs both ways on this chain (a river bridge drawn as one deck); default one-way. */
+    twoWay?: boolean;
     mainSpan?: [number, number, number];
   }>;
 };
@@ -127,8 +133,8 @@ export const ELEVATED_ROADS: ElevatedRoad[] = [
   // apart, 22 m up north of Banani and 15 m south of it, with the Airport,
   // Kuril, Banani, Mohakhali, Bijoy Sarani, Farmgate and FDC ramps. Not in
   // bird collision: like the metro viaduct it is too long a wall to fly round.
-  // The two ramps that leave the (flat, undrawn) Tejgaon Link Flyover are
-  // landed on the ground there instead of starting 8 m up.
+  // The two ramps that leave the Tejgaon Link Flyover (the next entry) start
+  // on its deck, 8 m up.
   {
     key: "dhaka-elevated-expressway",
     label: "Dhaka Elevated Expressway",
@@ -160,15 +166,15 @@ export const ELEVATED_ROADS: ElevatedRoad[] = [
       // on-ramp: 1369879672 → 1369887131
       { halfWidth: 3.25, points: [[23.789352, 90.400406], [23.788083, 90.400198], [23.787414, 90.400114], [23.786829, 90.399993], [23.786734, 90.399942], [23.786551, 90.399775], [23.786272, 90.399388], [23.786090, 90.399210], [23.785996, 90.399146], [23.785583, 90.399004]], heights: [[0, GROUND], [422.6, 15], [457.5, 15]] },
       // off-ramp: 1205232121 → 1172183226
-      { halfWidth: 3.25, points: [[23.777441, 90.397647], [23.777312, 90.397663], [23.776903, 90.397642], [23.774648, 90.397346], [23.774439, 90.397399], [23.774283, 90.397528], [23.774186, 90.397726], [23.774109, 90.398010]], heights: [[0, 15], [40, 15], [409, GROUND]] },
+      { halfWidth: 3.25, points: [[23.777441, 90.397647], [23.777312, 90.397663], [23.776903, 90.397642], [23.774648, 90.397346], [23.774439, 90.397399], [23.774283, 90.397528], [23.774198, 90.397727], [23.774109, 90.398010]], heights: [[0, 15], [40, 15], [409, GROUND]] },
       // on-ramp: 1207419300 → 1172183225
       { halfWidth: 4.25, points: [[23.773980, 90.397756], [23.773967, 90.397550], [23.773914, 90.397442], [23.773810, 90.397334], [23.773692, 90.397283], [23.770077, 90.396647], [23.768969, 90.396352], [23.768748, 90.396249]], heights: [[0, GROUND], [586.1, 15], [620.9, 15]] },
       // off-ramp: 1205232120 → 1172183227
       { halfWidth: 3.25, points: [[23.769495, 90.396280], [23.769730, 90.396254], [23.770321, 90.396302], [23.772227, 90.396624], [23.773068, 90.396691], [23.773594, 90.396709], [23.773785, 90.396751], [23.773979, 90.396876], [23.774129, 90.397086], [23.774168, 90.397366], [23.774109, 90.398010]], heights: [[0, 15], [39.9, 15], [624.6, GROUND]] },
       // on-ramp: 1205213667 → 1207086863 → 1172183223 → 1558255168 → 1207407490 → 1205208515 → 1249810085
-      { halfWidth: 4.25, points: [[23.764132, 90.396461], [23.764108, 90.396380], [23.764077, 90.395694], [23.764008, 90.395215], [23.763967, 90.395066], [23.763875, 90.394870], [23.763681, 90.394654], [23.763237, 90.394362], [23.763065, 90.394201], [23.762206, 90.393723], [23.762023, 90.393709], [23.761930, 90.393732], [23.761840, 90.393791], [23.761716, 90.393839], [23.761105, 90.394334], [23.760848, 90.394510], [23.760705, 90.394581], [23.760518, 90.394633], [23.760262, 90.394624], [23.758859, 90.394397], [23.758039, 90.394211]], heights: [[0, GROUND], [150, 8.5], [279.5, 8.93], [428.6, 9.66], [578.5, 8], [817.5, 15], [877.5, 15]] },
+      { halfWidth: 4.25, points: [[23.764132, 90.396461], [23.764108, 90.396380], [23.764077, 90.395694], [23.764008, 90.395215], [23.763967, 90.395066], [23.763875, 90.394870], [23.763681, 90.394654], [23.763237, 90.394362], [23.763065, 90.394201], [23.762206, 90.393723], [23.762023, 90.393709], [23.761930, 90.393732], [23.761840, 90.393791], [23.761716, 90.393839], [23.761105, 90.394334], [23.760848, 90.394510], [23.760705, 90.394581], [23.760518, 90.394633], [23.760262, 90.394624], [23.758859, 90.394397], [23.758039, 90.394211]], heights: [[0, 8], [150, 8.5], [279.5, 8.93], [428.6, 9.66], [578.5, 8], [817.5, 15], [877.5, 15]] },
       // on-ramp: 1207086862 → 1172183222 → 1558255167
-      { halfWidth: 3.25, points: [[23.764121, 90.394721], [23.764188, 90.394943], [23.764307, 90.396036], [23.764352, 90.396180], [23.764466, 90.396337], [23.764572, 90.396412], [23.764680, 90.396454], [23.764787, 90.396467], [23.764899, 90.396448], [23.765044, 90.396373], [23.765203, 90.396190], [23.765260, 90.395988], [23.765246, 90.395787], [23.765214, 90.395697], [23.765121, 90.395562], [23.764903, 90.395366], [23.763979, 90.394677], [23.763317, 90.394283], [23.763065, 90.394201]], heights: [[0, GROUND], [149.9, 8.23], [603.1, 8.93]] },
+      { halfWidth: 3.25, points: [[23.764121, 90.394721], [23.764188, 90.394943], [23.764307, 90.396036], [23.764352, 90.396180], [23.764466, 90.396337], [23.764572, 90.396412], [23.764680, 90.396454], [23.764787, 90.396467], [23.764899, 90.396448], [23.765044, 90.396373], [23.765203, 90.396190], [23.765260, 90.395988], [23.765246, 90.395787], [23.765214, 90.395697], [23.765121, 90.395562], [23.764903, 90.395366], [23.763979, 90.394677], [23.763317, 90.394283], [23.763065, 90.394201]], heights: [[0, 8], [149.9, 8.23], [603.1, 8.93]] },
       // off-ramp: 1578344159 → 1172183211 → 1558255166
       { halfWidth: 4.25, points: [[23.762734, 90.394919], [23.761379, 90.394822], [23.760548, 90.394750], [23.758620, 90.394460], [23.757913, 90.394333], [23.757749, 90.394279], [23.757553, 90.394176], [23.757400, 90.393991], [23.757323, 90.393865], [23.757283, 90.393750], [23.757237, 90.393488], [23.757257, 90.393242], [23.757318, 90.393026], [23.757652, 90.392004], [23.757975, 90.391136], [23.758388, 90.390363], [23.758464, 90.390201], [23.758533, 90.389960], [23.758571, 90.389520], [23.758471, 90.388268]], heights: [[0, 15], [64.9, 15], [Infinity, GROUND]] },
       // on-ramp: 1207086864 → 1172183208
@@ -197,6 +203,33 @@ export const ELEVATED_ROADS: ElevatedRoad[] = [
       { halfWidth: 4.25, atGrade: true, points: [[23.752689, 90.399194], [23.752902, 90.399647]], heights: [[0, GROUND], [51.8, GROUND]] },
     ],
   },
+  // Tejgaon Link Flyover: the one-way pair (OSM 143870423 westbound, one
+  // lane; 566501599 eastbound, two lanes; both bridge=yes, layer=1, so 8 m)
+  // over the railway between Tejgaon and Bijoy Sarani, 691 m each. It was
+  // drawn flat on the ground before, so the two Elevated Expressway on-ramps
+  // that leave it started from the street. The ends land 120 m out.
+  {
+    key: "tejgaon-link-flyover",
+    style: "flyover",
+    deckHalfWidth: 4.5,
+    depth: 1.6,
+    pierSpacing: 30,
+    replacesWayIds: [143870423, 566501599],
+    chains: [
+      // westbound: 143870423
+      {
+        halfWidth: 3.25,
+        lanes: 1,
+        points: [[23.763746, 90.399213], [23.763867, 90.39844], [23.764132, 90.396461], [23.764158, 90.396287], [23.764174, 90.39609], [23.76417, 90.395753], [23.764141, 90.395388], [23.76411, 90.395104], [23.764083, 90.394927], [23.764052, 90.394649], [23.764013, 90.394391], [23.764001, 90.394129], [23.764003, 90.393835], [23.764025, 90.393612], [23.76407, 90.393327], [23.764127, 90.393064], [23.764283, 90.392512]],
+        heights: [[0, GROUND], [120, 8], [-120, 8], [Infinity, GROUND]],
+      },
+      // eastbound: 566501599
+      {
+        points: [[23.76437, 90.392533], [23.76422, 90.393011], [23.764148, 90.393303], [23.764108, 90.393493], [23.764083, 90.393666], [23.764065, 90.393952], [23.76406, 90.394059], [23.764061, 90.394186], [23.764073, 90.39437], [23.764089, 90.394521], [23.764121, 90.394721], [23.764177, 90.395099], [23.764211, 90.395392], [23.764227, 90.395671], [23.764233, 90.395985], [23.764229, 90.396213], [23.764211, 90.396453], [23.764153, 90.396866], [23.764068, 90.397504], [23.763914, 90.398568], [23.76381, 90.399228]],
+        heights: [[0, GROUND], [120, 8], [-120, 8], [Infinity, GROUND]],
+      },
+    ],
+  },
   // Mayor Mohammad Hanif (Jatrabari–Gulistan) Flyover: Chankharpul to
   // Kutubkhali at 8 m, two carriageways about 7.6 m apart, with the Gulistan,
   // Sayedabad and Jatrabari ramps; two ramps climb to 15 m over the main line
@@ -223,7 +256,7 @@ export const ELEVATED_ROADS: ElevatedRoad[] = [
       // on-ramp: 396086128
       { points: [[23.716840, 90.429278], [23.716319, 90.429290], [23.715914, 90.429238], [23.715257, 90.429090], [23.714660, 90.428907], [23.713717, 90.428757], [23.713196, 90.428540], [23.713028, 90.428501], [23.712796, 90.428513], [23.712647, 90.428568], [23.712527, 90.428641], [23.712296, 90.428852]], heights: [[0, GROUND], [159.7, 7.94], [523.1, 8]] },
       // off-ramp: 655294161
-      { halfWidth: 3.25, points: [[23.715581, 90.429088], [23.715816, 90.429152], [23.716215, 90.429206], [23.716831, 90.429201]], heights: [[0, 3.84], [20, 3.02], [Infinity, GROUND]] },
+      { halfWidth: 3.25, points: [[23.715581, 90.429088], [23.715818, 90.429142], [23.716215, 90.429206], [23.716831, 90.429201]], heights: [[0, 3.84], [20, 3.02], [Infinity, GROUND]] },
       // on-ramp: 396086155
       { halfWidth: 3.25, points: [[23.715578, 90.426753], [23.715435, 90.426719], [23.715238, 90.426599], [23.714900, 90.426192], [23.714741, 90.426097], [23.714668, 90.426072], [23.714491, 90.426065], [23.714299, 90.426129], [23.714135, 90.426286], [23.713097, 90.427753], [23.712701, 90.428283], [23.712576, 90.428413]], heights: [[0, GROUND], [160.4, 7.98], [468.5, 8]] },
       // off-ramp: 396086157
@@ -233,7 +266,7 @@ export const ELEVATED_ROADS: ElevatedRoad[] = [
       // off-ramp: 396086114 → 396086168 → 396086166
       { halfWidth: 3.25, points: [[23.711339, 90.430391], [23.711166, 90.430974], [23.710895, 90.432037], [23.710616, 90.433768], [23.710503, 90.434069], [23.710337, 90.434287], [23.710054, 90.434489], [23.709800, 90.434551], [23.708117, 90.434618], [23.706149, 90.434846]], heights: [[0, 8], [261, 8.03], [415.8, 15], [468.8, 15], [622.8, 8.07], [627.3, 8], [722.8, 8], [727.8, 7.91], [886.8, GROUND]] },
       // off-ramp: 396086140 → 396086164 → 495476968
-      { halfWidth: 3.25, points: [[23.710552, 90.432622], [23.710743, 90.431727], [23.710998, 90.430781], [23.711099, 90.430515], [23.711220, 90.430236], [23.711672, 90.429475], [23.712018, 90.428660], [23.712103, 90.428530], [23.712200, 90.428433], [23.712384, 90.428323], [23.712571, 90.428257], [23.712730, 90.428232], [23.712868, 90.428249], [23.713132, 90.428357], [23.713572, 90.428634], [23.713694, 90.428676], [23.714190, 90.428759], [23.714641, 90.428785], [23.715144, 90.428928], [23.715581, 90.429088], [23.715719, 90.429077], [23.716138, 90.429121]], heights: [[0, 8], [346.9, 8], [503.3, 15], [539.4, 15], [640, 8], [763.3, 8], [Infinity, GROUND]] },
+      { halfWidth: 3.25, points: [[23.710552, 90.432622], [23.710743, 90.431727], [23.710998, 90.430781], [23.711099, 90.430515], [23.711220, 90.430236], [23.711672, 90.429475], [23.712018, 90.428660], [23.712103, 90.428530], [23.712200, 90.428433], [23.712384, 90.428323], [23.712571, 90.428257], [23.712730, 90.428232], [23.712868, 90.428249], [23.713132, 90.428357], [23.713577, 90.428621], [23.713696, 90.42867], [23.714190, 90.428759], [23.714641, 90.428785], [23.715144, 90.428928], [23.715581, 90.429088], [23.715719, 90.429077], [23.716138, 90.429121]], heights: [[0, 8], [346.9, 8], [503.3, 15], [539.4, 15], [640, 8], [763.3, 8], [Infinity, GROUND]] },
       // off-ramp: 396086149
       { halfWidth: 3.25, points: [[23.710435, 90.433469], [23.710246, 90.434364], [23.710251, 90.434740], [23.710324, 90.435033], [23.710761, 90.436161], [23.710875, 90.436529], [23.711002, 90.437154], [23.711044, 90.437527]], heights: [[0, 8], [267.4, 8], [272.4, 7.86], [430.5, GROUND]] },
       // on-ramp: 396086134
@@ -318,7 +351,7 @@ export const ELEVATED_ROADS: ElevatedRoad[] = [
     collide: false,
     replacesWayIds: [981194718, 1437119092, 34298990, 655219058, 244554388],
     chains: [
-      { mainSpan: [656, 866, 3], points: [[23.702931, 90.397877], [23.703243, 90.398034], [23.703757, 90.398327], [23.705277, 90.399255], [23.706071, 90.399805], [23.707283, 90.400678], [23.709658, 90.402220], [23.710169, 90.402525], [23.710759, 90.402839], [23.711172, 90.403006], [23.711596, 90.403131], [23.712306, 90.403283], [23.712444, 90.403327], [23.712635, 90.403415], [23.712814, 90.403550], [23.712968, 90.403704], [23.713054, 90.403821], [23.713293, 90.404214], [23.713443, 90.404484], [23.713568, 90.404763], [23.713889, 90.405641]], heights: [[0, GROUND], [371, 15], [1055.5, 15], [1489.5, GROUND]] },
+      { twoWay: true, mainSpan: [656, 866, 3], points: [[23.702931, 90.397877], [23.703243, 90.398034], [23.703757, 90.398327], [23.705277, 90.399255], [23.706071, 90.399805], [23.707283, 90.400678], [23.709658, 90.402220], [23.710169, 90.402525], [23.710759, 90.402839], [23.711172, 90.403006], [23.711596, 90.403131], [23.712306, 90.403283], [23.712444, 90.403327], [23.712635, 90.403415], [23.712814, 90.403550], [23.712968, 90.403704], [23.713054, 90.403821], [23.713293, 90.404214], [23.713443, 90.404484], [23.713568, 90.404763], [23.713889, 90.405641]], heights: [[0, GROUND], [371, 15], [1055.5, 15], [1489.5, GROUND]] },
     ],
   },
   // Postogola Bridge (Buriganga 1st, Bangladesh–China Friendship), Hasnabad
@@ -340,7 +373,7 @@ export const ELEVATED_ROADS: ElevatedRoad[] = [
     collide: false,
     replacesWayIds: [832329754, 832329755, 655392101, 832329753, 1200721381, 1200721382],
     chains: [
-      { mainSpan: [338, 665, 6], points: [[23.683981, 90.423479], [23.686075, 90.425777], [23.688150, 90.428096], [23.690203, 90.430439], [23.691343, 90.431764], [23.691963, 90.432532], [23.693094, 90.434080], [23.693488, 90.434542], [23.693709, 90.434761], [23.694053, 90.435051], [23.694423, 90.435312], [23.694941, 90.435609], [23.695631, 90.435883]], heights: [[0, GROUND], [320, 16], [720, 16], [923, 10], [1615, 8], [1817.9, GROUND]] },
+      { twoWay: true, mainSpan: [338, 665, 6], points: [[23.683981, 90.423479], [23.686075, 90.425777], [23.688150, 90.428096], [23.690203, 90.430439], [23.691343, 90.431764], [23.691963, 90.432532], [23.693094, 90.434080], [23.693488, 90.434542], [23.693709, 90.434761], [23.694053, 90.435051], [23.694423, 90.435312], [23.694941, 90.435609], [23.695631, 90.435883]], heights: [[0, GROUND], [320, 16], [720, 16], [923, 10], [1615, 8], [1817.9, GROUND]] },
       // off-ramp: 1200721381
       { halfWidth: 3, lanes: 1, points: [[23.689831, 90.429946], [23.690139, 90.430198], [23.691373, 90.431627], [23.691411, 90.431668]], heights: [[0, 10], [40, 9.89], [248.1, GROUND]] },
       // on-ramp: 1200721382
@@ -414,9 +447,11 @@ export type ElevatedChainLayout = {
   /** Lanes across the deck. */
   lanes: number;
   atGrade: boolean;
+  /** Two-way traffic (see the chain's `twoWay`). */
+  twoWay: boolean;
   /**
-   * Height added to the road surface so that overlapping chains of one
-   * structure never share a plane: a few centimetres, different for every
+   * Height added to the road surface so that overlapping chains (of any
+   * structure) never share a plane: a few centimetres, different for every
    * pair of chains that overlap at one level.
    */
   lift: number;
@@ -460,7 +495,7 @@ export function layoutElevatedRoads(
   toWorld: (lat: number, lon: number) => MetroPoint,
   roads: ElevatedRoad[] = ELEVATED_ROADS,
 ): ElevatedRoadLayout[] {
-  return roads.map((road) => {
+  const layouts = roads.map((road) => {
     const drafts = road.chains.map((chain) => {
       const plan = chain.points.map(([lat, lon]) => toWorld(lat, lon));
       const distances = [0];
@@ -575,37 +610,42 @@ export function layoutElevatedRoads(
           ? { distance: Infinity, s: 0 }
           : nearestOnPlan(plan, distances, x, z)
       );
-      return { plan, length, half, lanes: chain.lanes ?? road.lanes ?? 2, atGrade: chain.atGrade === true, lift: 0, rings, depthAt, pierStations, at, nearest };
-    });
-    drafts.forEach((draft, draftIndex) => {
-      const touching = new Set<number>();
-      for (const ring of draft.rings) {
-        for (const side of [0, 1] as const) {
-          // A parapet that would stand on a sibling chain's deck is left out.
-          const reach = (side === 0 ? -1 : 1) * (draft.half - 0.25);
-          const edgeX = ring.x + ring.rx * reach;
-          const edgeZ = ring.z + ring.rz * reach;
-          ring.parapet[side] = !draft.atGrade && !drafts.some((sibling, siblingIndex) => {
-            if (siblingIndex === draftIndex) return false;
-            const nearest = sibling.nearest(edgeX, edgeZ);
-            return nearest.distance < sibling.half - 0.35 && Math.abs(sibling.at(nearest.s).top - ring.top) < 1.2;
-          });
-        }
-        // Earlier chains whose road surface this one overlaps at one level.
-        for (let siblingIndex = 0; siblingIndex < draftIndex; siblingIndex++) {
-          if (touching.has(siblingIndex)) continue;
-          const sibling = drafts[siblingIndex];
-          const nearest = sibling.nearest(ring.x, ring.z);
-          if (nearest.distance < sibling.half + draft.half && Math.abs(sibling.at(nearest.s).top - ring.top) < 1.2) touching.add(siblingIndex);
-        }
-      }
-      let level = 0;
-      const taken = new Set([...touching].map((siblingIndex) => drafts[siblingIndex].lift));
-      while (taken.has(level * 0.04)) level++;
-      draft.lift = level * 0.04;
+      return { plan, length, half, lanes: chain.lanes ?? road.lanes ?? 2, atGrade: chain.atGrade === true, twoWay: chain.twoWay === true, lift: 0, rings, depthAt, pierStations, at, nearest };
     });
     return { road, chains: drafts };
   });
+  // Parapets and surface lifts are worked out across every structure, so a
+  // ramp of one entry that starts on another's deck (the expressway ramps on
+  // the Tejgaon Link Flyover) opens its parapets there too.
+  const drafts = layouts.flatMap((layout) => layout.chains);
+  drafts.forEach((draft, draftIndex) => {
+    const touching = new Set<number>();
+    for (const ring of draft.rings) {
+      for (const side of [0, 1] as const) {
+        // A parapet that would stand on a sibling chain's deck is left out.
+        const reach = (side === 0 ? -1 : 1) * (draft.half - 0.25);
+        const edgeX = ring.x + ring.rx * reach;
+        const edgeZ = ring.z + ring.rz * reach;
+        ring.parapet[side] = !draft.atGrade && !drafts.some((sibling, siblingIndex) => {
+          if (siblingIndex === draftIndex) return false;
+          const nearest = sibling.nearest(edgeX, edgeZ);
+          return nearest.distance < sibling.half - 0.35 && Math.abs(sibling.at(nearest.s).top - ring.top) < 1.2;
+        });
+      }
+      // Earlier chains whose road surface this one overlaps at one level.
+      for (let siblingIndex = 0; siblingIndex < draftIndex; siblingIndex++) {
+        if (touching.has(siblingIndex)) continue;
+        const sibling = drafts[siblingIndex];
+        const nearest = sibling.nearest(ring.x, ring.z);
+        if (nearest.distance < sibling.half + draft.half && Math.abs(sibling.at(nearest.s).top - ring.top) < 1.2) touching.add(siblingIndex);
+      }
+    }
+    let level = 0;
+    const taken = new Set([...touching].map((siblingIndex) => drafts[siblingIndex].lift));
+    while (taken.has(level * 0.04)) level++;
+    draft.lift = level * 0.04;
+  });
+  return layouts;
 }
 
 /**

@@ -56,9 +56,12 @@ const landmark: LandmarkModule = {
     const wall = materials.whiteStone;
     const roof = materials.paleConcrete;
     const dark = materials.archDark;
-    const jali = kit.material(0xc4cacf, { roughness: 0.9 });
+    // Eight materials: the jali screens and terrace paving share the pale
+    // roof concrete, the basin the dark of the openings, the trees the palms'
+    // light canopy, and the green standard the lawn.
+    const jali = roof;
     const flowers = kit.material(0xc8402f, { roughness: 0.95 });
-    const paving = kit.material(0xd6d0c0, { roughness: 0.95 });
+    const paving = roof;
 
     // A flat-roofed mass from the ground (or `base`) to `top`, under a
     // slightly oversailing roof slab.
@@ -82,7 +85,7 @@ const landmark: LandmarkModule = {
     const turf = addCylinder(group, 1, 1, 0.2, [ISLAND[0], 0.26, ISLAND[1]], materials.lawn, 24);
     turf.scale.set(19.2, 1, 13.2);
     addCylinder(group, 6.4, 6.6, 0.8, [ISLAND[0], 0.7, ISLAND[1]], wall, 20);
-    addCylinder(group, 5.7, 5.7, 0.1, [ISLAND[0], 1.12, ISLAND[1]], materials.water, 20);
+    addCylinder(group, 5.7, 5.7, 0.1, [ISLAND[0], 1.12, ISLAND[1]], dark, 20);
     // The steel cranes rising from the basin, as three leaning blades.
     for (const [dx, dz, lean] of [[-1.1, 0.3, 0.14], [0.4, -0.7, -0.1], [1, 0.8, 0.2]] as const) {
       kit.addCone(group, 0.45, 5.4, [ISLAND[0] + dx, 3.8, ISLAND[1] + dz], roof, 4).rotation.z = lean;
@@ -95,7 +98,7 @@ const landmark: LandmarkModule = {
     }
     // The big trees that wall the lawn in on either side.
     for (let z = 52; z < 170; z += 19) {
-      for (const side of [-1, 1]) kit.addTree(group, side * (84 + ((z * 7) % 9)), z + ((z * 3) % 5), 6.2 + ((z * 5) % 3) * 0.6, 7.5);
+      for (const side of [-1, 1]) kit.addTree(group, side * (84 + ((z * 7) % 9)), z + ((z * 3) % 5), 6.2 + ((z * 5) % 3) * 0.6, 7.5, materials.lightCanopy);
     }
     // The compound wall along the road, open at the drive.
     const inset = (index: number, z: number): Vec3 => {
@@ -130,7 +133,7 @@ const landmark: LandmarkModule = {
     kit.addLathe(group, kit.domeProfile(4.9, 5.3, 0.04), 16, [DOME_X, DOME_BASE + 3.3, 0], wall);
     kit.addFinial(group, [DOME_X, DOME_BASE + 8.5, 0], 2.2, wall);
     // The national and presidential standards before the dome.
-    for (const [z, flag] of [[-4.2, materials.seatGreen], [-6.8, flowers]] as const) {
+    for (const [z, flag] of [[-4.2, materials.lawn], [-6.8, flowers]] as const) {
       addCylinder(group, 0.12, 0.14, 12, [DOME_X + 9.5, ENTRANCE_ROOF + 6, z], roof, 5);
       addBox(group, [0.12, 1.5, 2.4], [DOME_X + 9.5, ENTRANCE_ROOF + 11, z + 1.3], flag);
     }
@@ -155,7 +158,18 @@ const landmark: LandmarkModule = {
       block(x - 3, x + 3, 2, 9, TOWER_TOP, MAIN_ROOF + 0.35, 0.35);
       pane(kit.rectPane(1.6, 2.6), [x, MAIN_ROOF + 2.4, 9.12], "north");
     }
-    kit.addChhatri(group, [-8, PAVILION_ROOF + 0.35, -6], 3, wall, wall);
+    // A small chhatri, as kit.addChhatri draws it but with a white finial
+    // (its default gold one would be a ninth material).
+    {
+      const [x, y, z, size] = [-8, PAVILION_ROOF + 0.35, -6, 3];
+      addBox(group, [size * 1.15, size * 0.14, size * 1.15], [x, y + size * 0.07, z], wall);
+      for (const cx of [-1, 1]) {
+        for (const cz of [-1, 1]) addBox(group, [size * 0.13, size * 0.8, size * 0.13], [x + cx * size * 0.42, y + size * 0.5, z + cz * size * 0.42], wall);
+      }
+      addBox(group, [size * 1.3, size * 0.12, size * 1.3], [x, y + size * 0.96, z], wall);
+      kit.addLathe(group, kit.domeProfile(size * 0.5, size * 0.62, 0.12, 7), 10, [x, y + size * 1.02, z], wall);
+      kit.addFinial(group, [x, y + size * 1.62, z], size * 0.16, wall);
+    }
 
     // ---- East range ----
     block(-60, -33, -40, 10, 9);

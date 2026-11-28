@@ -9,7 +9,7 @@
 // a 2.5 ha polygon that also takes in a tower, a mosque and other markets to
 // the north and east. Only its south-west part is built here — the part the
 // ~65 mapped shop=books nodes fall in — cut at 235 m east and 50 m north of
-// the reference point below, and set back from the Nilkhet Road and Mirpur
+// the reference point below, less the open yard in its north, and set back from the Nilkhet Road and Mirpur
 // Road centrelines so the stalls stay off the game's 14 m carriageways. OSM
 // has no building footprints for the stalls: the rows are a texture for the
 // area, not surveyed sheds.
@@ -23,10 +23,14 @@ const REFERENCE_LAT = 23.733;
 const REFERENCE_LON = 90.3838;
 const METRES_PER_DEGREE_LAT = 110540;
 const METRES_PER_DEGREE_LON = 101874.2;
+// The stalls stop about 9 m north of the reference except for a strip along
+// the west edge: north of that, between 176 and 222 m east, is an open earth
+// yard (Esri World Imagery, 2024), drawn as YARD.
 const PLOT: Array<[number, number]> = [
-  [136, -10], [147, 3], [158, 19.1], [171.5, 50], [235, 50], [235, -39.5], [222.5, -41.3], [166.5, -49.3],
-  [152, -50], [146, -45],
+  [136, -10], [147, 3], [158, 19.1], [171.5, 50], [178, 50], [176, 9], [235, 9], [235, -39.5], [222.5, -41.3],
+  [166.5, -49.3], [152, -50], [146, -45],
 ];
+const YARD: Array<[number, number]> = [[178, 50], [222, 50], [222, 9], [176, 9]];
 
 const SHED_DEPTH = 5;
 const LANE = 2.3;
@@ -54,6 +58,9 @@ function build(kit: LandmarkKit) {
   const plot: PlanPoint[] = PLOT.map(([east, north]) =>
     kit.toLocal(REFERENCE_LAT + north / METRES_PER_DEGREE_LAT, REFERENCE_LON + east / METRES_PER_DEGREE_LON));
   addPrism(group, plot, 0, 0.1, materials.wornAsphalt);
+  const yard: PlanPoint[] = YARD.map(([east, north]) =>
+    kit.toLocal(REFERENCE_LAT + north / METRES_PER_DEGREE_LAT, REFERENCE_LON + east / METRES_PER_DEGREE_LON));
+  addPrism(group, yard, 0, 0.08, materials.packedEarth);
 
   const minX = Math.min(...plot.map(([x]) => x));
   const maxX = Math.max(...plot.map(([x]) => x));
@@ -131,6 +138,13 @@ function build(kit: LandmarkKit) {
     }
     if (x1 > x0) kit.clearSite((x0 + x1) / 2, Math.min(z + 5, maxZ), (x1 - x0) / 2, 5);
   }
+  // The open yard stays open: no generic buildings or trees on it.
+  const yardXs = yard.map(([x]) => x);
+  const yardZs = yard.map(([, z]) => z);
+  kit.clearSite(
+    (Math.min(...yardXs) + Math.max(...yardXs)) / 2, (Math.min(...yardZs) + Math.max(...yardZs)) / 2,
+    (Math.max(...yardXs) - Math.min(...yardXs)) / 2 - 2, (Math.max(...yardZs) - Math.min(...yardZs)) / 2 - 2,
+  );
   if (perch) kit.setPerchTarget(perch[0], perch[1]);
 }
 

@@ -56,9 +56,11 @@ const landmark: LandmarkModule = {
   plotGap: 4,
   build(kit) {
     const { group, addBox, addCylinder, addMesh, rectPane, materials } = kit;
-    const wall = kit.material(0xcbbea2, { roughness: 0.92 });
-    const trim = kit.material(0xe2dac6, { roughness: 0.88 });
-    const eastWall = kit.material(0xbfb297, { roughness: 0.94 });
+    // Soot- and damp-greyed plaster, as the house stands today (Commons
+    // "Ruplal House, Farashganj, Dhaka.jpg"), not fresh cream.
+    const wall = kit.material(0x857d6e, { roughness: 0.96 });
+    const trim = kit.material(0x9d9583, { roughness: 0.94 });
+    const eastWall = kit.material(0x787061, { roughness: 0.97 });
     // The weathered plinth shares the eastern block's darker plaster.
     const stain = eastWall;
     const shutter = kit.material(0x6a6557, { roughness: 0.9 });
