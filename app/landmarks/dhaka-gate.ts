@@ -29,6 +29,9 @@ import { headingFromBearing, type LandmarkModule } from "./kit";
 const S = 1 / 1.3;
 const COLUMN_TOP = 7.1 * S;
 const WALL_TOP = 3.6 * S;
+// Half the wing wall's thickness; the jali stands 5 cm proud of it and its
+// openings 5 cm proud of the jali, the kit's minimum against z-fighting.
+const WALL_HALF = 0.4 * S;
 // Nearest and furthest column of each wing, and the far end of its wall. The
 // inner column's plinth stays just clear of the asphalt edge at x = ±12.5.
 const INNER_COLUMN = 13.5;
@@ -81,13 +84,13 @@ const landmark: LandmarkModule = {
       const top = WALL_TOP - 0.62 * S;
       for (const face of [1, -1]) {
         const turn = face === 1 ? 0 : Math.PI;
-        addMesh(group, new kit.THREE.ShapeGeometry(screenShape, 6), jali, [x, top, face * 0.43 * S], turn);
+        addMesh(group, new kit.THREE.ShapeGeometry(screenShape, 6), jali, [x, top, face * (WALL_HALF + 0.05)], turn);
         for (let row = 0; row < 3; row++) {
           for (let cell = -3 + (row % 2); cell <= 3; cell += 2) {
             const cx = cell * 0.4 * S;
             const cy = (-0.22 - row * 0.42) * S;
             if ((cx * cx) / (SCREEN_HALF_WIDTH * SCREEN_HALF_WIDTH) + (cy * cy) / (SCREEN_DROP * SCREEN_DROP) > 0.62) continue;
-            addMesh(group, rectPane(0.3 * S, 0.3 * S), hole, [x + face * cx, top + cy - 0.15 * S, face * 0.47 * S], turn);
+            addMesh(group, rectPane(0.3 * S, 0.3 * S), hole, [x + face * cx, top + cy - 0.15 * S, face * (WALL_HALF + 0.1)], turn);
           }
         }
       }
@@ -99,7 +102,7 @@ const landmark: LandmarkModule = {
       const length = Math.abs(x1 - x0);
       const centre = (x0 + x1) / 2;
       addBox(group, [length, 0.55 * S, 1.3 * S], [centre, 0.275 * S, 0], moulding);
-      addBox(group, [length, WALL_TOP - 0.85 * S, 0.8 * S], [centre, 0.55 * S + (WALL_TOP - 0.85 * S) / 2, 0], plaster);
+      addBox(group, [length, WALL_TOP - 0.85 * S, WALL_HALF * 2], [centre, 0.55 * S + (WALL_TOP - 0.85 * S) / 2, 0], plaster);
       addBox(group, [length, 0.3 * S, 1.2 * S], [centre, WALL_TOP - 0.15 * S, 0], moulding);
       screen(centre);
     };

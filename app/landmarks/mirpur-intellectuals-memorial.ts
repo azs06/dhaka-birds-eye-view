@@ -74,7 +74,8 @@ const landmark: LandmarkModule = {
   lon: 90.345458,
   altitude: WALL_HIGH,
   heading: headingFromBearing(90),
-  clearingRadius: 60,
+  // The graveyard runs about 185 m out from the memorial; it is open ground.
+  clearingRadius: 190,
   extents: [BASE_HALF, BASE_HALF],
   triangleBudget: 7000,
   plotGap: 6,
@@ -186,7 +187,9 @@ const landmark: LandmarkModule = {
     // Shaded, trodden earth: darker than the kit's packed earth, as the
     // graveyard reads under its trees on the imagery.
     const earth = kit.material(0x554c3d, { roughness: 1 });
-    const planted = kit.material(0x4d6b3f, { roughness: 0.95 });
+    // Eight materials: the grave beds and the mosque dome share the palms'
+    // green, the pools' still water the plaque's black stone.
+    const planted = materials.lightCanopy;
     const L = ([lat, lon]: [number, number]): PlanPoint => kit.toLocal(lat, lon);
     const yard = GRAVEYARD.map(L);
     addPrism(group, yard, 0, 0.07, earth);
@@ -266,7 +269,7 @@ const landmark: LandmarkModule = {
       const cx = (x0 + x1) / 2;
       const cz = (z0 + z1) / 2;
       addBox(group, [sx, 0.5, sz], [cx, 0.25, cz], strip);
-      addBox(group, [sx - 1.6, 0.06, sz - 1.6], [cx, 0.53, cz], materials.water);
+      addBox(group, [sx - 1.6, 0.06, sz - 1.6], [cx, 0.53, cz], blackStone);
       kit.clearSite(cx, cz, sx / 2 + 3, sz / 2 + 3);
     };
     pool(23.79362, 23.79405, 90.34473, 90.34496);

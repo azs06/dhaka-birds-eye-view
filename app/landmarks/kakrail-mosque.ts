@@ -85,7 +85,8 @@ const landmark: LandmarkModule = {
     const wedge: Array<[number, number]> = [
       [-33, -43.5], [35.5, -43.5], [29.5, -21], [21.5, -6], [14.5, 12], [8, 34], [3.4, 55], [2.4, 59.5], [-34, 59.5],
     ];
-    kit.addPrism(group, wedge.map(([e, s]): PlanPoint => [-s, e]), 0, 0.1, materials.yardPaving);
+    // Paved in the south block's pale concrete, keeping eight materials.
+    kit.addPrism(group, wedge.map(([e, s]): PlanPoint => [-s, e]), 0, 0.1, frame);
 
     // PRAYER HALL: two tall storeys, a cusped arcade to the road, a low
     // hipped tin roof with a clerestory strip under its eaves.

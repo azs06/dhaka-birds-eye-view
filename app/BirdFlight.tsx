@@ -1806,32 +1806,31 @@ function createTrafficSimulation(
     let remaining = vehicle.speed * step;
     let guard = 0;
     let jumped = false;
-    while (remaining > 0 && guard++ < 8) {
+    // At the end of its route a vehicle turns round, unless it is on a deck:
+    // a one-way deck runs on into the deck it joins (or, landing on the
+    // street, sends it back to a deck start), and a ramp's visitor to a
+    // two-way bridge leaves at the bridge end.
+    const nextAfterEnd = () => {
       let nextIndex = vehicle.segmentIndex + vehicle.direction;
-      if ((nextIndex < 0 || nextIndex >= vehicle.route.length) && vehicle.elevatedRoute >= 0) {
-        const current = elevatedRoutes[vehicle.elevatedRoute];
-        if (current.oneWay) {
-          // A one-way deck runs on into the deck it joins.
-          const { successors } = current;
-          if (successors.length > 0) {
-            const next = successors[Math.floor(random() * successors.length)];
-            enterRoute(vehicle, next, !elevatedRoutes[next.route].oneWay);
-          } else {
-            respawnOnDeck(vehicle);
-            jumped = true;
-          }
-          nextIndex = vehicle.segmentIndex + vehicle.direction;
-        } else if (vehicle.visitor) {
-          respawnOnDeck(vehicle);
-          jumped = true;
-          nextIndex = vehicle.segmentIndex + vehicle.direction;
-        }
+      if (nextIndex >= 0 && nextIndex < vehicle.route.length) return nextIndex;
+      const current = vehicle.elevatedRoute >= 0 ? elevatedRoutes[vehicle.elevatedRoute] : null;
+      if (current?.oneWay && current.successors.length > 0) {
+        const next = current.successors[Math.floor(random() * current.successors.length)];
+        enterRoute(vehicle, next, !elevatedRoutes[next.route].oneWay);
+      } else if (current?.oneWay || (current && vehicle.visitor)) {
+        respawnOnDeck(vehicle);
+        jumped = true;
       }
+      nextIndex = vehicle.segmentIndex + vehicle.direction;
       if (nextIndex < 0 || nextIndex >= vehicle.route.length) {
         vehicle.direction = vehicle.direction === 1 ? -1 : 1;
         nextIndex = vehicle.segmentIndex + vehicle.direction;
         vehicle.segmentProgress = 0;
       }
+      return nextIndex;
+    };
+    while (remaining > 0 && guard++ < 8) {
+      const nextIndex = nextAfterEnd();
       const start = vehicle.route[vehicle.segmentIndex];
       const end = vehicle.route[nextIndex];
       const dx = end[0] - start[0];
@@ -1847,12 +1846,7 @@ function createTrafficSimulation(
         vehicle.segmentProgress = 0;
       }
     }
-    let nextIndex = vehicle.segmentIndex + vehicle.direction;
-    if (nextIndex < 0 || nextIndex >= vehicle.route.length) {
-      vehicle.direction = vehicle.direction === 1 ? -1 : 1;
-      nextIndex = vehicle.segmentIndex + vehicle.direction;
-      vehicle.segmentProgress = 0;
-    }
+    const nextIndex = nextAfterEnd();
     const start = vehicle.route[vehicle.segmentIndex];
     const end = vehicle.route[nextIndex];
     const dx = end[0] - start[0];

@@ -53,9 +53,10 @@ const landmark: LandmarkModule = {
     const grime = kit.material(0x3b3631, { roughness: 1 });
 
     // Weathering: a seeded scatter of surviving lime plaster, soot streaks
-    // hanging from the coping and damp-dark brick, a few centimetres proud of
-    // the wall face (under the arches, which stand further out). `rotationY`
-    // turns the patches to face the wall's outward normal.
+    // hanging from the coping and damp-dark brick, 5 cm proud of the wall
+    // face (under the arches, which stand further out). Patches stay inside
+    // their wall and never overlap one another, so no two share a plane.
+    // `rotationY` turns them to face the wall's outward normal.
     let seed = 1663;
     const random = () => {
       seed = (seed * 16807) % 2147483647;
@@ -64,9 +65,10 @@ const landmark: LandmarkModule = {
     const weather = (cx: number, cz: number, length: number, bottom: number, top: number, rotationY: number, count: number) => {
       const nx = Math.sin(rotationY);
       const nz = Math.cos(rotationY);
-      for (let i = 0; i < count; i++) {
+      const placed: Array<[number, number, number, number]> = [];
+      for (let tries = 0; placed.length < count && tries < count * 4; tries++) {
         const roll = random();
-        const u = (random() - 0.5) * (length - 1.6);
+        const along = random();
         let width: number;
         let height: number;
         let y: number;
@@ -90,7 +92,12 @@ const landmark: LandmarkModule = {
           y = bottom + (random() < 0.6 ? 0 : random() * Math.max(0.1, top - bottom - height));
           material = darkBrick;
         }
-        const proud = 0.025 + (i % 2) * 0.012;
+        width = Math.min(width, length - 0.4);
+        if (width < 0.4 || height < 0.3) continue;
+        const u = (along - 0.5) * (length - 0.4 - width);
+        if (placed.some(([u0, y0, w0, h0]) => Math.abs(u - u0) < (width + w0) / 2 + 0.1 && Math.abs(y + height / 2 - (y0 + h0 / 2)) < (height + h0) / 2 + 0.1)) continue;
+        placed.push([u, y, width, height]);
+        const proud = 0.05;
         addMesh(group, rectPane(width, height), material, [cx + nz * u + nx * proud, y, cz - nx * u + nz * proud], rotationY);
       }
     };
