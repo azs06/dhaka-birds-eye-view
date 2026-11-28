@@ -150,7 +150,7 @@ test("keeps the finished flight experience free of starter preview code", async 
   assert.match(component, /const CEILING_EASE_DEPTH = 90/);
   assert.match(strings, /Inspect next landmark/);
   assert.match(component, /const MIN_CEILING_CLIMB_SPEED = 1\.8/);
-  assert.match(component, /const spawnAlt = Number\(spawnParams\.get\("alt"\)\) \|\| DEFAULT_FLIGHT_ALTITUDE/);
+  assert.match(component, /const spawnAlt = clamp\(Number\(spawnParams\.get\("alt"\)\) \|\| DEFAULT_FLIGHT_ALTITUDE, MIN_FLIGHT_ALTITUDE, MAX_FLIGHT_ALTITUDE\)/);
   assert.match(component, /crow\.position\.set\(spawnWorld\.x, spawnAlt, spawnWorld\.y\)/);
   assert.match(component, /verticalSpeed = Math\.min\(22, verticalSpeed \+ 8\.5 \* flapLiftScale\)/);
   assert.match(component, /const ceilingClimbScale = THREE\.MathUtils\.smoothstep/);

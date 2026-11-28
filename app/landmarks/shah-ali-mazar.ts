@@ -71,18 +71,20 @@ const landmark: LandmarkModule = {
 
     const white = materials.whiteStone;
     const cream = materials.cream;
-    const blueGlass = kit.material(0x3f72b5, { roughness: 0.35 });
-    const domeGreen = kit.material(0x2f8a4c, { roughness: 0.6 });
-    // Eleven materials in all: the red of the shrine parapet, the gate trim
-    // and the mosque pilasters share one; the gate's sign band uses the dome
-    // green and its dome the cream.
+    // Nine materials in all: the red of the shrine parapet, the gate trim and
+    // the mosque pilasters share one; the shrine glazing shares the minaret's
+    // pale blue; the domes and sign band take the trees' green, and the
+    // gate's dome the cream. The court keeps its own grey (the photos show
+    // grey concrete pavers; the shared red read as a red plaza).
+    const domeGreen = materials.canopy;
     const maroon = materials.deepBrick;
     const parapetRed = maroon;
     const gateTrim = maroon;
     const signGreen = domeGreen;
     const domeGrey = cream;
     const minaretBlue = kit.material(0x8fc3d8, { roughness: 0.7 });
-    const courtPaving = kit.material(0x9a6b5e, { roughness: 0.96 });
+    const blueGlass = minaretBlue;
+    const courtPaving = kit.material(0x6c6863, { roughness: 0.96 });
     const gateOrange = kit.material(0xe2a42c, { roughness: 0.8 });
 
     // --- The court: paving from the mosque to the gate, east of the shrine.

@@ -14,10 +14,11 @@
 // 14376114 (also drawn as a 21 m "building" in the city snapshot, so both
 // ids are replaced), the pool and lawns from the forecourt ways. The task
 // hint (23.8400, 90.5180) is 1.7 km west of the real site; the OSM position
-// is used. The site lies on the east edge of the game world: the hall's
-// centre is about 60 m beyond FLIGHT_EXTENT.x (12 000 m), so the bird is
-// turned back as it passes over the entrance, and it perches on the west
-// wing's roof, inside the boundary.
+// is used. The site lies on the east edge of the game world: the hall ends
+// at world x 12 212 m, so FLIGHT_EXTENT.x was raised to 12 300 m to keep the
+// whole building inside the flyable area (moving it the ~250 m needed to fit
+// the old 12 000 m limit would have put it across the Dhaka bypass). The bird
+// perches on the west wing's roof.
 //
 // Local +Z looks south (heading 0) to the forecourt; local +X points east.
 import type { LandmarkModule, PlanPoint } from "./kit";

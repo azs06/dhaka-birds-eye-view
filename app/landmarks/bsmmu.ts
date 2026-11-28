@@ -1,4 +1,7 @@
-// BSMMU (Bangabandhu Sheikh Mujib Medical University) — "PG Hospital", Shahbagh
+// Bangladesh Medical University — "PG Hospital", Shahbagh
+//
+// Known until 2025 as BSMMU (Bangabandhu Sheikh Mujib Medical University);
+// the module key keeps the old initials.
 //
 // The teaching hospital on the north-west corner of the Shahbagh crossing.
 // What everyone knows is the long cream block on Shahbagh Road whose rounded
@@ -51,9 +54,9 @@ type Rect = { x: number; z: number; sx: number; sz: number };
 
 const landmark: LandmarkModule = {
   key: "bsmmu",
-  label: "BSMMU (PG Hospital)",
-  labelBn: "বিএসএমএমইউ (পিজি হাসপাতাল)",
-  shortLabel: "PGH",
+  label: "Bangladesh Medical University",
+  labelBn: "বাংলাদেশ মেডিক্যাল বিশ্ববিদ্যালয়",
+  shortLabel: "BMU",
   lat: 23.738752,
   lon: 90.394591,
   altitude: 50,
@@ -67,7 +70,6 @@ const landmark: LandmarkModule = {
     const { group, addBox, addPrism, addOnWall, rectPane, materials } = kit;
     const cream = kit.material(0xe8dfc4, { roughness: 0.86 });
     const paleWall = kit.material(0xdcd8cb, { roughness: 0.88 });
-    const hotelWall = kit.material(0xe3d6b0, { roughness: 0.88 });
     const bankGreen = kit.litMaterial(0x1f7d50, 0.4, 0x9dffc8);
     const signRed = kit.litMaterial(0xb8322c, 0.5, 0xff7060);
     const glass = materials.darkGlass;
@@ -134,7 +136,7 @@ const landmark: LandmarkModule = {
     // The name board on the roof of the curve, facing the crossing, and the
     // red letters on the parapet beside it.
     const [boardX, boardZ] = kit.worldToLocal(-2147.5, 3661.9);
-    const board = addBox(group, [17, 2.6, 0.4], [boardX, BLOCK_D_TOP + 1.9, boardZ], materials.whiteStone);
+    const board = addBox(group, [17, 2.6, 0.4], [boardX, BLOCK_D_TOP + 1.9, boardZ], cream);
     board.rotation.y = 0.82;
     const boardBase = addBox(group, [17, 0.6, 0.5], [boardX, BLOCK_D_TOP + 0.3, boardZ], bankGreen);
     boardBase.rotation.y = 0.82;
@@ -180,7 +182,7 @@ const landmark: LandmarkModule = {
     const hotel = OLD_HOTEL.map(([x, z]) => kit.worldToLocal(x, z));
     const HOTEL_STOREYS = 8;
     const hotelTop = HOTEL_STOREYS * STOREY + 0.9;
-    addPrism(group, hotel, 0, hotelTop, hotelWall);
+    addPrism(group, hotel, 0, hotelTop, cream);
     for (let storey = 0; storey < HOTEL_STOREYS; storey++) {
       addPrism(group, kit.offsetPolygon(hotel, 0.1), storey * STOREY + 1.2, 1.7, glass);
     }
@@ -190,7 +192,7 @@ const landmark: LandmarkModule = {
       opening: glass,
       minEdge: 10,
       margin: 0.2,
-      pier: { width: 0.9, depth: 0.5, bottom: 0, top: hotelTop, material: hotelWall },
+      pier: { width: 0.9, depth: 0.5, bottom: 0, top: hotelTop, material: cream },
     });
     addPrism(group, kit.offsetPolygon(hotel, -0.7), hotelTop, 0.14, materials.roofGrey);
     const hotelSolid = (ax: number, az: number, bx: number, bz: number) => {
@@ -203,10 +205,10 @@ const landmark: LandmarkModule = {
     hotelSolid(-2168.8, 3557.3, -2112.7, 3569.3);
 
     // ── The court between the E-plan block and the curved block ─────────────
+    // Paving shares the roofs' grey so the landmark stays at eight materials.
     const court = rect(-2218, 3612, -2116, 3646);
-    addBox(group, [court.sx, 0.08, court.sz], [court.x, 0.04, court.z], materials.yardPaving);
+    addBox(group, [court.sx, 0.08, court.sz], [court.x, 0.04, court.z], materials.roofGrey);
     const garden = rect(-2212, 3630, -2168, 3643);
-    addBox(group, [garden.sx, 0.14, garden.sz], [garden.x, 0.07, garden.z], materials.lawn);
     for (const along of [-0.36, 0, 0.36]) kit.addTree(group, garden.x + along * garden.sx, garden.z, 4.2, 5.5);
     const yard = rect(-2300, 3557, -2112, 3647);
     kit.clearSite(yard.x, yard.z, yard.sx / 2, yard.sz / 2);

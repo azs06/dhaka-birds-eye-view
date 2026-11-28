@@ -46,7 +46,9 @@ const landmark: LandmarkModule = {
     const { group, addBox, addCylinder, addMesh, materials } = kit;
     const white = materials.whiteStone;
     const shutter = kit.material(0x5f6964, { roughness: 0.9 });
-    const dark = materials.archDark;
+    // Eight materials: openings take the shutter grey-green, the paving and
+    // pedestal share the terrace, plaza and white stone, the relief the plaza red.
+    const dark = shutter;
 
     const clearTiles = (x0: number, x1: number, z0: number, z1: number, cell = 7) => {
       const columns = Math.max(1, Math.ceil((x1 - x0) / cell));
@@ -135,7 +137,7 @@ const landmark: LandmarkModule = {
     porch(1);
     porch(-1);
     // The academy's emblem on the blank top storey of the east front.
-    addMesh(group, kit.discPane(1.75, 16), kit.material(0xb7a868, { roughness: 0.85 }), [CX, SECOND_FLOOR + 1.6, Z_FRONT + 0.14]);
+    addMesh(group, kit.discPane(1.75, 16), materials.bronze, [CX, SECOND_FLOOR + 1.6, Z_FRONT + 0.14]);
     addMesh(group, kit.discPane(0.7, 12), white, [CX + 0.55, SECOND_FLOOR + 2.3, Z_FRONT + 0.2]);
 
     // The grounds: grass round the house and the mapped front lawn.
@@ -144,7 +146,7 @@ const landmark: LandmarkModule = {
 
     // The banyan and the round Nazrul Mancha platform under it, then the
     // other mapped trees of the compound.
-    addCylinder(group, 6, 6.3, 0.6, [28.5, 0.3, 27], materials.plazaBrick, 14);
+    addCylinder(group, 6, 6.3, 0.6, [28.5, 0.3, 27], materials.plazaRed, 14);
     addCylinder(group, 5.6, 5.6, 0.08, [28.5, 0.64, 27], materials.roofTerrace, 14);
     kit.addTree(group, 29.3, 22.6, 9.5, 5.5);
     kit.addTree(group, 18.1, 19, 5, 4.5);
@@ -156,8 +158,8 @@ const landmark: LandmarkModule = {
     // slab in its white frame behind them.
     const MX = 9;
     const MZ = -38;
-    const terracotta = materials.terracotta;
-    kit.addLathe(group, [[2.2, 0], [2.3, 1.1], [3, 1.9]], 10, [MX, 0, MZ], materials.paleConcrete);
+    const terracotta = materials.plazaRed;
+    kit.addLathe(group, [[2.2, 0], [2.3, 1.1], [3, 1.9]], 10, [MX, 0, MZ], white);
     addCylinder(group, 3.3, 3.3, 0.25, [MX, 2.02, MZ], white, 10);
     addCylinder(group, 3, 3, 1.3, [MX, 2.8, MZ], terracotta, 10);
     addCylinder(group, 3.3, 3.3, 0.25, [MX, 3.57, MZ], white, 10);
@@ -168,7 +170,7 @@ const landmark: LandmarkModule = {
       addBox(group, [0.9, 0.6, 0.6], [MX + bx, 4.5, MZ + bz], materials.bronze);
       addCylinder(group, 0.3, 0.3, 0.8, [MX + bx, 5.2, MZ + bz], materials.bronze, 6);
     }
-    addCylinder(group, 5.2, 5.2, 0.1, [MX, 0.1, MZ], materials.yardPaving, 12);
+    addCylinder(group, 5.2, 5.2, 0.1, [MX, 0.1, MZ], materials.roofTerrace, 12);
     kit.solid(MX, MZ, 3.2, 9);
 
     clearTiles(-34, 38, -24, 47);

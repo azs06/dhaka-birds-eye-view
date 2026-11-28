@@ -51,9 +51,12 @@ const landmark: LandmarkModule = {
     const { group, addBox, addCylinder, addMesh, rectPane, materials } = kit;
     const THREE = kit.THREE;
     const wall = kit.material(0xefeadc, { roughness: 0.84 });
-    const rib = kit.material(0xf7f3e8, { roughness: 0.8 });
     const windowGlass = kit.litMaterial(0x33526e, 0.45, 0xffd9a0);
     const drumGlass = kit.litMaterial(0x86b9b4, 0.4, 0xffe6bd);
+    // Eight materials: the ribs share the wall's white (their relief carries
+    // them), the name board the window glass, and the pool the drum's teal,
+    // which lights up after dark as the pool does.
+    const rib = wall;
 
     const rect = (ax: number, az: number, bx: number, bz: number): Rect => {
       const [x0, z0] = kit.worldToLocal(ax, az);
@@ -147,7 +150,7 @@ const landmark: LandmarkModule = {
         addMesh(group, roofArch, windowGlass, [slab.x + offset + arch * 2.5, TOP + 0.7, slab.z + 4.58]);
       }
     }
-    addBox(group, [15, 1.3, 0.3], [slab.x + 1, TOP + 1.1, front - 0.6], materials.bronze);
+    addBox(group, [15, 1.3, 0.3], [slab.x + 1, TOP + 1.1, front - 0.6], windowGlass);
     addBox(group, [8, 3, 6], [slab.x - 30, TOP + 1.8, slab.z - 1], materials.roofGrey);
 
     // ── The entrance canopy along the Minto Road front ──────────────────────
@@ -184,7 +187,7 @@ const landmark: LandmarkModule = {
 
     // ── Pool, garden and the low hall behind ────────────────────────────────
     addBox(group, [pool.sx + 9, 0.12, pool.sz + 8], [pool.x, 0.06, pool.z], materials.paleConcrete);
-    addBox(group, [pool.sx, 0.1, pool.sz], [pool.x, 0.17, pool.z], materials.poolTurquoise);
+    addBox(group, [pool.sx, 0.1, pool.sz], [pool.x, 0.17, pool.z], drumGlass);
     const lawnEast = pool.x + pool.sx / 2 + 6;
     const lawnWest = wingEast - 3;
     addBox(group, [lawnWest - lawnEast, 0.1, 13], [(lawnWest + lawnEast) / 2, 0.05, back - 8.5], materials.lawn);

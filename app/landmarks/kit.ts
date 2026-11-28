@@ -299,7 +299,8 @@ export type LandmarkModule = {
   extents: [number, number];
   /** public/dhaka-map.json building ids this landmark replaces. */
   replacesOsmBuildingIds?: number[];
-  park?: LandmarkPark;
+  /** One lawn ellipse, or several for grounds no single ellipse fits. */
+  park?: LandmarkPark | LandmarkPark[];
   /** Default 4000. */
   triangleBudget?: number;
   /** Forecourt (m) procedural plots keep from the solid parts. Default 16. */

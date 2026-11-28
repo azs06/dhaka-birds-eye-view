@@ -9,6 +9,7 @@ import { Sky } from "three/examples/jsm/objects/Sky.js";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { resolveBuildingCollision } from "./flight-collision.mjs";
 import {
+  ELEVATED_ROAD_GROUND,
   ELEVATED_ROAD_PIER_KEEP_OUT,
   ELEVATED_ROAD_STYLES,
   ELEVATED_ROAD_TRIM_WAY_IDS,
@@ -315,6 +316,12 @@ type TrafficSimulation = {
 };
 type TrafficVehicle = {
   route: MapPoint[];
+  /** Height of the vehicle's centre at each route point (elevated decks), or null on the ground. */
+  routeY: number[] | null;
+  /** Index into the elevated routes (one-way decks run on into the next chain), or -1. */
+  elevatedRoute: number;
+  /** Joined a two-way bridge from a ramp: leaves at the bridge's next end. */
+  visitor?: boolean;
   segmentIndex: number;
   segmentProgress: number;
   direction: 1 | -1;
@@ -333,7 +340,10 @@ const clamp = THREE.MathUtils.clamp;
 const MAP_CENTER = { lat: 23.7715, lon: 90.4165 };
 // Half-extents (metres) of the flyable world, matched to the OSM fetch BOUNDS
 // in app/api/osm/route.ts: ~+/-12 km E-W and reaching Uttara in the north.
-const FLIGHT_EXTENT = { x: 12_000, z: 14_800 };
+// x reaches about 220 m past the east bound (12 077 m) so the whole Bangladesh–China
+// Friendship Exhibition Center, whose hall ends at 12 212 m, can be flown
+// round before the soft turn-back starts.
+const FLIGHT_EXTENT = { x: 12_300, z: 14_800 };
 const COLLISION_CELL_SIZE = 180;
 const BRAKE_SPEED = 18;
 const CRUISE_SPEED = 44;
@@ -390,6 +400,11 @@ const TRAFFIC_BASE_TICK_HZ = 10;
 const TRAFFIC_THROTTLED_TICK_HZ = 5;
 const TRAFFIC_LONG_FRAME_MS = 34;
 const TRAFFIC_MAX_CATCH_UP_STEPS = 2;
+// Flyover and expressway decks: one vehicle per this many metres of deck, up
+// to the cap, on top of the ground traffic.
+const TRAFFIC_ELEVATED_METERS_PER_VEHICLE = 90;
+const TRAFFIC_ELEVATED_MAX_VEHICLES = 320;
+const TRAFFIC_GROUND_Y = 2.25;
 // Shadow refresh cadence in frames. The world is static enough that every frame
 // is pure waste, but the crow and the streaming district tiles do move, so this
 // trades a twelfth of the shadow-pass cost for a shadow that still tracks.
@@ -510,6 +525,21 @@ const AREA_LANDMARKS: AreaLandmark[] = [
   { label: "Sadarghat", shortLabel: "SDR", lat: 23.70615, lon: 90.41124, altitude: 38, heading: Math.PI },
   { label: "Kamrangirchar", shortLabel: "KAM", lat: 23.71603, lon: 90.36531, altitude: 42, heading: Math.PI },
   { label: "Keraniganj", shortLabel: "KER", lat: 23.69796, lon: 90.38509, altitude: 44, heading: Math.PI, minimap: true },
+  { label: "Hazaribagh", shortLabel: "HAZ", lat: 23.7320, lon: 90.3684, altitude: 46, heading: Math.PI },
+  { label: "Gulistan", shortLabel: "GLS", lat: 23.7240, lon: 90.4110, altitude: 62, heading: Math.PI },
+  { label: "Wari", shortLabel: "WAR", lat: 23.7167, lon: 90.4167, altitude: 54, heading: Math.PI, minimap: true },
+  { label: "Gendaria", shortLabel: "GEN", lat: 23.7058, lon: 90.4295, altitude: 48, heading: Math.PI },
+  { label: "Sutrapur", shortLabel: "SUT", lat: 23.7065, lon: 90.4169, altitude: 44, heading: Math.PI },
+  { label: "Gabtoli", shortLabel: "GAB", lat: 23.7795, lon: 90.3475, altitude: 42, heading: Math.PI / 2, minimap: true },
+  { label: "Shyamoli", shortLabel: "SHY", lat: 23.7744, lon: 90.3654, altitude: 52, heading: Math.PI / 2 },
+  { label: "Kallyanpur", shortLabel: "KLP", lat: 23.7813, lon: 90.3570, altitude: 50, heading: Math.PI / 2 },
+  { label: "Mirpur DOHS", shortLabel: "MDH", lat: 23.8370, lon: 90.3694, altitude: 52, heading: 0 },
+  { label: "Bashabo", shortLabel: "BAS", lat: 23.7407, lon: 90.4296, altitude: 50, heading: -Math.PI / 2 },
+  { label: "Mugda", shortLabel: "MUG", lat: 23.7317, lon: 90.4347, altitude: 50, heading: -Math.PI / 2 },
+  { label: "Shyampur", shortLabel: "SYP", lat: 23.6850, lon: 90.4465, altitude: 42, heading: Math.PI },
+  { label: "Tongi", shortLabel: "TNG", lat: 23.8915, lon: 90.4023, altitude: 46, heading: 0, minimap: true },
+  { label: "Ashulia", shortLabel: "ASH", lat: 23.8975, lon: 90.3243, altitude: 40, heading: 0, minimap: true },
+  { label: "Korail", shortLabel: "KOR", lat: 23.7846, lon: 90.4095, altitude: 30, heading: Math.PI / 2 },
 ];
 const WATER_LANDMARKS: WaterLandmark[] = [
   { label: "Hatirjheel Lake", shortLabel: "HJL", lat: 23.77051, lon: 90.41635, minimap: true },
@@ -972,16 +1002,16 @@ const DHAKA_PARKS = ([
   // crowns read as more wood rather than as turf.
   { name: "Cantonment Woods", lat: 23.8100, lon: 90.3975, rx: 370, rz: 470, angle: 0, hasLoop: false, wooded: true, understory: true },
   // The grounds of landmark modules (app/landmarks), after every row above.
-  ...[...LANDMARK_MODULE_BY_KIND.values()].flatMap((landmarkModule) => (landmarkModule.park ? [{
-    name: landmarkModule.park.name ?? `${landmarkModule.label} Grounds`,
-    lat: landmarkModule.park.lat,
-    lon: landmarkModule.park.lon,
-    rx: landmarkModule.park.rx,
-    rz: landmarkModule.park.rz,
-    angle: landmarkModule.park.angle ?? 0,
+  ...[...LANDMARK_MODULE_BY_KIND.values()].flatMap((landmarkModule) => [landmarkModule.park ?? []].flat().map((park) => ({
+    name: park.name ?? `${landmarkModule.label} Grounds`,
+    lat: park.lat,
+    lon: park.lon,
+    rx: park.rx,
+    rz: park.rz,
+    angle: park.angle ?? 0,
     hasLoop: false,
-    wooded: landmarkModule.park.wooded,
-  }] : [])),
+    wooded: park.wooded,
+  }))),
 ] as DhakaParkRow[]).map((park) => {
   const world = coordinatesToWorld(park.lat, park.lon);
   return {
@@ -1102,9 +1132,11 @@ type UrbanStyle = {
   towerMax: number;
   organic: number;
   brick: number;
+  /** Extra share of low roofs under corrugated tin (informal settlements, sheds). */
+  tin: number;
 };
 const DEFAULT_URBAN_STYLE: UrbanStyle = {
-  lotW: 12, lotD: 15, gap: 1.3, lane: 4.6, minFloors: 4, maxFloors: 7, tower: 0, towerMin: 10, towerMax: 14, organic: 0.08, brick: 0.1,
+  lotW: 12, lotD: 15, gap: 1.3, lane: 4.6, minFloors: 4, maxFloors: 7, tower: 0, towerMin: 10, towerMax: 14, organic: 0.08, brick: 0.1, tin: 0,
 };
 const URBAN_STYLE_KEYS = Object.keys(DEFAULT_URBAN_STYLE) as Array<keyof UrbanStyle>;
 const DHAKA_URBAN_ZONES = [
@@ -1135,14 +1167,33 @@ const DHAKA_URBAN_ZONES = [
   { lat: 23.7470, lon: 90.4370, radius: 1_000, style: { lotW: 11.5, lotD: 14.5, gap: 1.1, lane: 4.2, minFloors: 5, maxFloors: 9, tower: 0.01, towerMin: 10, towerMax: 13, organic: 0.06, brick: 0.1 } }, // Khilgaon, Goran & Madartek
   { lat: 23.6990, lon: 90.4290, radius: 1_100, style: { lotW: 10.5, lotD: 13.5, gap: 1, lane: 4, minFloors: 4, maxFloors: 8, tower: 0, towerMin: 9, towerMax: 12, organic: 0.07, brick: 0.12 } }, // Gendaria, Jurain & Postogola
   { lat: 23.7810, lon: 90.3945, radius: 750, style: { lotW: 15, lotD: 18, gap: 1.8, lane: 5.5, minFloors: 5, maxFloors: 9, tower: 0.03, towerMin: 10, towerMax: 14, organic: 0.02, brick: 0.06 } }, // Mohakhali DOHS
-  { lat: 23.7680, lon: 90.4020, radius: 800, style: { lotW: 16, lotD: 19, gap: 1.8, lane: 5.5, minFloors: 5, maxFloors: 11, tower: 0.1, towerMin: 12, towerMax: 36, organic: 0.03, brick: 0.08 } }, // Tejgaon industrial area & Nakhalpara
+  // Tejgaon Industrial Area: long low sheds, godowns and two- to four-storey
+  // factory blocks on big plots, with a few newer office towers.
+  { lat: 23.7655, lon: 90.4010, radius: 750, style: { lotW: 26, lotD: 34, gap: 4, lane: 9, minFloors: 2, maxFloors: 4, tower: 0.05, towerMin: 8, towerMax: 18, organic: 0.02, brick: 0.06, tin: 0.3 } }, // Tejgaon industrial area
   { lat: 23.7935, lon: 90.3835, radius: 900, style: { lotW: 11.5, lotD: 14.5, gap: 1.1, lane: 4.2, minFloors: 5, maxFloors: 9, tower: 0.01, towerMin: 10, towerMax: 13, organic: 0.06, brick: 0.1 } }, // Kafrul & Ibrahimpur
   { lat: 23.8300, lon: 90.4190, radius: 1_000, style: { lotW: 12, lotD: 15, gap: 1.2, lane: 4.4, minFloors: 5, maxFloors: 9, tower: 0.02, towerMin: 10, towerMax: 14, organic: 0.04, brick: 0.08 } }, // Nikunja & Khilkhet
   { lat: 23.8560, lon: 90.4270, radius: 1_300, style: { lotW: 11.5, lotD: 14.5, gap: 1.2, lane: 4.4, minFloors: 4, maxFloors: 8, tower: 0, towerMin: 9, towerMax: 12, organic: 0.07, brick: 0.1 } }, // Dakshinkhan & Uttarkhan
   { lat: 23.7400, lon: 90.3600, radius: 1_000, style: { lotW: 11, lotD: 14, gap: 1, lane: 4, minFloors: 4, maxFloors: 8, tower: 0.01, towerMin: 9, towerMax: 12, organic: 0.07, brick: 0.12 } }, // Rayerbazar & Hazaribagh
-].map((zone) => {
+  // Districts that had a label but fell between the zones above.
+  { lat: 23.7240, lon: 90.4110, radius: 600, style: { lotW: 13, lotD: 16, gap: 1, lane: 4, minFloors: 5, maxFloors: 11, tower: 0.06, towerMin: 12, towerMax: 18, organic: 0.04, brick: 0.07 } }, // Gulistan: markets and office blocks
+  { lat: 23.7167, lon: 90.4167, radius: 650, style: { lotW: 12, lotD: 15, gap: 1, lane: 4.2, minFloors: 5, maxFloors: 10, tower: 0.02, towerMin: 10, towerMax: 14, organic: 0.05, brick: 0.1 } }, // Wari
+  { lat: 23.7065, lon: 90.4169, radius: 650, style: { lotW: 10, lotD: 13, gap: 0.7, lane: 3.6, minFloors: 3, maxFloors: 7, tower: 0, towerMin: 8, towerMax: 10, organic: 0.1, brick: 0.13 } }, // Sutrapur & Farashganj
+  { lat: 23.7805, lon: 90.3480, radius: 800, style: { lotW: 11, lotD: 14, gap: 1.2, lane: 4.4, minFloors: 2, maxFloors: 6, tower: 0, towerMin: 8, towerMax: 10, organic: 0.1, brick: 0.1, tin: 0.12 } }, // Gabtoli
+  { lat: 23.7813, lon: 90.3570, radius: 650, style: { lotW: 11.5, lotD: 14.5, gap: 1.1, lane: 4.2, minFloors: 4, maxFloors: 8, tower: 0.01, towerMin: 9, towerMax: 12, organic: 0.07, brick: 0.1 } }, // Kallyanpur
+  { lat: 23.8370, lon: 90.3694, radius: 550, style: { lotW: 16, lotD: 19, gap: 2, lane: 6, minFloors: 6, maxFloors: 8, tower: 0, towerMin: 9, towerMax: 10, organic: 0.01, brick: 0.03 } }, // Mirpur DOHS: planned six- to eight-storey blocks
+  { lat: 23.6850, lon: 90.4465, radius: 1_000, style: { lotW: 12, lotD: 15, gap: 1.2, lane: 4.4, minFloors: 3, maxFloors: 7, tower: 0, towerMin: 8, towerMax: 10, organic: 0.08, brick: 0.12, tin: 0.08 } }, // Shyampur
+  { lat: 23.8915, lon: 90.4023, radius: 1_200, style: { lotW: 13, lotD: 16, gap: 1.4, lane: 4.6, minFloors: 3, maxFloors: 7, tower: 0, towerMin: 8, towerMax: 10, organic: 0.06, brick: 0.1, tin: 0.06 } }, // Tongi
+  { lat: 23.8975, lon: 90.3243, radius: 1_400, style: { lotW: 18, lotD: 24, gap: 3, lane: 7, minFloors: 2, maxFloors: 6, tower: 0, towerMin: 8, towerMax: 10, organic: 0.05, brick: 0.08, tin: 0.15 } }, // Ashulia: garment factories among fields
+  // Korail, on the west shore of Banani Lake: one- and two-storey tin-roofed
+  // shacks packed along narrow lanes (Esri World Imagery), a wedge that is
+  // widest at the lake. Three overlapping zones follow its shape; `weight`
+  // lets them outvote the taller Banani and Mohakhali fabric round them.
+  { lat: 23.7848, lon: 90.4120, radius: 300, weight: 4, style: { lotW: 6, lotD: 8, gap: 0.45, lane: 2.2, minFloors: 2, maxFloors: 2, tower: 0, towerMin: 6, towerMax: 6, organic: 0.3, brick: 0.02, tin: 0.8 } }, // Korail, lake end
+  { lat: 23.7843, lon: 90.4088, radius: 260, weight: 4, style: { lotW: 6, lotD: 8, gap: 0.45, lane: 2.2, minFloors: 2, maxFloors: 2, tower: 0, towerMin: 6, towerMax: 6, organic: 0.3, brick: 0.02, tin: 0.8 } }, // Korail, middle
+  { lat: 23.7845, lon: 90.4060, radius: 190, weight: 4, style: { lotW: 6, lotD: 8, gap: 0.45, lane: 2.2, minFloors: 2, maxFloors: 2, tower: 0, towerMin: 6, towerMax: 6, organic: 0.3, brick: 0.02, tin: 0.8 } }, // Korail, west tip
+].map((zone: { lat: number; lon: number; radius: number; weight?: number; style: Partial<UrbanStyle> }) => {
   const world = coordinatesToWorld(zone.lat, zone.lon);
-  return { x: world.x, z: world.y, radius: zone.radius, style: zone.style as UrbanStyle };
+  return { x: world.x, z: world.y, radius: zone.radius, weight: zone.weight ?? 1, style: zone.style };
 });
 
 /** Blended district style at a point, plus how strongly any district claims it (0–1). */
@@ -1157,8 +1208,9 @@ function dhakaUrbanFabric(x: number, z: number) {
     if (dist >= zone.radius) continue;
     const t = 1 - dist / zone.radius;
     const influence = t * t * (3 - 2 * t);
-    for (const key of URBAN_STYLE_KEYS) sums[key] += zone.style[key] * influence;
-    totalInfluence += influence;
+    const weighted = influence * zone.weight;
+    for (const key of URBAN_STYLE_KEYS) sums[key] += (zone.style[key] ?? DEFAULT_URBAN_STYLE[key]) * weighted;
+    totalInfluence += weighted;
     strongest = Math.max(strongest, influence);
   }
   for (const key of URBAN_STYLE_KEYS) sums[key] /= totalInfluence;
@@ -1180,6 +1232,9 @@ const TOWER_SHADES = [0x4a6a80, 0x55788c, 0x3f5a6e, 0x648497, 0xd6d6d0, 0xc9c6bf
 // saturated (or near black) on purpose: the facade shader keeps such colours
 // and weathers every other roof to concrete grey.
 const TIN_ROOF_SHADES = [0x2a6fbf, 0x2366b0, 0x245fa6, 0x1a7040, 0xa8401f, 0x9a3a1c];
+// Informal settlements (styles with tin > 0.45, Korail): mostly rusted brown
+// and bare grey sheet, the grey left to weather to concrete, the odd blue one.
+const SETTLEMENT_TIN_SHADES = [0x7a4426, 0x8a4c2a, 0x6b3d24, 0x8d8f8c, 0x7f8280, 0x8d8f8c, 0x2a6fbf];
 const WATER_TANK_SHADES = [0x141416, 0x18181b, 0x1f5fae, 0x141416];
 
 function pickBuildingShade(target: THREE.Color, style: UrbanStyle, tower: boolean, height: number, random: () => number) {
@@ -1484,6 +1539,86 @@ function selectTrafficRoads(roads: OsmMapData["roads"]) {
   return selected;
 }
 
+type ElevatedTrafficRoute = {
+  points: MapPoint[];
+  ys: number[];
+  length: number;
+  /** Two-way decks (the river bridges) turn round at their ends like streets. */
+  oneWay: boolean;
+  /** Lane centres, metres to the right of the direction of travel. */
+  laneOffsets: number[];
+  /**
+   * Where a one-way chain runs on: the route, segment and distance into it,
+   * and which way along that route's points to drive (a ramp can join a
+   * two-way bridge against the order its points are stored in).
+   */
+  successors: Array<{ route: number; index: number; progress: number; direction: 1 | -1 }>;
+  /** Largest vehicle scale whose width fits between neighbouring lanes. */
+  maxScale: number;
+};
+
+/**
+ * The decks of app/elevated-roads.ts as traffic routes: one per chain, with
+ * the deck height at every cross-section. Chains are drawn in the direction
+ * of travel, so on one-way decks a vehicle that reaches the end of a ramp or
+ * carriageway runs on into the deck it joins.
+ */
+function elevatedTrafficRoutes(): ElevatedTrafficRoute[] {
+  const chains = elevatedRoadLayouts().flatMap(({ chains: roadChains }) => roadChains
+    .filter((chain) => !chain.atGrade && chain.rings.length >= 2)
+    .map((chain) => ({ chain })));
+  const routes: ElevatedTrafficRoute[] = chains.map(({ chain }) => {
+    const oneWay = !chain.twoWay;
+    // Lane centres across the deck, inside the parapets, for a ~3 m vehicle.
+    // A two-way deck keeps each direction to its left half, as Dhaka drives.
+    const usable = Math.max(0, chain.half - 0.45 - 1.7);
+    const lanes = Math.max(1, chain.lanes);
+    const laneOffsets = oneWay
+      ? Array.from({ length: lanes }, (_, lane) => (lanes === 1 ? 0 : -usable + (2 * usable * lane) / (lanes - 1)))
+      : [-Math.max(1.6, usable * 0.6)];
+    // Vehicles are 3 m wide at scale 1: on a narrow two-lane ramp (lane
+    // centres 2.2 m apart on Moghbazar) they are drawn smaller so neighbours
+    // never overlap when one passes the other.
+    const laneSpacing = laneOffsets.length > 1 ? Math.abs(laneOffsets[1] - laneOffsets[0]) : Infinity;
+    const maxScale = Math.min(1.25, (laneSpacing - 0.15) / 3);
+    return {
+      points: chain.rings.map((ring) => [ring.x, ring.z] as MapPoint),
+      ys: chain.rings.map((ring) => ring.top + chain.lift + (TRAFFIC_GROUND_Y - ELEVATED_ROAD_GROUND)),
+      length: chain.length,
+      oneWay,
+      laneOffsets,
+      successors: [],
+      maxScale,
+    };
+  });
+  chains.forEach(({ chain }, index) => {
+    if (!routes[index].oneWay) return;
+    const end = chain.rings[chain.rings.length - 1];
+    const before = chain.rings[chain.rings.length - 2];
+    chains.forEach(({ chain: other }, otherIndex) => {
+      if (otherIndex === index) return;
+      const near = other.nearest(end.x, end.z);
+      if (near.distance > Math.max(3, other.half) || Math.abs(other.at(near.s).top - end.top) > 1.5) return;
+      // Enter at the merge point itself: the segment that contains it and
+      // the distance into that segment.
+      const next = other.rings.findIndex((ring) => ring.s > near.s);
+      if (next <= 0) return;
+      const a = other.rings[next - 1];
+      const b = other.rings[next];
+      const along = near.s - a.s;
+      // Drive the way the ramp is heading. Against the stored order a vehicle
+      // starts from the segment's far end and counts its progress from there.
+      const forward = (b.x - a.x) * (end.x - before.x) + (b.z - a.z) * (end.z - before.z) >= 0;
+      // A one-way deck is only ever joined in its own direction.
+      if (!forward && routes[otherIndex].oneWay) return;
+      routes[index].successors.push(forward
+        ? { route: otherIndex, index: next - 1, progress: along, direction: 1 }
+        : { route: otherIndex, index: next, progress: Math.max(0, b.s - a.s - along), direction: -1 });
+    });
+  });
+  return routes;
+}
+
 function createTrafficSimulation(
   parent: THREE.Object3D,
   roads: OsmMapData["roads"],
@@ -1508,6 +1643,14 @@ function createTrafficSimulation(
     : localRoutes.length === 0
       ? vehicleTotal
       : Math.round(vehicleTotal * TRAFFIC_MAJOR_SHARE);
+  const elevatedRoutes = elevatedTrafficRoutes();
+  // A vehicle whose ramp lands on the street starts again at the head of a
+  // one-way deck (never on a two-way bridge, which would collect them).
+  const respawnRoutes = elevatedRoutes.flatMap((route, index) => (route.oneWay ? [index] : []));
+  const elevatedLength = elevatedRoutes.reduce((sum, route) => sum + route.length, 0);
+  const elevatedTotal = Math.min(TRAFFIC_ELEVATED_MAX_VEHICLES, Math.round(elevatedLength / TRAFFIC_ELEVATED_METERS_PER_VEHICLE));
+  const groundTotal = vehicleTotal;
+  const instanceTotal = groundTotal + elevatedTotal;
   const routeForIndex = (index: number) => {
     if (index < majorVehicleCount && majorRoutes.length > 0) return majorRoutes[index % majorRoutes.length];
     const pool = localRoutes.length > 0 ? localRoutes : majorRoutes;
@@ -1521,8 +1664,8 @@ function createTrafficSimulation(
   const cabinGeometry = new THREE.BoxGeometry(3.15, 1.15, 2.55);
   const bodyMaterial = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.42, metalness: 0.18 });
   const cabinMaterial = new THREE.MeshStandardMaterial({ color: 0x6f898b, roughness: 0.23, metalness: 0.16 });
-  const bodies = new THREE.InstancedMesh(bodyGeometry, bodyMaterial, vehicleTotal);
-  const cabins = new THREE.InstancedMesh(cabinGeometry, cabinMaterial, vehicleTotal);
+  const bodies = new THREE.InstancedMesh(bodyGeometry, bodyMaterial, instanceTotal);
+  const cabins = new THREE.InstancedMesh(cabinGeometry, cabinMaterial, instanceTotal);
   bodies.name = "Traffic vehicle bodies";
   cabins.name = "Traffic vehicle cabins";
   bodies.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -1553,13 +1696,15 @@ function createTrafficSimulation(
     const sizeScale = 0.85 + random() * 0.4;
     const position = new THREE.Vector3(
       THREE.MathUtils.lerp(start[0], end[0], ratio) - Math.sin(heading) * laneOffset * direction,
-      2.25,
+      TRAFFIC_GROUND_Y,
       THREE.MathUtils.lerp(start[1], end[1], ratio) + Math.cos(heading) * laneOffset * direction,
     );
     const major = ["motorway", "trunk", "primary", "secondary"].includes(road.kind);
     const baseSpeed = major ? 11 + random() * 8 : 6 + random() * 6;
     vehicles.push({
       route: road.points,
+      routeY: null,
+      elevatedRoute: -1,
       segmentIndex,
       segmentProgress,
       direction,
@@ -1573,21 +1718,86 @@ function createTrafficSimulation(
       heading,
       previousHeading: heading,
     });
-    bodies.setColorAt(index, new THREE.Color(palette[index % palette.length]));
+    bodies.setColorAt(elevatedTotal + index, new THREE.Color(palette[index % palette.length]));
   }
+  // Deck traffic, spread along the chains by length. It goes at the front of
+  // the instance list so it is drawn from the first frame (the street traffic
+  // fades in over the first seconds) and never roams.
+  const deckVehicles: TrafficVehicle[] = [];
+  const routeAtDistance = (distance: number) => {
+    for (const [index, route] of elevatedRoutes.entries()) {
+      if (distance < route.length) return { index, route, along: distance };
+      distance -= route.length;
+    }
+    return { index: 0, route: elevatedRoutes[0], along: 0 };
+  };
+  for (let index = 0; index < elevatedTotal; index++) {
+    const { index: routeIndex, route, along } = routeAtDistance(((index + random() * 0.8) / elevatedTotal) * elevatedLength);
+    let segmentIndex = 0;
+    let travelled = 0;
+    while (segmentIndex < route.points.length - 2) {
+      const step = Math.hypot(route.points[segmentIndex + 1][0] - route.points[segmentIndex][0], route.points[segmentIndex + 1][1] - route.points[segmentIndex][1]);
+      if (travelled + step > along) break;
+      travelled += step;
+      segmentIndex++;
+    }
+    const direction: 1 | -1 = route.oneWay || random() > 0.5 ? 1 : -1;
+    if (direction === -1) segmentIndex++;
+    const baseSpeed = 12 + random() * 8;
+    const position = new THREE.Vector3();
+    const vehicle: TrafficVehicle = {
+      route: route.points,
+      routeY: route.ys,
+      elevatedRoute: routeIndex,
+      segmentIndex,
+      segmentProgress: 0,
+      direction,
+      laneOffset: route.laneOffsets[Math.floor(random() * route.laneOffsets.length)],
+      sizeScale: Math.min(route.maxScale, 0.85 + random() * 0.4),
+      speed: baseSpeed,
+      baseSpeed,
+      phase: random() * Math.PI * 2,
+      position,
+      previousPosition: position.clone(),
+      heading: 0,
+      previousHeading: 0,
+    };
+    deckVehicles.push(vehicle);
+    bodies.setColorAt(index, new THREE.Color(palette[(index * 3 + 1) % palette.length]));
+  }
+  vehicles.unshift(...deckVehicles);
   if (bodies.instanceColor) bodies.instanceColor.needsUpdate = true;
 
   let simulationTime = 0;
   let accumulator = 0;
   let overloadCooldown = 0;
   let currentTickHz = TRAFFIC_BASE_TICK_HZ;
-  let visibleVehicles = Math.min(vehicleTotal, Math.max(8, Math.floor(vehicleTotal * 0.18)));
+  let visibleVehicles = elevatedTotal + Math.min(vehicleTotal, Math.max(8, Math.floor(vehicleTotal * 0.18)));
   const matrix = new THREE.Matrix4();
   const quaternion = new THREE.Quaternion();
   const scale = new THREE.Vector3(1, 1, 1);
   const renderPosition = new THREE.Vector3();
   const up = new THREE.Vector3(0, 1, 0);
 
+  // Put a deck vehicle onto an elevated route at a given point.
+  const enterRoute = (vehicle: TrafficVehicle, next: { route: number; index: number; progress: number; direction: 1 | -1 }, visitor: boolean) => {
+    const route = elevatedRoutes[next.route];
+    vehicle.elevatedRoute = next.route;
+    vehicle.route = route.points;
+    vehicle.routeY = route.ys;
+    vehicle.direction = next.direction;
+    vehicle.segmentIndex = Math.max(0, Math.min(next.index, route.points.length - 1));
+    vehicle.segmentProgress = next.progress;
+    vehicle.visitor = visitor;
+    vehicle.sizeScale = Math.min(vehicle.sizeScale, route.maxScale);
+    if (!route.laneOffsets.includes(vehicle.laneOffset)) vehicle.laneOffset = route.laneOffsets[Math.floor(random() * route.laneOffsets.length)];
+  };
+  // A ramp that lands on the street, or a visitor reaching a bridge end,
+  // starts again at the head of a one-way deck (never on a two-way bridge,
+  // which would collect them).
+  const respawnOnDeck = (vehicle: TrafficVehicle) => {
+    enterRoute(vehicle, { route: respawnRoutes[Math.floor(random() * respawnRoutes.length)], index: 0, progress: 0, direction: 1 }, false);
+  };
   const stepVehicle = (vehicle: TrafficVehicle, step: number) => {
     vehicle.previousPosition.copy(vehicle.position);
     vehicle.previousHeading = vehicle.heading;
@@ -1595,13 +1805,32 @@ function createTrafficSimulation(
     vehicle.speed = THREE.MathUtils.lerp(vehicle.speed, vehicle.baseSpeed * flow, 1 - Math.exp(-1.2 * step));
     let remaining = vehicle.speed * step;
     let guard = 0;
-    while (remaining > 0 && guard++ < 8) {
+    let jumped = false;
+    // At the end of its route a vehicle turns round, unless it is on a deck:
+    // a one-way deck runs on into the deck it joins (or, landing on the
+    // street, sends it back to a deck start), and a ramp's visitor to a
+    // two-way bridge leaves at the bridge end.
+    const nextAfterEnd = () => {
       let nextIndex = vehicle.segmentIndex + vehicle.direction;
+      if (nextIndex >= 0 && nextIndex < vehicle.route.length) return nextIndex;
+      const current = vehicle.elevatedRoute >= 0 ? elevatedRoutes[vehicle.elevatedRoute] : null;
+      if (current?.oneWay && current.successors.length > 0) {
+        const next = current.successors[Math.floor(random() * current.successors.length)];
+        enterRoute(vehicle, next, !elevatedRoutes[next.route].oneWay);
+      } else if (current?.oneWay || (current && vehicle.visitor)) {
+        respawnOnDeck(vehicle);
+        jumped = true;
+      }
+      nextIndex = vehicle.segmentIndex + vehicle.direction;
       if (nextIndex < 0 || nextIndex >= vehicle.route.length) {
         vehicle.direction = vehicle.direction === 1 ? -1 : 1;
         nextIndex = vehicle.segmentIndex + vehicle.direction;
         vehicle.segmentProgress = 0;
       }
+      return nextIndex;
+    };
+    while (remaining > 0 && guard++ < 8) {
+      const nextIndex = nextAfterEnd();
       const start = vehicle.route[vehicle.segmentIndex];
       const end = vehicle.route[nextIndex];
       const dx = end[0] - start[0];
@@ -1617,12 +1846,7 @@ function createTrafficSimulation(
         vehicle.segmentProgress = 0;
       }
     }
-    let nextIndex = vehicle.segmentIndex + vehicle.direction;
-    if (nextIndex < 0 || nextIndex >= vehicle.route.length) {
-      vehicle.direction = vehicle.direction === 1 ? -1 : 1;
-      nextIndex = vehicle.segmentIndex + vehicle.direction;
-      vehicle.segmentProgress = 0;
-    }
+    const nextIndex = nextAfterEnd();
     const start = vehicle.route[vehicle.segmentIndex];
     const end = vehicle.route[nextIndex];
     const dx = end[0] - start[0];
@@ -1630,15 +1854,23 @@ function createTrafficSimulation(
     const segmentLength = Math.max(0.01, Math.hypot(dx, dz));
     const ratio = clamp(vehicle.segmentProgress / segmentLength, 0, 1);
     vehicle.heading = Math.atan2(dz, dx);
+    // The heading already turns with the direction of travel, so deck lanes
+    // (measured from it) are not flipped again; street lanes keep their sign.
+    const side = vehicle.routeY ? vehicle.laneOffset : vehicle.laneOffset * vehicle.direction;
     vehicle.position.set(
-      THREE.MathUtils.lerp(start[0], end[0], ratio) - Math.sin(vehicle.heading) * vehicle.laneOffset * vehicle.direction,
-      2.25,
-      THREE.MathUtils.lerp(start[1], end[1], ratio) + Math.cos(vehicle.heading) * vehicle.laneOffset * vehicle.direction,
+      THREE.MathUtils.lerp(start[0], end[0], ratio) - Math.sin(vehicle.heading) * side,
+      vehicle.routeY ? THREE.MathUtils.lerp(vehicle.routeY[vehicle.segmentIndex], vehicle.routeY[nextIndex], ratio) : TRAFFIC_GROUND_Y,
+      THREE.MathUtils.lerp(start[1], end[1], ratio) + Math.cos(vehicle.heading) * side,
     );
+    // No streak across the city when a vehicle is sent back to a deck start.
+    if (jumped) {
+      vehicle.previousPosition.copy(vehicle.position);
+      vehicle.previousHeading = vehicle.heading;
+    }
   };
 
   const renderVehicles = (alpha: number) => {
-    visibleVehicles = Math.min(vehicleTotal, Math.max(visibleVehicles, Math.floor(12 + simulationTime * 120)));
+    visibleVehicles = Math.min(instanceTotal, Math.max(visibleVehicles, elevatedTotal + Math.floor(12 + simulationTime * 120)));
     bodies.count = visibleVehicles;
     cabins.count = visibleVehicles;
     for (let index = 0; index < visibleVehicles; index++) {
@@ -1688,8 +1920,8 @@ function createTrafficSimulation(
     }
     if (nearbyRoads.length === 0) return;
     for (let attempt = 0; attempt < 30; attempt++) {
-      roamCursor = (roamCursor + 3) % vehicleTotal;
-      const vehicle = vehicles[roamCursor];
+      roamCursor = (roamCursor + 3) % groundTotal;
+      const vehicle = vehicles[elevatedTotal + roamCursor];
       if (Math.hypot(vehicle.position.x - anchorX, vehicle.position.z - anchorZ) < ROAM_RADIUS) continue;
       const road = nearbyRoads[Math.floor(random() * nearbyRoads.length)];
       const direction: 1 | -1 = random() > 0.5 ? 1 : -1;
@@ -1709,13 +1941,19 @@ function createTrafficSimulation(
       vehicle.previousHeading = vehicle.heading;
       vehicle.position.set(
         start[0] - Math.sin(vehicle.heading) * vehicle.laneOffset * direction,
-        2.25,
+        TRAFFIC_GROUND_Y,
         start[1] + Math.cos(vehicle.heading) * vehicle.laneOffset * direction,
       );
       vehicle.previousPosition.copy(vehicle.position);
     }
   };
 
+  // Put the deck vehicles on their decks before the first frame.
+  for (const vehicle of deckVehicles) {
+    stepVehicle(vehicle, 0);
+    vehicle.previousPosition.copy(vehicle.position);
+    vehicle.previousHeading = vehicle.heading;
+  }
   renderVehicles(1);
   return {
     follow(anchor) {
@@ -3460,6 +3698,7 @@ async function addProceduralDistrictTiles(
       const vacantLots: number[] = [];
       // Share of low buildings under a tin sheet; each block sets its own.
       let tinRoofChance = 0.08;
+      let tinRoofShades = TIN_ROOF_SHADES;
       const greenWeight = dhakaGreenWeight(centerX, centerZ);
       const tileMinX = centerX - tileSize / 2;
       const tileMinZ = centerZ - tileSize / 2;
@@ -3619,7 +3858,7 @@ async function addProceduralDistrictTiles(
             sin * (depth + 0.7), 0, cos * (depth + 0.7), 0,
             x, top + sheet / 2 + 0.92, z, 1,
           );
-          shadeColor.setHex(TIN_ROOF_SHADES[Math.floor(random() * TIN_ROOF_SHADES.length)]).offsetHSL(0, 0, (random() - 0.5) * 0.06);
+          shadeColor.setHex(tinRoofShades[Math.floor(random() * tinRoofShades.length)]).offsetHSL(0, 0, (random() - 0.5) * 0.06);
           roofColors.push(shadeColor.r, shadeColor.g, shadeColor.b);
         } else if (top >= 11 && random() < 0.34) {
           const tankSize = 1.3 + random() * 0.8;
@@ -3683,7 +3922,8 @@ async function addProceduralDistrictTiles(
           const plotBlockVacancy = Math.min(0.9, 0.95 * (1 - urban) ** 2.6);
           const lotVacancy = 0.01 + 0.13 * (1 - urban) ** 1.5 + clamp((blockGreen - 0.95) * 0.16, 0, 0.1);
           const roofChance = 0.32 + 0.2 * (1 - urban);
-          tinRoofChance = 0.05 + 0.1 * (1 - urban) + style.organic * 0.5;
+          tinRoofChance = Math.min(0.95, 0.05 + 0.1 * (1 - urban) + style.organic * 0.5 + style.tin);
+          tinRoofShades = style.tin > 0.45 ? SETTLEMENT_TIN_SHADES : TIN_ROOF_SHADES;
           const heading = roadHeadingAt(blockCenterX, blockCenterZ);
           const headingCos = Math.cos(heading);
           const headingSin = Math.sin(heading);
@@ -4883,7 +5123,9 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
   const roofGrey = new THREE.MeshStandardMaterial({ color: 0x858c8a, roughness: 0.9 });
   const plantGrey = new THREE.MeshStandardMaterial({ color: 0xa9adab, roughness: 0.7, metalness: 0.2 });
   // Ground infrastructure: the old airfield and the bus terminal yards.
-  const airfieldGrass = new THREE.MeshStandardMaterial({ color: 0x788a57, roughness: 1 });
+  // Dry, dusty olive turf, as the Tejgaon field reads on the imagery beside
+  // the city's grey-brown ground (the old 0x788a57 glowed pastel green).
+  const airfieldGrass = new THREE.MeshStandardMaterial({ color: 0x5f6243, roughness: 1 });
   const wornAsphalt = new THREE.MeshStandardMaterial({ color: 0x3b3f40, roughness: 0.96 });
   const agedConcrete = new THREE.MeshStandardMaterial({ color: 0xa6a498, roughness: 0.92 });
   const fadedPaint = new THREE.MeshStandardMaterial({ color: 0xc9c7b8, roughness: 0.9 });
@@ -5571,7 +5813,8 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
   };
   scene.userData.relabel = (locale: Locale) => {
     scene.userData.labelLocale = locale;
-    root.traverse((object) => {
+    // The whole scene: the district and river signs (addCity) redraw too.
+    scene.traverse((object) => {
       (object.userData.redrawLabel as (() => void) | undefined)?.();
     });
   };
@@ -13138,7 +13381,8 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
         deck.matrixAutoUpdate = false;
         elevatedRoot.add(deck);
       }
-      const shafts = new THREE.InstancedMesh(style.pier === "wall" ? bladeGeometry : columnGeometry, concrete, pierCapacity);
+      // Portal piers (see placePiers) take two shafts.
+      const shafts = new THREE.InstancedMesh(style.pier === "wall" ? bladeGeometry : columnGeometry, concrete, pierCapacity * 2);
       const caps = new THREE.InstancedMesh(unitBox, concrete, pierCapacity);
       for (const mesh of [shafts, caps]) {
         mesh.name = `${road.key} ${mesh === shafts ? "pier shafts" : "pier caps"}`;
@@ -13192,47 +13436,108 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
       plan: points.map(([lat, lon]) => coordinatesToWorld(lat, lon)),
       halfWidth,
     }));
-    const placePiers = (blocked: (x: number, z: number, tx: number, tz: number, inWaterAllowed: boolean) => boolean) => {
+    // `strict` (portal legs, which stand off the deck's centre line) treats a
+    // street running along the deck as blocking too, except on its centre
+    // line: a leg may stand in the median or beyond the kerb, never in a lane.
+    const placePiers = (blocked: (x: number, z: number, tx: number, tz: number, inWaterAllowed: boolean, strict?: boolean) => boolean) => {
       const layouts = elevatedRoadLayouts();
       for (const { layout, shafts, caps } of pierSets) {
         const { road, chains } = layout;
         const style = ELEVATED_ROAD_STYLES[road.style];
-        let count = 0;
+        let shaftCount = 0;
+        let capCount = 0;
+        // Stations left without a pier, for the dev diagnostics.
+        let missing = 0;
+        const clearOfKeepOut = (x: number, z: number) => !keepOut.some(({ plan, halfWidth }) => plan.some((point, index) => index > 0
+          && distanceToSegmentSquared(x, z, plan[index - 1].x, plan[index - 1].y, point.x, point.y) < (halfWidth + style.pierRadius + 0.4) ** 2));
         for (const chain of chains) {
           if (chain.atGrade) continue;
           const web = chain.half * style.webRatio;
           for (const { s, river } of chain.pierStations) {
-            if (count >= shafts.instanceMatrix.count) break;
+            if (shaftCount + 2 > shafts.instanceMatrix.count || capCount >= caps.instanceMatrix.count) break;
+            let placed = false;
+            let underDeck = false;
             // A main-span pier stands where the span puts it; the rest may slide.
-            for (const shift of river ? [0] : [0, 5, -5, 10, -10]) {
+            for (const shift of river ? [0] : [0, 5, -5, 10, -10, 15, -15]) {
               const { x, z, tx, tz, top } = chain.at(s + shift);
               const soffit = top - chain.depthAt(s + shift);
               if (soffit < WALL_SOFFIT) break;
               // Not through a lower deck or a link road at a crossing or merge.
-              if (elevatedDeckBelow(layouts, chain, x, z, tx, tz, soffit, style.pierRadius + 0.4)) continue;
-              if (keepOut.some(({ plan, halfWidth }) => plan.some((point, index) => index > 0
-                && distanceToSegmentSquared(x, z, plan[index - 1].x, plan[index - 1].y, point.x, point.y) < (halfWidth + style.pierRadius + 0.4) ** 2))) continue;
+              if (elevatedDeckBelow(layouts, chain, x, z, tx, tz, soffit, style.pierRadius + 0.4)) {
+                underDeck = true;
+                continue;
+              }
+              if (!clearOfKeepOut(x, z)) continue;
               if (!river && blocked(x, z, tx, tz, style.piersInWater)) continue;
               pierQuaternion.setFromAxisAngle(upAxis, Math.atan2(tx, tz));
               if (style.pier === "wall" && river) {
                 // A blade as wide as the soffit on a pile cap at the waterline.
-                shafts.setMatrixAt(count, pierMatrix.compose(pierPosition.set(x, 0, z), pierQuaternion, pierScale.set(web * 1.7, soffit, style.pierRadius * 1.4)));
-                caps.setMatrixAt(count, pierMatrix.compose(pierPosition.set(x, 1.1, z), pierQuaternion, pierScale.set(web * 1.7 + 3, 1.8, style.pierRadius * 1.4 + 3.4)));
+                shafts.setMatrixAt(shaftCount++, pierMatrix.compose(pierPosition.set(x, 0, z), pierQuaternion, pierScale.set(web * 1.7, soffit, style.pierRadius * 1.4)));
+                caps.setMatrixAt(capCount++, pierMatrix.compose(pierPosition.set(x, 1.1, z), pierQuaternion, pierScale.set(web * 1.7 + 3, 1.8, style.pierRadius * 1.4 + 3.4)));
               } else if (style.pier === "wall") {
                 // An approach pier on land: a narrower blade under a crosshead.
-                shafts.setMatrixAt(count, pierMatrix.compose(pierPosition.set(x, 0, z), pierQuaternion, pierScale.set(web * 1.1, soffit - 1.2, style.pierRadius * 1.4)));
-                caps.setMatrixAt(count, pierMatrix.compose(pierPosition.set(x, soffit - 0.6, z), pierQuaternion, pierScale.set(web * 1.9, 1.2, style.pierRadius * 1.4 + 0.7)));
+                shafts.setMatrixAt(shaftCount++, pierMatrix.compose(pierPosition.set(x, 0, z), pierQuaternion, pierScale.set(web * 1.1, soffit - 1.2, style.pierRadius * 1.4)));
+                caps.setMatrixAt(capCount++, pierMatrix.compose(pierPosition.set(x, soffit - 0.6, z), pierQuaternion, pierScale.set(web * 1.9, 1.2, style.pierRadius * 1.4 + 0.7)));
               } else {
-                shafts.setMatrixAt(count, pierMatrix.compose(pierPosition.set(x, 0, z), pierQuaternion, pierScale.set(style.pierRadius, soffit - CAP_DEPTH, style.pierRadius)));
-                caps.setMatrixAt(count, pierMatrix.compose(pierPosition.set(x, soffit - CAP_DEPTH / 2, z), pierQuaternion, pierScale.set(web * 2 + 0.8, CAP_DEPTH, style.pierRadius * 2.2)));
+                shafts.setMatrixAt(shaftCount++, pierMatrix.compose(pierPosition.set(x, 0, z), pierQuaternion, pierScale.set(style.pierRadius, soffit - CAP_DEPTH, style.pierRadius)));
+                caps.setMatrixAt(capCount++, pierMatrix.compose(pierPosition.set(x, soffit - CAP_DEPTH / 2, z), pierQuaternion, pierScale.set(web * 2 + 0.8, CAP_DEPTH, style.pierRadius * 2.2)));
               }
-              count++;
+              placed = true;
               break;
             }
+            // A deck stacked over lower ones (Moghbazar at Malibagh) has no
+            // ground under its centre for hundreds of metres. There it rides
+            // on a portal: a leg either side, clear of the lower decks, and a
+            // crossbeam under the soffit spanning them.
+            if (!placed && underDeck && style.pier === "column") {
+              const { x, z, tx, tz, top } = chain.at(s);
+              const soffit = top - chain.depthAt(s);
+              const beamBottom = soffit - CAP_DEPTH;
+              // Lateral unit vector, to the deck's right.
+              const rx = -tz;
+              const rz = tx;
+              const legClear = (offset: number) => {
+                const lx = x + rx * offset;
+                const lz = z + rz * offset;
+                return !elevatedDeckBelow(layouts, chain, lx, lz, tx, tz, soffit, style.pierRadius + 0.4)
+                  && clearOfKeepOut(lx, lz) && !blocked(lx, lz, tx, tz, style.piersInWater, true);
+              };
+              const reach = (side: 1 | -1) => {
+                for (let offset = chain.half; offset <= 16; offset += 0.5) if (legClear(side * offset)) return offset;
+                return null;
+              };
+              const left = reach(-1);
+              const right = reach(1);
+              // The beam must pass over the lower decks' parapets.
+              const beamClear = left !== null && right !== null && !layouts.some(({ chains: others }) => others.some((other) => {
+                if (other === chain || other.atGrade) return false;
+                for (let offset = -left; offset <= right; offset += 1) {
+                  const near = other.nearest(x + rx * offset, z + rz * offset);
+                  if (near.distance < other.half && other.at(near.s).top + 1.6 > beamBottom && other.at(near.s).top < soffit - 1) return true;
+                }
+                return false;
+              }));
+              if (left !== null && right !== null && beamClear) {
+                pierQuaternion.setFromAxisAngle(upAxis, Math.atan2(tx, tz));
+                for (const offset of [-left, right]) {
+                  shafts.setMatrixAt(shaftCount++, pierMatrix.compose(pierPosition.set(x + rx * offset, 0, z + rz * offset), pierQuaternion, pierScale.set(style.pierRadius, beamBottom, style.pierRadius)));
+                }
+                const middle = (right - left) / 2;
+                caps.setMatrixAt(capCount++, pierMatrix.compose(
+                  pierPosition.set(x + rx * middle, soffit - CAP_DEPTH / 2, z + rz * middle),
+                  pierQuaternion,
+                  pierScale.set(left + right + style.pierRadius * 2, CAP_DEPTH, style.pierRadius * 2.2),
+                ));
+                placed = true;
+              }
+            }
+            if (!placed && chain.at(s).top - chain.depthAt(s) >= WALL_SOFFIT) missing++;
           }
         }
+        if (import.meta.env.DEV) (scene.userData.elevatedPiersMissing ??= {})[road.key] = missing;
+        shafts.count = shaftCount;
+        caps.count = capCount;
         for (const mesh of [shafts, caps]) {
-          mesh.count = count;
           mesh.instanceMatrix.needsUpdate = true;
           mesh.computeBoundingBox();
           mesh.computeBoundingSphere();
@@ -13291,17 +13596,20 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
           if (width > 0) addSegments(feature.points, width / 2 + 1.5, true);
         }
       }
-      placePiers((x, z, tx, tz, inWaterAllowed) => {
+      placePiers((x, z, tx, tz, inWaterAllowed, strict = false) => {
         const key = `${Math.floor(x / CELL)}:${Math.floor(z / CELL)}`;
         if (!inWaterAllowed && (waterAreas.get(key) ?? []).some((points) => pointInPolygon(x, z, points))) return true;
         for (const obstacle of obstacles.get(key) ?? []) {
           if (obstacle.water && inWaterAllowed) continue;
-          if (distanceToSegmentSquared(x, z, obstacle.x1, obstacle.z1, obstacle.x2, obstacle.z2) > obstacle.radius ** 2) continue;
+          const distanceSquared = distanceToSegmentSquared(x, z, obstacle.x1, obstacle.z1, obstacle.x2, obstacle.z2);
+          if (distanceSquared > obstacle.radius ** 2) continue;
           if (obstacle.water) return true;
           const dx = obstacle.x2 - obstacle.x1;
           const dz = obstacle.z2 - obstacle.z1;
-          // A street within about 35° of the deck's line runs along it, not across.
+          // A street within about 35° of the deck's line runs along it, not
+          // across, and a centre pier may stand in its median.
           if (Math.abs(dx * tx + dz * tz) < 0.82 * Math.hypot(dx, dz)) return true;
+          if (strict && distanceSquared > 1.2 ** 2) return true;
         }
         return false;
       });
@@ -13315,6 +13623,43 @@ function addPersistentDhakaLandmarks(scene: THREE.Scene) {
   scene.userData.landmarkRoot = root;
   scene.userData.landmarkOsmIds = landmarkOsmIds;
   return { colliders, perches };
+}
+
+/**
+ * Draw a district or river sign (80 px tall canvas) in the scene's label
+ * language: capitals in monospace for English, the Bangla face for Bangla.
+ */
+function drawSignText(
+  context: CanvasRenderingContext2D,
+  locale: Locale,
+  label: string,
+  width: number,
+  fontSize: number,
+  fill: string,
+  stroke: string,
+  ink: string,
+  texture: THREE.Texture,
+) {
+  const text = locale === "en" ? label.toUpperCase() : placeName(locale, label);
+  const family = locale === "bn"
+    ? `${getComputedStyle(document.body).getPropertyValue("--font-bangla") || "sans-serif"}, sans-serif`
+    : "monospace";
+  context.clearRect(0, 0, width, 80);
+  context.fillStyle = fill;
+  context.fillRect(2, 2, width - 4, 76);
+  context.strokeStyle = stroke;
+  context.lineWidth = 3;
+  context.strokeRect(3.5, 3.5, width - 7, 73);
+  context.fillStyle = ink;
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  let size = locale === "bn" ? fontSize + 5 : fontSize;
+  do {
+    context.font = `600 ${size}px ${family}`;
+    size -= 2;
+  } while (size > 14 && context.measureText(text).width > width - 24);
+  context.fillText(text, width / 2, locale === "bn" ? 44 : 41);
+  texture.needsUpdate = true;
 }
 
 function addCity(scene: THREE.Scene) {
@@ -13853,22 +14198,15 @@ function addCity(scene: THREE.Scene) {
     canvas.height = 80;
     const context = canvas.getContext("2d");
     if (!context) continue;
-    context.fillStyle = "rgba(247, 222, 171, 0.92)";
-    context.fillRect(2, 2, 380, 76);
-    context.strokeStyle = "rgba(196, 71, 85, 0.9)";
-    context.lineWidth = 3;
-    context.strokeRect(3.5, 3.5, 377, 73);
-    context.fillStyle = "#243b35";
-    context.font = "600 29px monospace";
-    context.textAlign = "center";
-    context.textBaseline = "middle";
-    context.fillText(landmark.label.toUpperCase(), 192, 41);
     const texture = new THREE.CanvasTexture(canvas);
     texture.colorSpace = THREE.SRGBColorSpace;
     texture.minFilter = THREE.LinearFilter;
+    const draw = () => drawSignText(context, (scene.userData.labelLocale as Locale | undefined) ?? "en", landmark.label, 384, 29, "rgba(247, 222, 171, 0.92)", "rgba(196, 71, 85, 0.9)", "#243b35", texture);
+    draw();
     const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false, toneMapped: false }));
     label.position.copy(perches[index].position).add(new THREE.Vector3(0, 22, 0));
     label.scale.set(72, 15, 1);
+    label.userData.redrawLabel = draw;
     areaLabels.add(label);
   }
   scene.add(areaLabels);
@@ -13880,20 +14218,13 @@ function addCity(scene: THREE.Scene) {
     canvas.height = 80;
     const context = canvas.getContext("2d");
     if (!context) continue;
-    context.fillStyle = "rgba(43, 139, 151, 0.9)";
-    context.fillRect(2, 2, 444, 76);
-    context.strokeStyle = "rgba(255, 224, 135, 0.92)";
-    context.lineWidth = 3;
-    context.strokeRect(3.5, 3.5, 441, 73);
-    context.fillStyle = "#fff0c4";
-    context.font = "600 27px monospace";
-    context.textAlign = "center";
-    context.textBaseline = "middle";
-    context.fillText(landmark.label.toUpperCase(), 224, 41);
     const texture = new THREE.CanvasTexture(canvas);
     texture.colorSpace = THREE.SRGBColorSpace;
     texture.minFilter = THREE.LinearFilter;
+    const draw = () => drawSignText(context, (scene.userData.labelLocale as Locale | undefined) ?? "en", landmark.label, 448, 27, "rgba(43, 139, 151, 0.9)", "rgba(255, 224, 135, 0.92)", "#fff0c4", texture);
+    draw();
     const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false, toneMapped: false }));
+    label.userData.redrawLabel = draw;
     const world = coordinatesToWorld(landmark.lat, landmark.lon);
     label.position.set(world.x, 20, world.y);
     label.scale.set(86, 15, 1);

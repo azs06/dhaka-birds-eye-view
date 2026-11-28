@@ -41,6 +41,9 @@ const landmark: LandmarkModule = {
     const stripe = kit.material(0xb65a44, { roughness: 0.9 });
     const frame = materials.paleConcrete;
     const dark = materials.archDark;
+    // The newer north block is washed salmon-pink with pale balcony bands
+    // (Commons "Kakrail Mosque, Dhaka.jpg"), not the hall's cream.
+    const salmon = kit.material(0xd9a48e, { roughness: 0.9 });
 
     // A block given by its east and south ranges.
     const block = (e0: number, e1: number, s0: number, s1: number, y0: number, y1: number, material = cream) => {
@@ -82,7 +85,8 @@ const landmark: LandmarkModule = {
     const wedge: Array<[number, number]> = [
       [-33, -43.5], [35.5, -43.5], [29.5, -21], [21.5, -6], [14.5, 12], [8, 34], [3.4, 55], [2.4, 59.5], [-34, 59.5],
     ];
-    kit.addPrism(group, wedge.map(([e, s]): PlanPoint => [-s, e]), 0, 0.1, materials.yardPaving);
+    // Paved in the south block's pale concrete, keeping eight materials.
+    kit.addPrism(group, wedge.map(([e, s]): PlanPoint => [-s, e]), 0, 0.1, frame);
 
     // PRAYER HALL: two tall storeys, a cusped arcade to the road, a low
     // hipped tin roof with a clerestory strip under its eaves.
@@ -123,14 +127,17 @@ const landmark: LandmarkModule = {
     }
 
     // NORTH BLOCK: four storeys, open verandahs to the road and the junction.
-    block(-32, 8, -41.6, -21.5, 0, NORTH_TOP);
+    block(-32, 8, -41.6, -21.5, 0, NORTH_TOP, salmon);
     block(-32.3, 8.3, -41.9, -21.5, NORTH_TOP - 0.3, NORTH_TOP + 0.5, cream);
     block(-20, -8, -36, -27, NORTH_TOP, NORTH_TOP + 3, cream);
     for (let floor = 0; floor < 4; floor++) {
       const y = 1.1 + floor * 3.55;
-      pane(16.5, 1.9, 8.08, -31.6, y, 0);
-      pane(36, 1.9, -12, -41.68, y, Math.PI / 2);
-      pane(16.5, 1.5, -32.08, -31.6, y + 0.2, Math.PI);
+      // A pale balcony band under each row of windows.
+      pane(16.5, 0.5, 8.06, -31.6, y - 0.55, 0, cream);
+      pane(36, 0.5, -12, -41.66, y - 0.55, Math.PI / 2, cream);
+      pane(16.5, 1.3, 8.1, -31.6, y + 0.2, 0);
+      pane(36, 1.3, -12, -41.7, y + 0.2, Math.PI / 2);
+      pane(16.5, 1.2, -32.08, -31.6, y + 0.3, Math.PI);
     }
     for (const s of [-41, -31.6, -22.2]) {
       pane(0.32, NORTH_TOP - 0.6, 8.14, s - 0.3, 0.3, 0, stripe);
