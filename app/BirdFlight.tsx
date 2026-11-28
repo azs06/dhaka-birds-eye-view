@@ -50,7 +50,7 @@ import {
   type Locale,
   type Strings,
 } from "./i18n";
-import { BIRDS, DEFAULT_BIRD, birdById, chooseBird, readBird, subscribeToBird, type Bird, type BirdId } from "./birds";
+import { BIRDS, birdById, chooseBird, readBird, subscribeToBird, type Bird, type BirdId } from "./birds";
 import { BirdGlyph, HudIcon, weatherIconName } from "./HudIcon";
 import soundClips from "./sound-clips.json";
 import { DHAKA_LANDMARK_FOOTPRINTS, type LandmarkFootprintPart } from "./dhaka-landmark-footprints";
@@ -14609,20 +14609,18 @@ function MenuOption({ selected, name, note, swatch, onChoose }: { selected: bool
   );
 }
 
-/** One bird choice: a species silhouette and name, expanding its full note when selected. */
+/** One bird card in the horizontal picker: painted portrait, name and field note. */
 function BirdOption({ bird, selected, name, note, onChoose }: { bird: Bird; selected: boolean; name: string; note: string; onChoose: () => void }) {
   return (
-    <button type="button" className={`bird-opt${selected ? " selected" : ""}`} aria-pressed={selected} onClick={onChoose}>
-      <span className="bird-opt-icon" aria-hidden="true">
-        <BirdGlyph bird={bird} selected={selected} />
+    <button type="button" className={`bird-card${selected ? " selected" : ""}`} aria-pressed={selected} onClick={onChoose}>
+      <span className="bird-card-media" aria-hidden="true">
+        <i className="bird-card-art" style={{ backgroundImage: `url("/title/card-${bird.id}.jpg")` }} />
+        {selected && <span className="bird-card-check"><HudIcon name="check" className="opt-check" /></span>}
       </span>
-      <span className="bird-opt-text">
+      <span className="bird-card-body">
         <b>{name}</b>
-        <span className="bird-opt-note" aria-hidden={!selected}>
-          <small>{note}</small>
-        </span>
+        <small>{note}</small>
       </span>
-      <HudIcon name="check" className="opt-check" />
     </button>
   );
 }
@@ -16565,19 +16563,24 @@ void main() {`,
   const weatherIconKey = weatherIconName(weather.mode, skyIsDay);
   // Night and dusk skies get the dusk painting; every other hour opens at dawn.
   const titleArt = skyPresetId === "dusk" || skyPresetId === "night" || (skyPresetId === "live" && !skyIsDay) ? "dusk" : "dawn";
-  // Each bird has its own painting. Fetch the set for this sky up front so
-  // picking a bird swaps the art at once, and keep showing the last painting
-  // until the new one has decoded so a slow load never blinks.
+  // Clean sky plates carry each species as its own sprite layer so choosing a
+  // bird flies it into the scene along that bird's signature path while the
+  // previous bird banks away into the clouds.
   const [skyBird, setSkyBird] = useState<BirdId>(birdId);
+  const [leavingSkyBird, setLeavingSkyBird] = useState<BirdId | null>(null);
+  const [birdEntranceSeq, setBirdEntranceSeq] = useState(0);
   useEffect(() => {
     if (flying) return;
     const phone = titleArt === "dawn" && window.matchMedia("(max-width: 700px) and (orientation: portrait)").matches;
-    const art = phone ? "sky-dawn-phone" : `sky-${titleArt}`;
-    const url = (id: BirdId) => (id === DEFAULT_BIRD ? `/title/${art}.jpg` : `/title/${art}-${id}.jpg`);
-    for (const bird of BIRDS) new Image().src = url(bird.id);
+    const cleanUrl = phone ? "/title/sky-dawn-phone-clean.jpg" : `/title/sky-${titleArt}-clean.jpg`;
+    new Image().src = cleanUrl;
+    for (const bird of BIRDS) {
+      new Image().src = `/title/bird-sky-${titleArt}-${bird.id}.png`;
+      new Image().src = `/title/card-${bird.id}.jpg`;
+    }
     let current = true;
     const next = new Image();
-    next.src = url(birdId);
+    next.src = `/title/bird-sky-${titleArt}-${birdId}.png`;
     next.decode().catch(() => {}).then(() => {
       if (current) setSkyBird(birdId);
     });
@@ -16585,6 +16588,13 @@ void main() {`,
       current = false;
     };
   }, [flying, titleArt, birdId]);
+  const pickTitleBird = (nextId: BirdId) => {
+    if (skyBird !== nextId) setLeavingSkyBird(skyBird);
+    setSkyBird(nextId);
+    setBirdEntranceSeq((seq) => seq + 1);
+    chooseBird(nextId);
+    setMenuOpen("");
+  };
   const temperature = `${localDigits(locale, Math.round(weather.temperature))}°`;
   const radioActive = radioStatus === "playing" || radioStatus === "buffering";
   const radioStateText = radioStatus === "playing" ? t.radioStatePlaying : radioStatus === "buffering" ? t.radioStateTuning : radioStatus === "paused" ? t.radioStatePaused : radioStatus === "error" ? t.radioStateLost : t.radioStateOff;
@@ -16653,7 +16663,27 @@ void main() {`,
             if (titleBeat === "title" && !(event.target as Element).closest("button, a")) setTitleBeat("menu");
           }}
         >
-          <div className="title-sky" data-art={titleArt} data-bird={skyBird} aria-hidden="true" />
+          <div className="title-sky" data-art={titleArt} data-bird={skyBird} aria-hidden="true">
+            <div className="title-sky-stage">
+              {leavingSkyBird && (
+                <div
+                  key={`out-${leavingSkyBird}-${birdEntranceSeq}`}
+                  className="sky-bird leaving"
+                  data-bird={leavingSkyBird}
+                  onAnimationEnd={() => setLeavingSkyBird((cur) => (cur === leavingSkyBird ? null : cur))}
+                >
+                  <span className="sky-bird-wing"><i className="sky-bird-sprite" /></span>
+                </div>
+              )}
+              <div
+                key={`in-${skyBird}-${birdEntranceSeq}`}
+                className={`sky-bird ${birdEntranceSeq > 0 ? "entering" : "initial"}`}
+                data-bird={skyBird}
+              >
+                <span className="sky-bird-wing"><i className="sky-bird-sprite" /></span>
+              </div>
+            </div>
+          </div>
           <div className="title-shade" aria-hidden="true" />
           <div className="title-top">
             <span className="title-mark"><HudIcon name="brand" className="brand-icon" />{t.titleNameA} {t.titleNameB}</span>
@@ -16679,7 +16709,7 @@ void main() {`,
             </button>
           </div>
 
-          <div className="title-menu" aria-hidden={titleBeat === "title"} inert={titleBeat === "title"}>
+          <div className="title-menu" data-menu-open={menuOpen || undefined} aria-hidden={titleBeat === "title"} inert={titleBeat === "title"}>
             <div className="menu-title">
               <h1 className="title-name"><span>{t.titleNameA}</span> <span>{t.titleNameB}</span></h1>
               <p>{selectedSite ? fill(t.menuSummary, { bird: t[selectedBird.name], place: placeName(locale, selectedSite.label) }) : fill(t.menuSummaryAnywhere, { bird: t[selectedBird.name] })}</p>
@@ -16696,10 +16726,7 @@ void main() {`,
                 <><BirdGlyph bird={selectedBird} className="tile-bird-glyph" />{t[selectedBird.name]}</>,
                 STRINGS[otherLocale][selectedBird.name],
                 BIRDS.map((bird) => (
-                  <BirdOption key={bird.id} bird={bird} selected={bird.id === birdId} name={t[bird.name]} note={t[bird.note]} onChoose={() => {
-                    chooseBird(bird.id);
-                    setMenuOpen("");
-                  }} />
+                  <BirdOption key={bird.id} bird={bird} selected={bird.id === birdId} name={t[bird.name]} note={t[bird.note]} onChoose={() => pickTitleBird(bird.id)} />
                 )),
               )}
               {menuTile(
